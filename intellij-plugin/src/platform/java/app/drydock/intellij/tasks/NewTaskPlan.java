@@ -56,7 +56,8 @@ public final class NewTaskPlan {
                          boolean writerActiveInMain, Function<AgentKind, Optional<String>> lastUsedModel,
                          Function<AgentKind, List<String>> modelSuggestions,
                          Function<AgentKind, ModelTiers> lastUsedTiers,
-                         Predicate<AgentKind> supportsSubagents) {
+                         Predicate<AgentKind> supportsSubagents,
+                         Predicate<AgentKind> evalAvailable) {
         public Inputs {
             Objects.requireNonNull(project, "project");
             Objects.requireNonNull(fixedWorktree, "fixedWorktree");
@@ -69,6 +70,7 @@ public final class NewTaskPlan {
             Objects.requireNonNull(modelSuggestions, "modelSuggestions");
             Objects.requireNonNull(lastUsedTiers, "lastUsedTiers");
             Objects.requireNonNull(supportsSubagents, "supportsSubagents");
+            Objects.requireNonNull(evalAvailable, "evalAvailable");
         }
 
         /** Today's signature, delegating with {@code branchAttribution = ""}: a dialog whose
@@ -82,7 +84,7 @@ public final class NewTaskPlan {
                       Predicate<AgentKind> supportsSubagents) {
             this(project, repoName, fixedWorktree, agents, preselected, defaultStart, startPoints,
                     remoteNames, takenBranches, worktreeBase, "", writerActiveInMain, lastUsedModel,
-                    modelSuggestions, lastUsedTiers, supportsSubagents);
+                    modelSuggestions, lastUsedTiers, supportsSubagents, kind -> false);
         }
     }
 
@@ -111,7 +113,7 @@ public final class NewTaskPlan {
     public record Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
                          String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
                          Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox,
-                         Optional<PullRequestTarget> targetPullRequest) {
+                         Optional<PullRequestTarget> targetPullRequest, boolean eval) {
         public Choice {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(instructions, "instructions");
@@ -125,18 +127,26 @@ public final class NewTaskPlan {
 
         public Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
                       String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
-                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox) {
+                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule) {
             this(name, instructions, agent, mode, workIn, branch, start, folder, openIn, model, tiers,
-                    subagentModelRule, onWorkspaceBox, Optional.empty());
+                    subagentModelRule, false);
         }
 
         /** Today's signature, delegating with {@code onWorkspaceBox = false}: a launch that
          * never saw the checkbox is a local launch, exactly as before the component existed. */
         public Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
                       String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
-                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule) {
+                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox) {
             this(name, instructions, agent, mode, workIn, branch, start, folder, openIn, model, tiers,
-                    subagentModelRule, false);
+                    subagentModelRule, onWorkspaceBox, Optional.empty(), false);
+        }
+
+        public Choice(String name, Optional<String> instructions, AgentKind agent, SessionMode mode, WorkIn workIn,
+                      String branch, String start, Path folder, OpenIn openIn, Optional<String> model,
+                      Optional<ModelTiers> tiers, Optional<String> subagentModelRule, boolean onWorkspaceBox,
+                      Optional<PullRequestTarget> targetPullRequest) {
+            this(name, instructions, agent, mode, workIn, branch, start, folder, openIn, model, tiers,
+                    subagentModelRule, onWorkspaceBox, targetPullRequest, false);
         }
     }
 

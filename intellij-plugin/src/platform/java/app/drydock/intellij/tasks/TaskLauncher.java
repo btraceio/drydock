@@ -1234,7 +1234,8 @@ public final class TaskLauncher {
                             .orElseGet(() -> defaultStart(defaultBranch, startPoints, listing.remotes())),
                     startPoints,
                     listing.remotes(), taken, worktreeBase, branchAttribution, writerActive, lastUsedModel,
-                    registry::modelSuggestions, lastUsedTiers, registry::supportsSubagents));
+                    registry::modelSuggestions, lastUsedTiers, registry::supportsSubagents,
+                    registry::evalAvailable));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Optional.empty();
@@ -1465,7 +1466,8 @@ public final class TaskLauncher {
                         tracked.launched(SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
                                 choice.agent(), choice.name(), choice.mode(),
                                 NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
-                                preparedSession, bindings, Optional.empty(), choice.targetPullRequest()));
+                                preparedSession, bindings, Optional.empty(), choice.targetPullRequest(),
+                                choice.eval()));
                     } catch (RuntimeException e) {
                         LOG.log(Level.WARNING, "Could not open the task's window", e);
                         report(from, "Could not start \"" + choice.name() + "\": " + WorktreeErrors.visibleMessage(e));
