@@ -100,7 +100,7 @@ public class InboxSearchFieldPlatformTest extends BasePlatformTestCase {
     }
 
     public void testTheChipChangesThePlaceholderAndBackspaceRemovesIt() {
-        assertEquals("Search, or type project:", field.getEmptyText().getText());
+        assertEquals("Search, or type project:, pr:, issue:", field.getEmptyText().getText());
         field.showProject(Optional.of(BETA));
         assertEquals("Search in project", field.getEmptyText().getText());
         assertTrue("the chip is an extension before the text",

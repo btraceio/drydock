@@ -222,6 +222,14 @@
                 description="Start an agent on a new task from this branch">
             <add-to-group group-id="Git.Branch" anchor="first"/>
         </action>
+        <!-- The tool window's scope gesture, keymap-assignable: focus this
+             window's project (registering it first when needed). The
+             toolbar button inside the window shares the same panel logic;
+             this registration exists so Keymap settings can bind it. -->
+        <action id="Drydock.FocusProject"
+                class="app.drydock.intellij.tasks.FocusProjectAction"
+                text="Focus Drydock on This Project"
+                description="Show only this window's project in the Drydock tool window"/>
         <!-- The delayed-task layer's tree actions (T20a): the Drydock tree's
              task-node context menu. Status writes ride the task service's
              actor-aware seam (an agent may never drop, T07), Go to blocker

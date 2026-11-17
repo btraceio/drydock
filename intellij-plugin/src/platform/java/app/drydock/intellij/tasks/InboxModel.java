@@ -21,7 +21,6 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -237,8 +236,14 @@ final class InboxModel {
         }
     }
 
-    /** A placed item, before the query narrows it. */
-    private record Placed(GroupKind kind, Item item) {
+    /**
+     * A placed item, before the query narrows it, with the pull requests
+     * and issues it can be matched against: a session's own and its
+     * attached tasks' links, a task's own ones. Empty lists are normal —
+     * a row with no PR link matches no {@code pr:} term.
+     */
+    private record Placed(GroupKind kind, Item item, List<SearchTerms.PrRef> pullRequests,
+                          List<SearchTerms.IssueRef> issues) {
     }
 
     private InboxModel() {
@@ -256,20 +261,16 @@ final class InboxModel {
                 : Optional.empty();
     }
 
-    /** The search text without its {@code is:<group>} words: what titles elsewhere are matched by. Pure. */
+    /** The search text without its {@code is:<group>} words and {@code pr:}/{@code issue:} terms: what
+     *  titles elsewhere are matched by. Pure. */
     static String titleText(String text) {
-        List<String> words = new ArrayList<>();
-        for (String word : (text == null ? "" : text.strip()).split("\\s+")) {
-            boolean groupWord = word.regionMatches(true, 0, "is:", 0, 3) && kindOf(word.substring(3)).isPresent();
-            if (!groupWord && !word.isEmpty()) {
-                words.add(word);
-            }
-        }
-        return String.join(" ", words);
+        return SearchTerms.parse(text, InboxModel::kindOf).plainText();
     }
 
     static Inbox build(Inputs in, Query query) {
-        List<Placed> placed = place(in);
+        SearchTerms<GroupKind> terms = SearchTerms.parse(query.text(), InboxModel::kindOf);
+        boolean matchReferences = !terms.pullRequests().isEmpty() || !terms.issues().isEmpty();
+        List<Placed> placed = place(in, matchReferences);
 
         Map<Path, Integer> activeByRoot = new LinkedHashMap<>();
         for (Placed one : placed) {
@@ -285,18 +286,8 @@ final class InboxModel {
                 .toList();
         int quiet = (int) projects.stream().filter(suggestion -> suggestion.active() == 0).count();
 
-        Set<GroupKind> only = new HashSet<>();
-        List<String> words = new ArrayList<>();
-        for (String word : query.text().split("\\s+")) {
-            Optional<GroupKind> kind = word.regionMatches(true, 0, "is:", 0, 3) ? kindOf(word.substring(3))
-                    : Optional.empty();
-            if (kind.isPresent()) {
-                only.add(kind.get());
-            } else if (!word.isEmpty()) {
-                words.add(word);
-            }
-        }
-        String needle = String.join(" ", words).toLowerCase(Locale.ROOT);
+        Set<GroupKind> only = terms.groupKinds();
+        String needle = terms.plainText().toLowerCase(Locale.ROOT);
 
         Map<GroupKind, List<Item>> grouped = new EnumMap<>(GroupKind.class);
         for (Placed one : placed) {
@@ -310,6 +301,9 @@ final class InboxModel {
             if (!needle.isEmpty() && !one.item().title().toLowerCase(Locale.ROOT).contains(needle)) {
                 continue;
             }
+            if (!terms.matchPullRequests(one.pullRequests()) || !terms.matchIssues(one.issues())) {
+                continue;
+            }
             grouped.computeIfAbsent(one.kind(), any -> new ArrayList<>()).add(one.item());
         }
         // is:done also shows done tasks with no done_at, or done before today.
@@ -321,8 +315,12 @@ final class InboxModel {
                     continue;
                 }
                 TaskItem item = new TaskItem(row, projectOf(in, row));
+                SearchRefs.ItemRefs refs = matchReferences ? SearchRefs.looseTaskRefs(row) : null;
+                List<SearchTerms.PrRef> pullRequests = refs == null ? List.of() : refs.pullRequests();
+                List<SearchTerms.IssueRef> issues = refs == null ? List.of() : refs.issues();
                 if (query.project().isPresent() && !item.project().map(ProjectRef::root).equals(query.project())
-                        || !needle.isEmpty() && !item.title().toLowerCase(Locale.ROOT).contains(needle)) {
+                        || !needle.isEmpty() && !item.title().toLowerCase(Locale.ROOT).contains(needle)
+                        || !terms.matchPullRequests(pullRequests) || !terms.matchIssues(issues)) {
                     continue;
                 }
                 grouped.computeIfAbsent(GroupKind.DONE, any -> new ArrayList<>()).add(item);
@@ -334,7 +332,7 @@ final class InboxModel {
         return new Inbox(groups, projects, quiet);
     }
 
-    private static Optional<GroupKind> kindOf(String token) {
+    static Optional<GroupKind> kindOf(String token) {
         for (GroupKind kind : GroupKind.values()) {
             if (kind.token().equalsIgnoreCase(token)) {
                 return Optional.of(kind);
@@ -344,7 +342,7 @@ final class InboxModel {
     }
 
     /** Every item in its group, in group order and then each group's own order. */
-    private static List<Placed> place(Inputs in) {
+    private static List<Placed> place(Inputs in, boolean matchReferences) {
         Map<String, SessionAt> sessions = new LinkedHashMap<>();
         collectSessions(in.nodes(), Optional.empty(), sessions);
 
@@ -367,12 +365,21 @@ final class InboxModel {
             List<String> titles = children.stream()
                     .filter(child -> child.presentation() == TaskState.Presentation.STARTED)
                     .map(DelayedTaskRow::title).toList();
-            placed.add(new Placed(sessionKind(at.row()), new SessionItem(at.row(), at.project(), titles)));
+            SearchRefs.ItemRefs refs = matchReferences ? SearchRefs.sessionRefs(at.row(), children) : null;
+            List<SearchTerms.PrRef> pullRequests = refs == null ? List.of() : refs.pullRequests();
+            List<SearchTerms.IssueRef> issues = refs == null ? List.of() : refs.issues();
+            placed.add(new Placed(sessionKind(at.row()), new SessionItem(at.row(), at.project(), titles),
+                    pullRequests, issues));
         }
         LocalDate today = LocalDate.ofInstant(in.now(), in.zone());
         for (DelayedTaskRow row : loose) {
             taskKind(row, in.documents().get(row.id()), today, in.zone())
-                    .ifPresent(kind -> placed.add(new Placed(kind, new TaskItem(row, projectOf(in, row)))));
+                    .ifPresent(kind -> {
+                        SearchRefs.ItemRefs refs = matchReferences ? SearchRefs.looseTaskRefs(row) : null;
+                        List<SearchTerms.PrRef> pullRequests = refs == null ? List.of() : refs.pullRequests();
+                        List<SearchTerms.IssueRef> issues = refs == null ? List.of() : refs.issues();
+                        placed.add(new Placed(kind, new TaskItem(row, projectOf(in, row)), pullRequests, issues));
+                    });
         }
         placed.sort(Comparator.comparing(Placed::kind));
         return placed;
@@ -386,6 +393,13 @@ final class InboxModel {
             return GroupKind.FLAGGED;
         }
         return row.running() ? GroupKind.RUNNING : GroupKind.IDLE;
+    }
+
+    /** Whether a loose task can appear for this query's group semantics, shared with tree item matching. */
+    static boolean searchableTask(Inputs in, DelayedTaskRow row, boolean includeAllDone, Instant now, ZoneId zone) {
+        TaskDocument document = in.documents().get(row.id());
+        return taskKind(row, document, LocalDate.ofInstant(now, zone), zone).isPresent()
+                || includeAllDone && document != null && document.status() == TaskStatus.DONE;
     }
 
     private static Optional<GroupKind> taskKind(DelayedTaskRow row, TaskDocument document, LocalDate today,
@@ -403,14 +417,20 @@ final class InboxModel {
     }
 
     private static Optional<ProjectRef> projectOf(Inputs in, DelayedTaskRow row) {
-        Path root = in.taskRoots().get(row.repository());
+        Path root = registeredTaskRoot(in.taskRoots(), in.projects(), row).orElse(null);
         if (root == null) {
             return Optional.empty();
         }
-        return in.projects().stream()
-                .filter(project -> project.root().equals(root))
-                .findFirst()
+        return in.projects().stream().filter(project -> project.root().equals(root)).findFirst()
                 .map(project -> new ProjectRef(root, project.displayName()));
+    }
+
+    /** The registered main root a delayed task resolves to, shared with the tree's search candidates. */
+    static Optional<Path> registeredTaskRoot(Map<RepositoryId, Path> taskRoots, List<SharedProject> projects,
+                                             DelayedTaskRow row) {
+        Path root = taskRoots.get(row.repository());
+        return root != null && projects.stream().anyMatch(project -> project.root().equals(root))
+                ? Optional.of(root) : Optional.empty();
     }
 
     /** A session row and the project whose rows it came from. */
