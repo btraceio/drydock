@@ -4,8 +4,19 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.random.RandomGenerator;
 
-/** Local, task-independent names for branches created by the New task dialog. */
+/**
+ * Local, task-independent names for branches created by the New task dialog.
+ *
+ * <p>Every generated branch is prefixed {@code drydock/} so it namespaces
+ * away from hand-named branches, and carries an attribution token ({@link
+ * BranchAttribution}) so two people's generated branches on one repository
+ * are distinguishable: {@code drydock/jb-lively-coral-caribou}. Without a
+ * token the plain prefixed name stands: {@code drydock/lively-coral-caribou}.</p>
+ */
 final class TaskBranchNames {
+
+    /** The prefix every generated task branch carries. Also a valid refname component. */
+    static final String PREFIX = "drydock/";
 
     private static final String[] MOODS = {
             "bouncy", "brave", "breezy", "bright", "brisk", "bubbly", "calm", "cheerful",
@@ -39,23 +50,34 @@ final class TaskBranchNames {
     private TaskBranchNames() { }
 
     static String generate(Set<String> taken) {
-        return generate(taken, ThreadLocalRandom.current());
+        return generate(taken, "");
     }
 
-    static String generate(Set<String> taken, RandomGenerator random) {
+    static String generate(Set<String> taken, String attribution) {
+        return generate(taken, attribution, ThreadLocalRandom.current());
+    }
+
+    static String generate(Set<String> taken, String attribution, RandomGenerator random) {
         int combinations = MOODS.length * TEXTURES.length * ANIMALS.length;
         int index = random.nextInt(combinations);
         // Each word list has a power-of-two size, so an odd stride visits every combination.
         // Keep those sizes: collisions must not trap the search in a subset of the names.
         int stride = 2 * random.nextInt(combinations / 2) + 1;
         for (int tried = 0; tried < combinations; tried++) {
-            String candidate = nameAt(index);
+            String candidate = prefixed(nameAt(index), attribution);
             if (!taken.contains(candidate)) {
                 return candidate;
             }
             index = (index + stride) % combinations;
         }
         throw new IllegalStateException("All generated worktree branch names are in use.");
+    }
+
+    /** {@code drydock/[<attribution>-]<name>}; a blank attribution carries no token. */
+    static String prefixed(String name, String attribution) {
+        return attribution == null || attribution.isBlank()
+                ? PREFIX + name
+                : PREFIX + attribution + "-" + name;
     }
 
     private static String nameAt(int index) {

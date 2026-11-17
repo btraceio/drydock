@@ -610,6 +610,26 @@ public final class GitStatusService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> defaultBranchBlocking(repositoryRoot), executor);
     }
 
+    /**
+     * The effective {@code user.name} git would stamp commits with in
+     * {@code repositoryRoot} (repository config overriding global/system),
+     * or empty when git has none. An unset name is an ANSWER, not a
+     * failure -- callers derive an attribution token from it and have
+     * their own fallback -- so this probe tolerates the non-zero exit
+     * {@code git config --get} returns when the key is missing.
+     */
+    public CompletableFuture<Optional<String>> userName(Path repositoryRoot) {
+        return CompletableFuture.supplyAsync(() -> userNameBlocking(repositoryRoot), executor);
+    }
+
+    /** Synchronous form of {@link #userName}, package-private for tests. */
+    Optional<String> userNameBlocking(Path repositoryRoot) {
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        return runLinesAllowingFailure(git, repositoryRoot, List.of("config", "--get", "user.name"))
+                .stream().findFirst();
+    }
+
     /** Synchronous form of {@link #defaultBranch}, package-private for tests. */
     Optional<String> defaultBranchBlocking(Path repositoryRoot) {
         Path git = locator.locate()

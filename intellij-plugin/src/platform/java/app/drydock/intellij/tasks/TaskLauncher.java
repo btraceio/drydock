@@ -1196,6 +1196,20 @@ public final class TaskLauncher {
             String defaultBranch = git.defaultBranch(mainRoot).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                     .orElse("main");
             BranchListing listing = git.listBranches(mainRoot).get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // Already off the EDT: the effective user.name feeds the generated
+            // branch's attribution token ("" when nothing derives -- the dialog
+            // must open either way, so a failed or timed-out probe is an empty answer).
+            Optional<String> userName;
+            try {
+                userName = git.userName(mainRoot)
+                        .handle((name, failure) -> failure == null ? name : Optional.<String>empty())
+                        .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                LOG.log(Level.WARNING, "Timed out reading git user.name; continuing without branch attribution", e);
+                userName = Optional.empty();
+            }
+            String branchAttribution = BranchAttribution.token(userName.orElse(null),
+                    System.getProperty("user.name"));
             List<String> startPoints = new ArrayList<>(listing.branches().stream().map(BranchRef::name).toList());
             // Local names only are taken: a new worktree's branch is local.
             Set<String> taken = listing.branches().stream().filter(ref -> !ref.remote()).map(BranchRef::name)
@@ -1219,7 +1233,7 @@ public final class TaskLauncher {
                     start.filter(startPoints::contains)
                             .orElseGet(() -> defaultStart(defaultBranch, startPoints, listing.remotes())),
                     startPoints,
-                    listing.remotes(), taken, worktreeBase, writerActive, lastUsedModel,
+                    listing.remotes(), taken, worktreeBase, branchAttribution, writerActive, lastUsedModel,
                     registry::modelSuggestions, lastUsedTiers, registry::supportsSubagents));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

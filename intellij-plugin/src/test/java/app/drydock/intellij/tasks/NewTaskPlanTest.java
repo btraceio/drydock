@@ -46,6 +46,14 @@ class NewTaskPlanTest {
     }
 
     @Test
+    void folderOfAPrefixedGeneratedBranchDropsThePrefixComponent() {
+        // WorktreeNaming.slug keeps only the branch tail past the last '/':
+        // the drydock/ prefix never duplicates into the folder name.
+        assertEquals(Path.of("/b/drydock-jb-lively-coral-caribou"),
+                NewTaskPlan.folderFor(Path.of("/b"), "drydock", "drydock/jb-lively-coral-caribou"));
+    }
+
+    @Test
     void summaryNewWorktreeExactCopy() {
         Choice choice = choice("Task-centric tool window", Optional.empty(), SessionMode.WRITES, WorkIn.NEW_WORKTREE,
                 "task-centric-tool-window", Path.of("/b/drydock-task-centric-tool-window"));

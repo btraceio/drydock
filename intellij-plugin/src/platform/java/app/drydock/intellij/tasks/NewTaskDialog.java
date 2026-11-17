@@ -192,7 +192,7 @@ final class NewTaskDialog extends DialogWrapper {
         this.inputs = inputs;
         this.refChooser = refChooser;
         this.preset = preset;
-        this.generatedBranch = TaskBranchNames.generate(inputs.takenBranches());
+        this.generatedBranch = TaskBranchNames.generate(inputs.takenBranches(), inputs.branchAttribution());
         this.worktreeBase = inputs.worktreeBase();
         instructions.setText(preset.instructions().orElse(""));
         if (preset.fixedMode().orElse(null) == SessionMode.READ_ONLY) {
