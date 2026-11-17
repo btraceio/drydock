@@ -11,8 +11,11 @@ package app.drydock.agent.providers.pi.internal;
  *
  * <p>The state mapping mirrors Claude's observable behavior: a run marks
  * {@code busy}; a blocking user-facing prompt (Claude's {@code
- * permission_prompt}) marks {@code attention} at once; a settled run marks
- * {@code idle} (Claude's {@code Stop}), and only after
+ * permission_prompt}) marks {@code attention} at once; a run blocked inside
+ * a background-wait tool ({@code bg_wait}) marks {@code bg} for as long as
+ * such a call is in flight -- the model parked itself on async work and
+ * resumes on its own, so this is informational, not a "needs you" state; a
+ * settled run marks {@code idle} (Claude's {@code Stop}), and only after
  * {@link #IDLE_ATTENTION_MS} of no user input does it escalate to {@code
  * attention} -- Claude turns amber about a minute after finishing a turn
  * (its {@code idle_prompt} notification), not the second it stops, and the
@@ -25,9 +28,9 @@ public final class PiActivityExtensionSource {
 
     public static final String SOURCE = """
             // Managed by Drydock -- regenerated on launch; do not edit.
-            // Reports this session's state for the "needs you" badge: a state word
-            // (busy|idle|attention) in $DRYDOCK_ACTIVITY_DIR/<session id>, the same
-            // contract as the Claude hook script.
+            // Reports this session's state for the status badge: a state word
+            // (busy|bg|idle|attention) in $DRYDOCK_ACTIVITY_DIR/<session id>,
+            // the same contract as the Claude hook script.
             import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
             // Claude escalates an idle session to attention about a minute after
@@ -44,6 +47,13 @@ public final class PiActivityExtensionSource {
               // overwrite a newer state (input, a new run, a prompt ended).
               let generation = 0;
               let timer: ReturnType<typeof setTimeout> | undefined;
+
+              // Tool call ids of bg_wait executions currently in flight. While
+              // any is in flight the run is alive but parked on async work, and
+              // the reported word is "bg" rather than "busy".
+              const bgWaits = new Set<string>();
+
+              const busyWord = (): string => (bgWaits.size > 0 ? "bg" : "busy");
 
               const target = (ctx: any): string | undefined => {
                 try {
@@ -115,18 +125,35 @@ public final class PiActivityExtensionSource {
                 write(ctx, "attention");
               });
               pi.on("ui_prompt_end", (_event: any, ctx: any) => {
-                write(ctx, "busy");
+                write(ctx, busyWord());
+              });
+              // A run parked inside bg_wait reports "bg" for exactly the call's
+              // duration. Parallel calls are tracked per id, so the word only
+              // drops back to "busy" when the last one ends.
+              pi.on("tool_execution_start", (event: any, ctx: any) => {
+                if (event?.toolName !== "bg_wait") return;
+                bgWaits.add(event.toolCallId);
+                cancelIdle();
+                write(ctx, "bg");
+              });
+              pi.on("tool_execution_end", (event: any, ctx: any) => {
+                if (!bgWaits.delete(event?.toolCallId)) return;
+                if (bgWaits.size === 0) write(ctx, busyWord());
               });
               // Settled means no retry, compaction, or queued continuation will
               // follow: the run is over and pi is waiting. Idle first, attention
               // only if the user stays away.
               pi.on("agent_settled", (_event: any, ctx: any) => {
+                // A settled run cannot still hold a bg_wait (it blocks the
+                // turn); drop any stray id so a later run never inherits it.
+                bgWaits.clear();
                 write(ctx, "idle");
                 armIdle(ctx);
               });
               // No process survives a shutdown; a state file left behind would
               // badge a dead session until the next startup purge.
               pi.on("session_shutdown", (_event: any, ctx: any) => {
+                bgWaits.clear();
                 cancelIdle();
                 clear(ctx);
               });

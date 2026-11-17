@@ -305,6 +305,7 @@ final class TourOutline extends VBox {
         pendingElapsedValue.setText(clock(progress.elapsedSeconds()));
         pendingActivityValue.setText(switch (progress.activity()) {
             case BUSY -> "busy";
+            case WAITING_BACKGROUND -> "waiting on bg";
             case IDLE -> "idle";
             case NEEDS_ATTENTION -> "needs attention";
             case UNKNOWN -> "—";
