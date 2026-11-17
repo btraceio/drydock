@@ -219,6 +219,12 @@ java {
     withJavadocJar()
 }
 
+// withSourcesJar() also consumes main resources; make its generated highlighter
+// input depend on the task that produces it, just like processResources does.
+tasks.named("sourcesJar") {
+    dependsOn("buildHighlighterBundle")
+}
+
 // JavaFX 26. The javafx-gradle-plugin resolves the correct platform
 // classifier (mac / mac-aarch64) for the JVM actually running the build,
 // which already gives us dev-time support on both Intel and Apple Silicon
