@@ -6,24 +6,39 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.ui.SessionDots;
 
+import com.intellij.icons.AllIcons;
+import com.intellij.ide.DataManager;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.ActionLink;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
-import com.intellij.util.ui.WrapLayout;
+
+import org.jetbrains.annotations.NotNull;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.Icon;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
+import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.FocusAdapter;
@@ -33,21 +48,24 @@ import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
  * The band above an agent console: what the session is, and the commands
- * that apply to it — a wrapping ribbon of icon+text buttons rather than a
- * single clipped line (A4).
+ * that apply to it — one row of borderless toolbar buttons, with the rare
+ * commands behind a {@code ⋯} menu.
  *
  * <p>Structure and copy come from the UX handoff; every colour and inset comes
  * from the LaF, so the strip reads as part of the IDE in any theme. The one
  * exception is the status dot, whose palette is drydock's own
- * ({@link SessionDots}). The first child is one identity panel (title, state,
- * chip, secondary, provenance) so the session stays readable as a unit; the
- * commands after it wrap onto further rows instead of ever hiding Done (A5).
+ * ({@link SessionDots}). The identity panel (title, state, chip, secondary,
+ * provenance) takes the left; the commands sit right-aligned. When the editor
+ * is too narrow for the labels, Changes and then the lifecycle command drop
+ * to icon-only (their text becomes the tooltip) so Done is never hidden (A5).
  * Which command exists, which is clickable and what the lifecycle one says
  * are not decided here — {@link SessionCommands} decides for every surface,
  * and the strip only places the buttons.</p>
@@ -97,11 +115,27 @@ final class AgentConsoleStrip extends JPanel {
     private String titleText = "";
     /** The editor's action handler, kept for the title link's single click. */
     private final Consumer<StripAction> onAction;
-    private final JButton openWindow;
-    private final JButton changes;
-    private final JButton transfer;
-    private final JButton primary = new JButton();
-    private final JButton done;
+    private final StripToolbarButton changes;
+    private final StripToolbarButton primary = new StripToolbarButton("", null);
+    private final StripToolbarButton done;
+    /** The {@code ⋯} button; shown only while at least one overflow item is. */
+    private final StripToolbarButton more;
+    private final JComponent separator = new JComponent() {
+        @Override
+        public Dimension getPreferredSize() {
+            return new Dimension(JBUI.scale(9), JBUI.scale(16));
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            g.setColor(JBColor.border());
+            g.fillRect(getWidth() / 2, 0, 1, getHeight());
+        }
+    };
+    /** The right-aligned command group: Changes | primary, Done, more. */
+    private final JPanel commands = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(2), 0));
+    /** The overflow items, in menu order; their visibility and enablement are set by {@link #update}. */
+    private final List<OverflowItem> overflow = new ArrayList<>();
 
     /** Which action {@link #primary} currently performs; see {@link #update}. */
     private StripAction primaryAction = StripAction.START;
@@ -117,22 +151,28 @@ final class AgentConsoleStrip extends JPanel {
         // click of a double-click pair.
         this.title = new ActionLink("", (ActionListener) event -> { });
         installTitleClicks();
-        this.openWindow = commandButton(StripAction.OPEN_PROJECT_WINDOW,
-                SessionCommands.Command.OWN_PROJECT);
         this.changes = commandButton(StripAction.SHOW_CHANGES, SessionCommands.Command.CHANGES);
-        this.transfer = commandButton(StripAction.TRANSFER, SessionCommands.Command.TRANSFER);
         this.done = commandButton(StripAction.DONE, SessionCommands.Command.DONE);
         this.done.setToolTipText("Done with this session…");
-        primary.setMargin(JBUI.insets(1, 6));
         primary.addActionListener(event -> onAction.accept(primaryAction));
+        this.more = new StripToolbarButton(AgentStripText.MORE_ACTIONS, AllIcons.Actions.More);
+        more.setCompact(true);
+        more.getAccessibleContext().setAccessibleName(AgentStripText.MORE_ACTIONS);
+        more.addActionListener(event -> showOverflow());
+        overflow.add(new OverflowItem(AgentStripText.OPEN_IN_PROJECT_WINDOW,
+                SessionCommands.Command.OWN_PROJECT.icon(), StripAction.OPEN_PROJECT_WINDOW,
+                "Drydock.AgentTab.OwnProject"));
+        overflow.add(new OverflowItem(AgentStripText.TRANSFER_TO_PROVIDER,
+                SessionCommands.Command.TRANSFER.icon(), StripAction.TRANSFER,
+                "Drydock.AgentTab.Transfer"));
 
-        // WrapLayout, not a fixed-height single row: a narrow editor grows a
-        // second row instead of clipping the last command (A4, A5).
-        setLayout(new WrapLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(4)));
+        // One row; a narrow editor drops labels to icons (see doLayout)
+        // rather than wrapping or clipping the last command (A4, A5).
+        setLayout(new BorderLayout(JBUI.scale(16), 0));
         setBackground(UIUtil.getPanelBackground());
         setBorder(JBUI.Borders.compound(
                 JBUI.Borders.customLineBottom(JBColor.border()),
-                JBUI.Borders.empty(0, 10)));
+                JBUI.Borders.empty(5, 12, 5, 6)));
 
         title.setFont(title.getFont().deriveFont(Font.BOLD));
         title.setToolTipText("Rename session");
@@ -157,20 +197,136 @@ final class AgentConsoleStrip extends JPanel {
         identity.add(Box.createHorizontalStrut(JBUI.scale(12)));
         identity.add(provenance);
 
-        add(identity);
-        add(openWindow);
-        add(changes);
-        add(transfer);
-        add(primary);
-        add(done);
+        commands.setOpaque(false);
+        commands.add(changes);
+        commands.add(separator);
+        commands.add(primary);
+        commands.add(done);
+        commands.add(more);
+
+        add(identity, BorderLayout.CENTER);
+        add(commands, BorderLayout.EAST);
     }
 
-    /** A command button — icon and text from the shared command, compact margins. */
-    private JButton commandButton(StripAction action, SessionCommands.Command command) {
-        JButton button = new JButton(command.label(), command.icon());
-        button.setMargin(JBUI.insets(1, 6));
+    /** A command button — icon and text from the shared command. */
+    private StripToolbarButton commandButton(StripAction action, SessionCommands.Command command) {
+        StripToolbarButton button = new StripToolbarButton(command.label(), command.icon());
         button.addActionListener(event -> onAction.accept(action));
         return button;
+    }
+
+    /**
+     * One entry of the {@code ⋯} menu. Visibility and enablement are the
+     * strip's {@link #update} verdicts, so the menu never decides what a
+     * command's rules are. The shortcut shown, if any, is the one registered
+     * for the tab action that performs the same command.
+     */
+    private final class OverflowItem {
+        final String text;
+        final Icon icon;
+        final StripAction action;
+        final String tabActionId;
+        boolean visible;
+        boolean enabled;
+
+        OverflowItem(String text, Icon icon, StripAction action, String tabActionId) {
+            this.text = text;
+            this.icon = icon;
+            this.action = action;
+            this.tabActionId = tabActionId;
+        }
+
+        AnAction toAction() {
+            AnAction item = new DumbAwareAction(text, null, icon) {
+                @Override
+                public void actionPerformed(@NotNull AnActionEvent event) {
+                    onAction.accept(action);
+                }
+
+                @Override
+                public void update(@NotNull AnActionEvent event) {
+                    event.getPresentation().setEnabled(enabled);
+                }
+
+                @Override
+                public @NotNull ActionUpdateThread getActionUpdateThread() {
+                    return ActionUpdateThread.EDT;
+                }
+            };
+            AnAction registered = ActionManager.getInstance().getAction(tabActionId);
+            if (registered != null) {
+                item.copyShortcutFrom(registered);
+            }
+            return item;
+        }
+    }
+
+    /** The labels of the overflow items currently offered, in menu order. */
+    List<String> overflowItems() {
+        List<String> shown = new ArrayList<>();
+        for (OverflowItem item : overflow) {
+            if (item.visible) {
+                shown.add(item.text);
+            }
+        }
+        return shown;
+    }
+
+    /** The {@code ⋯} button; visible only while {@link #overflowItems} is non-empty. */
+    JComponent moreButton() {
+        return more;
+    }
+
+    private void showOverflow() {
+        DefaultActionGroup group = new DefaultActionGroup();
+        for (OverflowItem item : overflow) {
+            if (item.visible) {
+                group.add(item.toAction());
+            }
+        }
+        JBPopupFactory.getInstance()
+                .createActionGroupPopup(null, group, DataManager.getInstance().getDataContext(more),
+                        JBPopupFactory.ActionSelectionAid.MNEMONICS, true)
+                .showUnderneathOf(more);
+    }
+
+    /**
+     * Fits the commands to the width: Changes drops to its icon first, then
+     * the lifecycle command, before anything is clipped; Done and {@code ⋯}
+     * are already icon-sized or short. The identity keeps a floor of its
+     * title and state; secondary text and provenance clip first.
+     */
+    @Override
+    public void doLayout() {
+        Insets insets = getInsets();
+        int available = getWidth() - insets.left - insets.right;
+        int floor = JBUI.scale(50) + state.getPreferredSize().width + JBUI.scale(16);
+        int gap = JBUI.scale(2);
+        boolean changesCompact = false;
+        boolean primaryCompact = false;
+        if (getWidth() > 0 && commandsWidth(false, false, gap) + floor > available) {
+            changesCompact = true;
+            if (commandsWidth(true, false, gap) + floor > available) {
+                primaryCompact = true;
+            }
+        }
+        changes.setCompact(changesCompact);
+        primary.setCompact(primaryCompact);
+        super.doLayout();
+    }
+
+    private int commandsWidth(boolean changesCompact, boolean primaryCompact, int gap) {
+        int width = 0;
+        if (changes.isVisible()) {
+            width += (changesCompact ? changes.compactWidth() : changes.expandedWidth()) + gap
+                    + separator.getPreferredSize().width + gap;
+        }
+        width += (primaryCompact ? primary.compactWidth() : primary.expandedWidth()) + gap;
+        width += done.expandedWidth() + gap;
+        if (more.isVisible()) {
+            width += more.getPreferredSize().width + gap;
+        }
+        return width + gap;
     }
 
     /** The rename commit, wired by the owning editor; see {@link #onRenamed}. */
@@ -288,8 +444,7 @@ final class AgentConsoleStrip extends JPanel {
     @Override
     public Dimension getMaximumSize() {
         // Width stays unbounded so the strip stretches with the editor; the
-        // height is the layout's own — WrapLayout wraps onto another row
-        // instead of being clipped to one.
+        // height is the layout's own.
         return new Dimension(Integer.MAX_VALUE, super.getMaximumSize().height);
     }
 
@@ -379,6 +534,7 @@ final class AgentConsoleStrip extends JPanel {
         // The handoff puts Changes on the running strip only; a stopped
         // session's review is reached from the Commit tool window instead.
         changes.setVisible(running);
+        separator.setVisible(running);
         // A hosted tab's Changes opens in the agent's own window (F2/F3).
         changes.setText(hostedFrom.isPresent() ? "Changes ↗" : "Changes");
         // A checkout that is gone (a deleted worktree, or a directory that
@@ -393,12 +549,15 @@ final class AgentConsoleStrip extends JPanel {
         provenance.setVisible(hostedFrom.isPresent());
         // A jump only exists for a tab hosting another worktree's agent;
         // the owning window already is the project window (A8).
-        openWindow.setVisible(hostedFrom.isPresent());
-        openWindow.setEnabled(SessionCommands.ownProjectEnabled(commands));
+        OverflowItem openWindow = overflow.get(0);
+        openWindow.visible = hostedFrom.isPresent();
+        openWindow.enabled = SessionCommands.ownProjectEnabled(commands);
 
-        transfer.setVisible(running && !commands.transferring()
-                && SessionTransfer.available(session, activity));
-        transfer.setEnabled(!commands.moving());
+        OverflowItem transfer = overflow.get(1);
+        transfer.visible = running && !commands.transferring()
+                && SessionTransfer.available(session, activity);
+        transfer.enabled = !commands.moving();
+        more.setVisible(openWindow.visible || transfer.visible);
 
         SessionCommands.Lifecycle lifecycle = SessionCommands.lifecycle(commands);
         primaryAction = switch (lifecycle) {
