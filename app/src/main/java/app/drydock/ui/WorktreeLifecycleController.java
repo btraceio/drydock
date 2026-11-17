@@ -1,6 +1,7 @@
 package app.drydock.ui;
 
 import app.drydock.app.SessionManager;
+import app.drydock.app.UnknownSessionException;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
@@ -277,10 +278,7 @@ final class WorktreeLifecycleController {
                         return;
                     }
                     // Reconcile the observed PR (opened externally, merged
-                    // since, number drift) before choosing actions. CLOSED/
-                    // UNKNOWN make no lifecycle claim: a closed-unmerged PR
-                    // leaves the branch free to merge or re-PR, so the
-                    // tracked state stands.
+                    // since, number drift) before choosing actions.
                     if (prInfo.isPresent()) {
                         GhCliService.PrInfo info = prInfo.get();
                         PrState observed = switch (info.state()) {
@@ -288,15 +286,25 @@ final class WorktreeLifecycleController {
                             case MERGED -> PrState.MERGED;
                             case CLOSED, UNKNOWN -> null;
                         };
-                        if (observed != null && (observed != current.prState()
-                                || !current.prNumber().equals(Optional.of(info.number())))) {
-                            current = sessionManager.updatePrState(sessionId, observed,
-                                    Optional.of(info.number()));
-                            OpenSessionTab tab = openTab.apply(sessionId);
-                            if (tab != null) {
-                                tab.updatePrChip(current.prState(), current.prNumber());
+                        // Reconcile against the whole link set: the observed
+                        // PR may be the primary (state drift, number drift),
+                        // a known secondary (merged since), or a PR the
+                        // branch gained that drydock has not linked yet.
+                        // CLOSED/UNKNOWN make no lifecycle claim: a
+                        // closed-unmerged PR leaves the branch free to merge
+                        // or re-PR, so the tracked state stands.
+                        if (observed != null) {
+                            ManagedAgentSession reconciled =
+                                    current.withObservedPr(observed, info.number());
+                            if (reconciled != current) {
+                                current = sessionManager.reconcileObservedPr(sessionId,
+                                        observed, info.number());
+                                OpenSessionTab tab = openTab.apply(sessionId);
+                                if (tab != null) {
+                                    tab.updatePrChip(current.prState(), current.prNumber());
+                                }
+                                onSessionsChanged.run();
                             }
-                            onSessionsChanged.run();
                         }
                     }
 
@@ -646,10 +654,31 @@ final class WorktreeLifecycleController {
     }
 
     private void applyPrState(ManagedSessionId sessionId, PrState state, Optional<Integer> number) {
-        sessionManager.updatePrState(sessionId, state, number);
+        Optional<ManagedAgentSession> current = sessionById(sessionId);
+        if (current.isEmpty()) {
+            return;
+        }
+
+        ManagedAgentSession live;
+        try {
+            if (number.isPresent()) {
+                // A numbered observation reconciles against the whole link set:
+                // with a first PR already primary, the new PR appends as a
+                // secondary link instead of overwriting the primary.
+                live = sessionManager.reconcileObservedPr(sessionId, state, number.get());
+            } else {
+                // Check whether the primary is still empty in the atomic store
+                // update, not against the potentially stale snapshot above.
+                live = sessionManager.updatePrStateIfPrimaryEmpty(sessionId, state);
+            }
+        } catch (UnknownSessionException e) {
+            // The session may have been removed after the snapshot lookup.
+            return;
+        }
+
         OpenSessionTab tab = openTab.apply(sessionId);
         if (tab != null) {
-            tab.updatePrChip(state, number);
+            tab.updatePrChip(live.prState(), live.prNumber().or(() -> number));
         }
         onSessionsChanged.run();
     }
