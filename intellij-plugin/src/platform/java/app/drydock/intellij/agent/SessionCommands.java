@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
@@ -176,7 +177,8 @@ public final class SessionCommands {
     public record State(boolean running, boolean resumable, boolean starting, boolean stopping,
                         boolean moving, boolean transferring, boolean unsupportedAgent,
                         boolean detachedFromThisWindow,
-                        Optional<WorkspaceBoxBinding> box, Optional<RemoteSessionLiveness.State> liveness) {
+                        Optional<WorkspaceBoxBinding> box, Optional<RemoteSessionLiveness.State> liveness,
+                        Optional<SshRemote> sshRemote) {
 
         /**
          * As the canonical constructor with no remote facts: the state every
@@ -187,7 +189,16 @@ public final class SessionCommands {
                      boolean moving, boolean transferring, boolean unsupportedAgent,
                      boolean detachedFromThisWindow) {
             this(running, resumable, starting, stopping, moving, transferring, unsupportedAgent,
-                    detachedFromThisWindow, Optional.empty(), Optional.empty());
+                    detachedFromThisWindow, Optional.empty(), Optional.empty(), Optional.empty());
+        }
+
+        /** The state before the ssh-remote arm: a box row or a local row. */
+        public State(boolean running, boolean resumable, boolean starting, boolean stopping,
+                     boolean moving, boolean transferring, boolean unsupportedAgent,
+                     boolean detachedFromThisWindow,
+                     Optional<WorkspaceBoxBinding> box, Optional<RemoteSessionLiveness.State> liveness) {
+            this(running, resumable, starting, stopping, moving, transferring, unsupportedAgent,
+                    detachedFromThisWindow, box, liveness, Optional.empty());
         }
 
         /**
@@ -344,7 +355,8 @@ public final class SessionCommands {
                 session.status() == SessionStatus.UNSUPPORTED_AGENT,
                 running && !shownHere,
                 session.workspaceBox(),
-                remoteLivenessOf(session));
+                remoteLivenessOf(session),
+                sshRemoteOf(session));
     }
 
     /**
@@ -365,6 +377,23 @@ public final class SessionCommands {
             return Optional.empty();
         }
         return plugin.remoteSessionLiveness().state(session.id());
+    }
+
+    /**
+     * The SSH remote of {@code session}'s repository — the ssh-remote arm's
+     * remote fact, derived like the service derives it: from the session's
+     * per-install repository, a memory read. A box row reads nothing here
+     * (its remote is the binding's) and a local row reads empty.
+     */
+    private static Optional<SshRemote> sshRemoteOf(ManagedAgentSession session) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        if (plugin == null) {
+            return Optional.empty();
+        }
+        return plugin.stateStore().state().repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst()
+                .flatMap(repository -> Optional.ofNullable(repository.remote()));
     }
 
     /**

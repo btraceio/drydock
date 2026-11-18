@@ -2,6 +2,7 @@ package app.drydock.intellij.projects;
 
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SshRemote;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsException;
 import app.drydock.projects.SharedProjectsFile;
@@ -150,6 +151,48 @@ public final class SharedProjectsService {
             refresh();
             return result[0];
         }, executor);
+    }
+
+    /** Registers a repository living on a remote host (spec: SSH remote
+      * repositories): dedupes on the placeholder root's canonical form —
+      * the same duplicate detection a local registration runs, with the
+      * nonexistent placeholder falling back to normalized-string
+      * comparison — and persists the entry carrying the {@link SshRemote}.
+      * Completes with the already-registered project when the same
+      * host+path is added twice. Validation (that {@code remotePath} is a
+      * git toplevel on {@code host}) is the caller's; this service only
+      * registers what it is handed. Touches the disk: not on the EDT.
+      */
+    public CompletableFuture<SharedProject> registerRemote(SshRemote candidate) {
+        return CompletableFuture.supplyAsync(() -> {
+            Path canonical = RepositoryCatalog.canonicalize(candidate.placeholderRoot());
+            SharedProject[] result = new SharedProject[1];
+            try {
+                file.update(list -> {
+                    for (SharedProject existing : list) {
+                        if (RepositoryCatalog.canonicalize(existing.root()).equals(canonical)) {
+                            result[0] = existing;
+                            return list;
+                        }
+                    }
+                    result[0] = SharedProject.remote(RepositoryId.newId(), candidate,
+                            displayNameOf(candidate.remotePath()), Instant.now());
+                    List<SharedProject> next = new ArrayList<>(list);
+                    next.add(result[0]);
+                    return next;
+                }, appSeed);
+            } catch (SharedProjectsException e) {
+                throw new CompletionException(e);
+            }
+            refresh();
+            return result[0];
+        }, executor);
+    }
+
+    /** The display name the add flow defaults to: the remote path's last segment. */
+    static String displayNameOf(String remotePath) {
+        Path fileName = Path.of(remotePath).getFileName();
+        return fileName == null ? remotePath : fileName.toString();
     }
 
     /** Takes {@code id} off the shared list — for the app too. Touches nothing else. */

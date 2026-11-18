@@ -1,6 +1,7 @@
 package app.drydock.intellij.projects;
 
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SshRemote;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsFile;
 
@@ -187,5 +188,50 @@ class SharedProjectsServiceTest {
         service.refresh();
 
         assertFalse(Files.exists(file.file()));
+    }
+
+    @Test
+    void registerRemoteStoresThePlaceholderRootAndTheRemote() {
+        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        service.start().join();
+        SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
+
+        SharedProject registered = service.registerRemote(remote).join();
+
+        assertTrue(registered.isRemote());
+        assertEquals(Optional.of(remote), registered.remote());
+        assertEquals(remote.placeholderRoot(), registered.root());
+        assertEquals("engine", registered.displayName());
+        // The shared file is the app's too: a remote entry must round-trip
+        // through the same codec so both sides agree on the row.
+        List<SharedProject> stored = file.read().projects();
+        assertEquals(1, stored.size());
+        assertTrue(stored.get(0).isRemote());
+        assertEquals(Optional.of(remote), stored.get(0).remote());
+    }
+
+    @Test
+    void registerRemoteIsIdempotentOnTheSameHostAndPath() {
+        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        service.start().join();
+        SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
+
+        SharedProject first = service.registerRemote(remote).join();
+        SharedProject second = service.registerRemote(
+                new SshRemote("build-box", "/srv/work/engine")).join();
+
+        assertEquals(first, second);
+        assertEquals(1, file.read().projects().size(), "the duplicate must not add a second entry");
+    }
+
+    @Test
+    void aDifferentHostIsNotADuplicateOfTheSamePath() {
+        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        service.start().join();
+
+        service.registerRemote(new SshRemote("build-box", "/srv/work/engine")).join();
+        service.registerRemote(new SshRemote("other-box", "/srv/work/engine")).join();
+
+        assertEquals(2, file.read().projects().size(), "the placeholder root is unique per (host, path)");
     }
 }

@@ -7,7 +7,9 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.projects.SharedProject;
 
 import com.intellij.openapi.project.Project;
 
@@ -15,6 +17,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -40,17 +43,20 @@ public final class ProjectRepositoryService {
 
     private final CompletableFuture<Void> initialization;
     private final Supplier<ApplicationStateStore> stateStore;
+    private final Supplier<List<SharedProject>> sharedProjects;
     private final Executor executor;
 
     public ProjectRepositoryService(DrydockPluginService plugin, Executor executor) {
-        this(plugin.initialization(), plugin::stateStore, executor);
+        this(plugin.initialization(), plugin::stateStore,
+                () -> plugin.sharedProjects().projects(), executor);
     }
 
-    /** Test seam: the init gate, the store, and the executor, without the IDE. */
+    /** Test seam: the init gate, the store, the shared projects, and the executor, without the IDE. */
     ProjectRepositoryService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
-            Executor executor) {
+            Supplier<List<SharedProject>> sharedProjects, Executor executor) {
         this.initialization = initialization;
         this.stateStore = stateStore;
+        this.sharedProjects = Objects.requireNonNull(sharedProjects, "sharedProjects");
         this.executor = executor;
     }
 
@@ -97,9 +103,10 @@ public final class ProjectRepositoryService {
     }
 
     private Repository ensureRegistered(Path directory) {
+        List<SharedProject> projects = sharedProjects.get();
         Repository[] resolved = new Repository[1];
         stateStore.get().update(state -> {
-            Registration registration = ensureRegistered(state, directory);
+            Registration registration = ensureRegistered(state, directory, projects);
             resolved[0] = registration.repository();
             return registration.state();
         });
@@ -108,23 +115,35 @@ public final class ProjectRepositoryService {
 
     /**
      * The find-or-create: the repository whose canonical root matches
-     * {@code directory}'s, or a new registration under that root. The
-     * returned state is the same instance when nothing had to be added, so
-     * the single writer's equals check skips the save. Called inside the
-     * store's {@code update} transform, so it must stay quick and
-     * non-throwing — which is why the canonical-root probes are the only
-     * I/O it does (never a git process).
+     * {@code directory}'s, or a new registration under that root. A
+     * directory that is a registered <em>remote</em> shared project's
+     * placeholder root registers with that project's {@link SshRemote}
+     * carried over — the session launch paths derive a row's remote-ness
+     * from this repository, so a remote project whose repository was
+     * registered remote-less would silently launch locally in a directory
+     * that does not exist. The returned state is the same instance when
+     * nothing had to be added, so the single writer's equals check skips
+     * the save. Called inside the store's {@code update} transform, so it
+     * must stay quick and non-throwing — which is why the canonical-root
+     * probes are the only I/O it does (never a git process).
      */
-    static Registration ensureRegistered(ApplicationState state, Path directory) {
+    static Registration ensureRegistered(ApplicationState state, Path directory,
+            List<SharedProject> projects) {
         Path canonicalRoot = RepositoryCatalog.canonicalize(directory);
         Optional<Repository> existing = RepositoryCatalog.findByCanonicalRoot(state.repositories(), canonicalRoot);
         if (existing.isPresent()) {
             return new Registration(state, existing.get());
         }
         Instant now = Instant.now();
-        Repository created = new Repository(
-                RepositoryId.newId(), canonicalRoot, defaultDisplayName(canonicalRoot), now, now,
-                RepositorySettings.DEFAULT);
+        Repository created = projects.stream()
+                .filter(SharedProject::isRemote)
+                .filter(project -> RepositoryCatalog.canonicalize(project.root()).equals(canonicalRoot))
+                .findFirst()
+                .map(project -> new Repository(RepositoryId.newId(), canonicalRoot, project.displayName(),
+                        now, now, RepositorySettings.DEFAULT, project.remote().orElseThrow()))
+                .orElseGet(() -> new Repository(
+                        RepositoryId.newId(), canonicalRoot, defaultDisplayName(canonicalRoot), now, now,
+                        RepositorySettings.DEFAULT));
         List<Repository> updated = new ArrayList<>(state.repositories());
         updated.add(created);
         return new Registration(state.withRepositories(updated), created);

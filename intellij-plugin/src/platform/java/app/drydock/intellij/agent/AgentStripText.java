@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 
 import java.time.Duration;
@@ -136,6 +137,44 @@ public final class AgentStripText {
             case BOX_STOPPED -> "Box " + boxName + " is stopped; its conversations are unreachable";
             case BOX_GONE -> "Box " + boxName + " no longer exists";
         };
+    }
+
+    /**
+     * The status line an ssh-remote row's strip shows: the host name and the
+     * one fact this IDE actually has. There is no liveness probe in this arm
+     * — the agent does not outlive its ssh client, so a stopped row is
+     * stopped — and the activity monitor cannot see a remote agent (OQ10),
+     * so no working/idle word appears here either. An EXITED row reads the
+     * app's connection-lost rendering: any process exit on a remote tab is
+     * the ssh client's, not the agent's, so the copy says the session ended
+     * and names the resume instead of implying the agent finished.
+     */
+    public static String sshRemoteStatusText(boolean ownedHere, SessionStatus persisted, String host) {
+        String where = "on " + host;
+        if (ownedHere) {
+            return "Running · " + where;
+        }
+        return switch (persisted) {
+            case STARTING -> "Starting · " + where;
+            case STOPPING -> "Deactivating · " + where;
+            case EXITED -> "Session ended — resume to reconnect";
+            case IDLE, INACTIVE, FAILED, MISSING_WORKING_DIRECTORY, UNSUPPORTED_AGENT ->
+                    "Not running · " + where;
+            default -> "Unknown · " + where;
+        };
+    }
+
+    /** The ssh-remote row's tooltip: one sentence about where the agent runs
+      * and what Resume does, never a working/idle claim. */
+    public static String sshRemoteStatusTooltip(boolean ownedHere, SessionStatus persisted, String host) {
+        if (ownedHere) {
+            return "The agent runs on " + host + "; this window shows its live ssh console";
+        }
+        if (persisted == SessionStatus.EXITED) {
+            return "The ssh connection to " + host + " ended — the session's conversation is on that "
+                    + "host; Resume reconnects";
+        }
+        return "The agent runs on " + host + " when resumed";
     }
 
     /**

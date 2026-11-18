@@ -82,7 +82,7 @@ public class NewSessionSplitActionTest extends BasePlatformTestCase {
         assertTrue(entries.stream().allMatch(Entry::enabled));
     }
 
-    public void testARemoteEntryIsListedDisabledWithItsReasonAndAMissingLocalFolderStaysSelectable() {
+    public void testARemoteEntryIsEnabledLikeALocalOneAndAMissingLocalFolderStaysSelectable() {
         SharedProject remote = new SharedProject(RepositoryId.newId(),
                 new SshRemote("box", "/srv/repo").placeholderRoot(), "on-box", ADDED,
                 Optional.of(new SshRemote("box", "/srv/repo")));
@@ -95,9 +95,9 @@ public class NewSessionSplitActionTest extends BasePlatformTestCase {
 
         assertEquals(2, entries.size());
         Entry remoteEntry = entries.get(0);
-        assertEquals("on-box" + NewSessionSplitAction.REMOTE_SUFFIX, remoteEntry.text());
-        assertFalse(remoteEntry.enabled());
-        assertEquals(Optional.of(NewSessionSplitAction.REMOTE_REASON), remoteEntry.disabledReason());
+        assertEquals("on-box", remoteEntry.text());
+        assertTrue("a remote project's task dialog runs over ssh (the ssh-remote arm)",
+                remoteEntry.enabled());
         assertSame(remote, remoteEntry.target().orElseThrow());
         Entry missingEntry = entries.get(1);
         assertEquals("missing", missingEntry.text());
@@ -183,11 +183,9 @@ public class NewSessionSplitActionTest extends BasePlatformTestCase {
         Picker picker = split.openPicker(getProject(), new JPanel());
         complete();
         List<JMenuItem> items = items(picker);
-        assertEquals(List.of("one", "boxed" + NewSessionSplitAction.REMOTE_SUFFIX, "two"), items.stream().map(JMenuItem::getText).toList());
-        assertFalse(items.get(1).isEnabled());
-        assertEquals(NewSessionSplitAction.REMOTE_REASON, items.get(1).getToolTipText());
-        assertEquals(0, items.get(1).getActionListeners().length);
-        items.get(1).doClick(0);
+        assertEquals(List.of("one", "boxed", "two"), items.stream().map(JMenuItem::getText).toList());
+        assertTrue("a remote project launches like a local one; the ssh-remote arm serves it",
+                items.get(1).isEnabled());
         items.get(2).doClick(0);
 
         assertEquals(List.of(second.root()), launched);

@@ -184,4 +184,24 @@ class AgentStripTextTest {
         assertTrue(AgentStripText.resumable(true, Optional.empty()), "a provider that cannot tell keeps Resume");
         assertFalse(AgentStripText.resumable(false, Optional.empty()));
     }
+
+    @Test
+    void anSshRemoteRowSpeaksHostAndResumeNeverActivity() {
+        // The activity monitor cannot see a remote agent (OQ10), so no
+        // working/idle word appears; the host names where the agent runs.
+        assertEquals("Running · on build-box",
+                AgentStripText.sshRemoteStatusText(true, SessionStatus.RUNNING, "build-box"));
+        // Any process exit on a remote tab is the ssh client's, not the
+        // agent's (spec: SSH remote repositories), so the copy names the
+        // resume instead of implying the agent finished.
+        assertEquals("Session ended — resume to reconnect",
+                AgentStripText.sshRemoteStatusText(false, SessionStatus.EXITED, "build-box"));
+        assertEquals("Not running · on build-box",
+                AgentStripText.sshRemoteStatusText(false, SessionStatus.INACTIVE, "build-box"));
+        assertEquals("The agent runs on build-box; this window shows its live ssh console",
+                AgentStripText.sshRemoteStatusTooltip(true, SessionStatus.RUNNING, "build-box"));
+        assertEquals("The ssh connection to build-box ended — the session's conversation is on that "
+                        + "host; Resume reconnects",
+                AgentStripText.sshRemoteStatusTooltip(false, SessionStatus.EXITED, "build-box"));
+    }
 }

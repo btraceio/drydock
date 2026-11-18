@@ -8,6 +8,7 @@ import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionListener;
@@ -170,6 +171,18 @@ final class SessionEnds implements AgentExecutionListener {
             settleRemoteWhenClientEnds(id, row.workspaceBox().get(), stopRequested);
             return;
         }
+        if (row != null && row.workspaceBox().isEmpty()
+                && DrydockSessionService.repositoryRemoteOf(stateStore.get().state(), row).isPresent()) {
+            // An ssh-remote row's ssh client ended. The exit code is the ssh
+            // client's, never the agent's, so the settle records the status
+            // alone; a spontaneous end is "session ended — resume to
+            // reconnect" (the app's degraded contract), and a stop or close
+            // requested the end itself. No probe: the agent does not outlive
+            // its ssh client the way a box-side agent outlives one — the
+            // SIGHUP the client's end delivers is the stop.
+            settleSshRemoteEnd(id, stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED, row);
+            return;
+        }
         try {
             claims.releaseIfIdle(id, () -> mcpAccess.release(id));
         } catch (RuntimeException e) {
@@ -228,6 +241,33 @@ final class SessionEnds implements AgentExecutionListener {
     }
 
     // ---- remote settle (ssh client ended without an explicit Stop) ----------
+
+    /**
+     * Settles an ssh-remote row whose ssh client just ended: the status
+     * alone, no exit code (the client's exit code is not the agent's), no
+     * liveness record and no probe — unlike a box row, the agent does not
+     * outlive its ssh client, so there is nothing to probe and the SIGHUP
+     * the client's end delivers <em>is</em> the stop. No late bind: the
+     * conversation lives on the remote host and no local transcript can
+     * name an id for it.
+     */
+    private void settleSshRemoteEnd(ManagedSessionId id, SessionStatus ended, ManagedAgentSession row) {
+        try {
+            claims.releaseIfIdle(id, () -> mcpAccess.release(id));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Releasing Drydock MCP access for " + id + " failed: " + e);
+        }
+        stateStore.get().update(state -> {
+            ManagedAgentSession existing = DrydockSessionService.findIn(state, id);
+            if (existing == null || existing.status() == ended) {
+                return state;
+            }
+            return DrydockSessionService.withReplacedSession(state,
+                    existing.withStatus(ended).withLastOpenedAt(Instant.now()));
+        });
+        DrydockSessionsListener.publishChanged();
+        unmarkEvalAsync(row, ended);
+    }
 
     /**
      * Settles a remote row whose ssh client just ended. First the end is

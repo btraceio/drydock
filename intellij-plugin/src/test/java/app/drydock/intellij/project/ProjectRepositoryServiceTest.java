@@ -9,7 +9,9 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.project.ProjectRepositoryService.Registration;
+import app.drydock.projects.SharedProject;
 import app.drydock.state.JsonApplicationStateRepository;
 
 import com.intellij.openapi.project.Project;
@@ -69,7 +71,8 @@ class ProjectRepositoryServiceTest {
 
     /** The service against a ready store; the direct executor makes every future synchronous. */
     private static ProjectRepositoryService service(ApplicationStateStore store) {
-        return new ProjectRepositoryService(CompletableFuture.completedFuture(null), () -> store, Runnable::run);
+        return new ProjectRepositoryService(CompletableFuture.completedFuture(null), () -> store,
+                List::of, Runnable::run);
     }
 
     private static ManagedAgentSession session(RepositoryId repositoryId) {
@@ -158,7 +161,7 @@ class ProjectRepositoryServiceTest {
         // Idempotence at the seam: an already-registered root returns the
         // SAME state instance, so the single writer's equals check skips
         // the save entirely.
-        Registration reRegistered = ProjectRepositoryService.ensureRegistered(store.state(), alias);
+        Registration reRegistered = ProjectRepositoryService.ensureRegistered(store.state(), alias, List.of());
         assertSame(store.state(), reRegistered.state());
     }
 
@@ -199,6 +202,37 @@ class ProjectRepositoryServiceTest {
     }
 
     @Test
+    void aRemoteProjectsPlaceholderRootRegistersWithItsSshRemoteCarriedOver(@TempDir Path base) throws Exception {
+        ApplicationStateStore store = storeAt(base);
+        SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
+        SharedProject remoteProject = SharedProject.remote(RepositoryId.newId(), remote, "engine", Instant.now());
+        ProjectRepositoryService service = new ProjectRepositoryService(CompletableFuture.completedFuture(null),
+                () -> store, () -> List.of(remoteProject), Runnable::run);
+
+        Repository repository = service.repositoryFor(remote.placeholderRoot()).get(5, TimeUnit.SECONDS);
+
+        assertTrue(repository.isRemote(), "a remote project's repository must carry the remote");
+        assertEquals(remote, repository.remote());
+        assertEquals(remote.placeholderRoot(), repository.root());
+        assertEquals("engine", repository.displayName());
+        // A second resolve reuses the registration: the remote carried over
+        // must not depend on which call lands first.
+        Repository again = service.repositoryFor(remote.placeholderRoot()).get(5, TimeUnit.SECONDS);
+        assertEquals(repository.id(), again.id());
+    }
+
+    @Test
+    void anUnknownPlaceholderRootStillRegistersLocal() {
+        // A placeholder root no shared project claims (the shared list was
+        // edited underneath the state file): the fallback is today's
+        // local registration, never a fabricated remote.
+        Registration registration = ProjectRepositoryService.ensureRegistered(
+                app.drydock.domain.ApplicationState.empty(), new SshRemote("box", "/x/y").placeholderRoot(),
+                List.of());
+        assertFalse(registration.repository().isRemote());
+    }
+
+    @Test
     void aScratchProjectWithNoBasePathResolvesToAnEmptyFuture(@TempDir Path base) {
         ProjectRepositoryService service = service(storeAt(base));
 
@@ -216,7 +250,7 @@ class ProjectRepositoryServiceTest {
         CompletableFuture<Void> initialization = new CompletableFuture<>();
         ApplicationStateStore store = storeAt(base);
         ProjectRepositoryService service =
-                new ProjectRepositoryService(initialization, () -> store, Runnable::run);
+                new ProjectRepositoryService(initialization, () -> store, List::of, Runnable::run);
 
         CompletableFuture<RepositoryId> resolved = service.repositoryIdFor(base);
         assertFalse(resolved.isDone(), "the store must not be read before initialization completes");

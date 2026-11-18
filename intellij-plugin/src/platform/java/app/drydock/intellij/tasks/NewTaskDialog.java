@@ -2,9 +2,11 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.AgentRegistry;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.SessionMode;
+import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
@@ -218,6 +220,11 @@ final class NewTaskDialog extends DialogWrapper {
         if (preset.fixedWorkIn().orElse(null) == WorkIn.MAIN_CHECKOUT) {
             mainCheckout.setSelected(true);
         }
+        // A remote (SSH) target has no worktrees and no branch picker: the
+        // repository itself is the only place a session can run.
+        if (remoteTarget()) {
+            mainCheckout.setSelected(true);
+        }
         setTitle("New task in " + inputs.repoName());
         ownWindow.setSelected(preset.openIn() == OpenIn.OWN_WINDOW);
         thisWindow.setSelected(preset.openIn() == OpenIn.THIS_WINDOW);
@@ -246,11 +253,21 @@ final class NewTaskDialog extends DialogWrapper {
                 continue;
             }
             JBRadioButton button = new JBRadioButton(agent.displayName());
-            button.setEnabled(agent.isAvailable());
-            if (!agent.isAvailable()) {
-                button.setToolTipText("Not found on PATH: " + agent.describeSearched());
+            // A remote target runs the agent on another host over ssh; a
+            // provider without remote support cannot serve it (the app's
+            // AgentSelector gate, requireRemoteCapability).
+            boolean remoteOk = !remoteTarget()
+                    || DrydockPluginService.getInstance().registry().supportsRemote(agent.kind());
+            if (!remoteOk) {
+                button.setEnabled(false);
+                button.setToolTipText("Doesn't support remote sessions");
+            } else {
+                button.setEnabled(agent.isAvailable());
+                if (!agent.isAvailable()) {
+                    button.setToolTipText("Not found on PATH: " + agent.describeSearched());
+                }
             }
-            button.setSelected(agent.kind() == inputs.preselected() && agent.isAvailable());
+            button.setSelected(agent.kind() == inputs.preselected() && agent.isAvailable() && remoteOk);
             agentGroup.add(button);
             agentButtons.put(agent.kind(), button);
             agents.add(button);
@@ -461,7 +478,7 @@ final class NewTaskDialog extends DialogWrapper {
         baseRow.add(changeBase);
 
         FormBuilder builder = FormBuilder.createFormBuilder();
-        if (inputs.fixedWorktree().isEmpty() && preset.fixedWorkIn().isEmpty()) {
+        if (inputs.fixedWorktree().isEmpty() && preset.fixedWorkIn().isEmpty() && !remoteTarget()) {
             builder.addLabeledComponent("Work in:", row(newWorktree, mainCheckout))
                     .addLabeledComponent("Branch:", branch)
                     .addLabeledComponent("From:", startRow)
@@ -503,7 +520,7 @@ final class NewTaskDialog extends DialogWrapper {
      */
     private void defaultWorkIn() {
         if (workInEdited || preset.fixedWorkIn().isPresent() || inputs.fixedWorktree().isPresent()
-                || preset.mode(readOnly.isSelected()) == SessionMode.READ_ONLY) {
+                || preset.mode(readOnly.isSelected()) == SessionMode.READ_ONLY || remoteTarget()) {
             return;
         }
         boolean blank = instructions.getText().isBlank();
@@ -535,7 +552,7 @@ final class NewTaskDialog extends DialogWrapper {
     private void refresh() {
         boolean saving = saveForLater.isSelected();
         boolean fixed = inputs.fixedWorktree().isPresent();
-        newWorktree.setEnabled(startEnabled(saving, preset.fixedWorkIn().isEmpty()
+        newWorktree.setEnabled(startEnabled(saving, !remoteTarget() && preset.fixedWorkIn().isEmpty()
                 && preset.mode(readOnly.isSelected()) != SessionMode.READ_ONLY
                 && !fixed));
         mainCheckout.setEnabled(startEnabled(saving, preset.fixedWorkIn().isEmpty() && !fixed));
@@ -603,7 +620,7 @@ final class NewTaskDialog extends DialogWrapper {
      * conditions that permitted it.
      */
     private void refreshEvalMode(boolean saving) {
-        boolean offered = inputs.evalAvailable().test(selectedAgent());
+        boolean offered = inputs.evalAvailable().test(selectedAgent()) && !remoteTarget();
         boolean evalOk = offered && !saving && !workspaceBox.isSelected();
         evalMode.setVisible(offered);
         evalMode.setEnabled(evalOk);
@@ -649,7 +666,15 @@ final class NewTaskDialog extends DialogWrapper {
         return shell != null && shell.substring(shell.lastIndexOf('/') + 1).equals("fish");
     }
 
+    /** Whether the dialog's target project lives on a remote host over SSH. */
+    private boolean remoteTarget() {
+        return inputs.project().isRemote();
+    }
+
     private WorkIn workIn() {
+        if (remoteTarget()) {
+            return WorkIn.MAIN_CHECKOUT;
+        }
         if (preset.fixedWorkIn().isPresent()) {
             return preset.fixedWorkIn().get();
         }

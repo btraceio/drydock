@@ -247,7 +247,13 @@ public final class TaskTreeModel {
     }
 
     public static List<TaskNode> build(Inputs in) {
-        List<SharedProject> local = in.projects().stream().filter(project -> !project.isRemote()).toList();
+        // A remote (SSH) project shows like a local one minus everything
+        // that reads this machine's disk: the gather gave it no worktrees,
+        // no issue or PR containers and no folder-missing check, so the
+        // children() pass below adds it a Sessions section and nothing else
+        // (spec: SSH remote repositories — still working: sessions per the
+        // degraded contract).
+        List<SharedProject> local = in.projects().stream().toList();
         // The project: chip scopes the tree to the focused project: every
         // other registered project row (and the unregistered add row) is
         // hidden, mirroring the inbox. A focus whose project is no longer

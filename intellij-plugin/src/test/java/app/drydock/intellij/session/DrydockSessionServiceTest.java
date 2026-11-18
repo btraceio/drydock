@@ -61,6 +61,7 @@ import app.drydock.workspace.WorkspacesCli;
 
 
 import com.intellij.openapi.project.Project;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -115,6 +116,24 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class DrydockSessionServiceTest {
 
     private static final long TIMEOUT_SECONDS = 5;
+
+    /**
+     * Stores created by the running test, flushed in {@link #flushStores}:
+     * the single writer's coalescing background save otherwise races
+     * JUnit's @TempDir cleanup — a save still in flight while the temp
+     * directory is deleted fails the run with a {@code JUnitException}
+     * wrapping an {@code IOException} (the same flake
+     * {@code ProjectRepositoryServiceTest} guards against with the same
+     * pattern). Test bodies that assert persisted state still flush
+     * explicitly; this teardown covers the ones that never read the file.
+     */
+    private final List<ApplicationStateStore> stores = new ArrayList<>();
+
+    @AfterEach
+    void flushStores() {
+        stores.forEach(ApplicationStateStore::flush);
+        stores.clear();
+    }
 
     /** A recording fake over the whole {@link AgentProvider} SPI. */
     static class RecordingProvider implements AgentProvider {
@@ -600,11 +619,12 @@ class DrydockSessionServiceTest {
         }
     }
 
-    private static Harness harness(@TempDir Path base) {
+    private Harness harness(@TempDir Path base) {
         Repository repository = new Repository(RepositoryId.newId(), base, "repo",
                 Instant.parse("2026-08-12T10:00:00Z"), Instant.parse("2026-08-12T10:00:00Z"),
                 RepositorySettings.DEFAULT);
         Harness harness = new Harness(base, repository, new SameThreadExecutorService());
+        stores.add(harness.store);
         harness.store.update(state -> state.withRepositories(List.of(repository)));
         return harness;
     }
@@ -2129,11 +2149,12 @@ class DrydockSessionServiceTest {
         harness.store.flush();
     }
 
-    private static Harness concurrentHarness(Path base, ExecutorService executor) {
+    private Harness concurrentHarness(Path base, ExecutorService executor) {
         Repository repository = new Repository(RepositoryId.newId(), base, "repo",
                 Instant.parse("2026-08-12T10:00:00Z"), Instant.parse("2026-08-12T10:00:00Z"),
                 RepositorySettings.DEFAULT);
         Harness harness = new Harness(base, repository, executor);
+        stores.add(harness.store);
         harness.store.update(state -> state.withRepositories(List.of(repository)));
         return harness;
     }

@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
@@ -70,7 +71,22 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         String title = session.readOnly() ? session.displayName() + " · RO" : session.displayName();
         return session.workspaceBox()
                 .map(box -> title + " · on " + box.boxName())
-                .orElse(title);
+                .orElseGet(() -> sshRemoteHostOf(session)
+                        .map(host -> title + " · on " + host)
+                        .orElse(title));
+    }
+
+    /** The SSH remote of {@code session}'s repository — the same derivation
+      * the service and the strip run (a memory read through the plugin). */
+    private static Optional<SshRemote> sshRemoteHostOf(ManagedAgentSession session) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        if (plugin == null) {
+            return Optional.empty();
+        }
+        return plugin.stateStore().state().repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst()
+                .flatMap(repository -> Optional.ofNullable(repository.remote()));
     }
 
     @Override
@@ -88,6 +104,18 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
             return AgentStripText.remoteStatusTooltip(ownedHere,
                     DrydockPluginService.getInstance().remoteSessionLiveness().state(session.id()),
                     session.workspaceBox().orElseThrow().boxName());
+        }
+        if (session != null) {
+            Optional<SshRemote> remote = sshRemoteHostOf(session);
+            if (remote.isPresent()) {
+                // The ssh-remote arm's tooltip: where the agent runs and what
+                // Resume does — no liveness probe exists in this arm, the
+                // persisted status is the whole story.
+                boolean ownedHere = project != null
+                        && AgentExecutionService.getInstance(project).isRunning(session.id());
+                return AgentStripText.sshRemoteStatusTooltip(ownedHere, session.status(),
+                        remote.orElseThrow().host());
+            }
         }
         return HostedTab.placeIn(console, project).map(HostedTab::tooltip).orElse(null);
     }
@@ -109,6 +137,20 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
             boolean runningAnywhere = AgentExecutionRegistry.getInstance().isRunning(session.id());
             TabIcon icon = remoteIconState(session.status(), runningHere, runningAnywhere, liveness);
             return SessionDots.drydockIcon(icon.status(), Optional.empty());
+        }
+        if (sshRemoteHostOf(session).isPresent()) {
+            // The ssh-remote arm: no activity folds in (the monitor cannot
+            // see a remote agent), no probe runs from a paint — the live
+            // registry and the persisted status are the whole story. There
+            // is no liveness map in this arm, so the dot is the shared
+            // palette fed by running-anywhere and the persisted status: a
+            // detached live client keeps the live mark, an ended session
+            // reads idle (the words beside it say why).
+            boolean runningAnywhere = AgentExecutionRegistry.getInstance().isRunning(session.id());
+            SessionStatus shown = runningAnywhere && !runningHere
+                    ? SessionStatus.RUNNING
+                    : session.status();
+            return SessionDots.drydockIcon(shown, Optional.empty());
         }
         // The registry's live-anywhere fact joins the window's own: a
         // detached live session keeps the live mark (the strip beside it

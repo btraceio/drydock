@@ -8,6 +8,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
@@ -46,8 +47,18 @@ class TaskActionsTest {
 
     @Test
     void removeQuestionNamesTheAgentsThatKeepRunning() {
-        assertEquals("Remove drydock from Drydock? 2 agents keep running.", TaskActions.removeQuestion("drydock", 2));
-        assertEquals("Remove drydock from Drydock? 1 agent keeps running.", TaskActions.removeQuestion("drydock", 1));
+        assertEquals("Remove drydock from Drydock? 2 agents keep running.",
+                TaskActions.removeQuestion("drydock", 2, Optional.empty()));
+        assertEquals("Remove drydock from Drydock? 1 agent keeps running.",
+                TaskActions.removeQuestion("drydock", 1, Optional.empty()));
+    }
+
+    @Test
+    void aRemoteRepositorysRemoveQuestionNamesItsHostAndPath() {
+        SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
+        assertEquals("Remove engine from Drydock? 1 agent keeps running. The repository lives at "
+                        + "build-box:/srv/work/engine and is not touched.",
+                TaskActions.removeQuestion("engine", 1, Optional.of(remote)));
     }
 
     @Test
