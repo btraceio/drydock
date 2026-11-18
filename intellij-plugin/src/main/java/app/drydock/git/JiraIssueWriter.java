@@ -3,6 +3,7 @@ package app.drydock.git;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import app.drydock.state.json.JsonWriter;
@@ -18,6 +19,8 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -52,7 +55,8 @@ public final class JiraIssueWriter implements AutoCloseable {
      * metadata property could not be stored, when it could not; the ticket
      * itself is not undone for that.
      */
-    public record Created(String key, String url, Optional<String> propertyProblem) implements Outcome {
+    public record Created(String key, String url, Optional<String> propertyProblem)
+            implements Outcome, CreateResult {
         public Created {
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(url, "url");
@@ -61,11 +65,88 @@ public final class JiraIssueWriter implements AutoCloseable {
     }
 
     /** Nothing was created, or whether it was is unknown; the message says which. */
-    public record Failed(String message) implements Outcome {
+    public record Failed(String message) implements Outcome, CreateResult {
         public Failed {
             Objects.requireNonNull(message, "message");
         }
     }
+
+    /**
+     * What a create resolved to when the caller must tell an unknown effect
+     * ({@link Uncertain}) from a confirmed failure. {@link Outcome} stays as
+     * it was for existing callers; {@link #create} folds an uncertain result
+     * into a {@link Failed} carrying the same check-the-tracker message.
+     */
+    public sealed interface CreateResult permits Created, Failed, Uncertain {
+    }
+
+    /**
+     * Whether the ticket was created is unknown: the request was sent but
+     * the answer never arrived (timeout, interrupt) or carried no usable
+     * key. The message tells the user to check the tracker before retrying;
+     * no key is fabricated and nothing is retried.
+     */
+    public record Uncertain(String message) implements CreateResult {
+        public Uncertain {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /**
+     * One entry of an issue's {@code issuelinks}: the link type's name and
+     * the key of the other issue, which Jira reports under either
+     * {@code inwardIssue} or {@code outwardIssue} (exactly one is set).
+     */
+    public record LinkEntry(String typeName, Optional<String> inwardKey, Optional<String> outwardKey) {
+        public LinkEntry {
+            Objects.requireNonNull(typeName, "typeName");
+            Objects.requireNonNull(inwardKey, "inwardKey");
+            Objects.requireNonNull(outwardKey, "outwardKey");
+        }
+    }
+
+    /** What reading an issue's links resolved to. */
+    public sealed interface LinkLookup permits Links, LookupFailed {
+    }
+
+    /** A well-formed {@code issuelinks} array; an empty list is confirmed absence. */
+    public record Links(List<LinkEntry> entries) implements LinkLookup {
+        public Links {
+            entries = List.copyOf(entries);
+        }
+    }
+
+    /** The links could not be read or the answer was malformed; this is never absence. */
+    public record LookupFailed(String message) implements LinkLookup {
+        public LookupFailed {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** What creating one Blocks link resolved to. */
+    public sealed interface LinkOutcome permits Linked, LinkFailed, LinkUncertain {
+    }
+
+    /** Jira accepted the link. */
+    public record Linked() implements LinkOutcome {
+    }
+
+    /** Jira confirmed it did not create the link (or it was refused before sending). */
+    public record LinkFailed(String message) implements LinkOutcome {
+        public LinkFailed {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** The request was sent but whether the link exists is unknown; never retried. */
+    public record LinkUncertain(String message) implements LinkOutcome {
+        public LinkUncertain {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** Which end of the relationship the queried issue is. */
+    public enum Queried { PREREQUISITE, DEPENDENT }
 
     private final Supplier<HttpClient.Builder> clientBuilder;
     private final Duration requestTimeout;
@@ -96,6 +177,18 @@ public final class JiraIssueWriter implements AutoCloseable {
      */
     public Outcome create(JiraConnection connection, String secret, String projectKey, String issueType,
                           String summary, String description, String propertyKey, JsonValue property) {
+        return switch (createChecked(connection, secret, projectKey, issueType, summary, description,
+                propertyKey, property)) {
+            case Created created -> created;
+            case Failed failed -> failed;
+            case Uncertain uncertain -> new Failed(uncertain.message());
+        };
+    }
+
+    /** As {@link #create}, but an unknown effect is reported as {@link Uncertain}, never as a failure. */
+    public CreateResult createChecked(JiraConnection connection, String secret, String projectKey,
+                                      String issueType, String summary, String description,
+                                      String propertyKey, JsonValue property) {
         Objects.requireNonNull(connection, "connection");
         String baseUrl = connection.baseUrl();
         Optional<String> refusal = JiraConnection.baseUrlRefusal(baseUrl);
@@ -128,7 +221,7 @@ public final class JiraIssueWriter implements AutoCloseable {
                     .build(), HttpResponse.BodyHandlers.ofString());
         } catch (HttpTimeoutException e) {
             log("create", baseUrl, e, secret, auth);
-            return new Failed("Jira did not answer within " + timeoutSeconds() + "s; whether the ticket was"
+            return new Uncertain("Jira did not answer within " + timeoutSeconds() + "s; whether the ticket was"
                     + " created is unknown -- check " + projectKey + " before retrying");
         } catch (IOException e) {
             log("create", baseUrl, e, secret, auth);
@@ -136,7 +229,7 @@ public final class JiraIssueWriter implements AutoCloseable {
                     + e.getClass().getSimpleName() + ")", secret, auth));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return new Failed("Creating the Jira ticket was interrupted; whether it was created is unknown"
+            return new Uncertain("Creating the Jira ticket was interrupted; whether it was created is unknown"
                     + " -- check " + projectKey + " before retrying");
         }
         if (created.statusCode() != 201 && created.statusCode() != 200) {
@@ -145,11 +238,186 @@ public final class JiraIssueWriter implements AutoCloseable {
         }
         Optional<String> key = createdKey(created.body());
         if (key.isEmpty()) {
-            return new Failed("Jira answered without the new ticket's key; check " + projectKey
+            return new Uncertain("Jira answered without the new ticket's key; check " + projectKey
                     + " before retrying");
         }
         return new Created(key.get(), connection.browseUrl(key.get()),
                 storeProperty(baseUrl, auth, secret, key.get(), propertyKey, property));
+    }
+
+    /**
+     * Reads the links of {@code issueKey} on the site {@code connection}
+     * addresses, with that connection's own credentials. A missing or
+     * ill-typed {@code fields.issuelinks}, or an entry whose type or
+     * direction cannot be determined, is a failure, never absence.
+     */
+    public LinkLookup lookupLinks(JiraConnection connection, String secret, String issueKey) {
+        Optional<String> refusal = writeRefusal(connection, secret);
+        if (refusal.isPresent()) {
+            return new LookupFailed(refusal.get());
+        }
+        if (issueKey == null || issueKey.isBlank()) {
+            return new LookupFailed("Name the Jira issue whose links to read");
+        }
+        String baseUrl = connection.baseUrl();
+        String auth = JiraService.authorization(connection, secret);
+        String url = baseUrl + "/rest/api/2/issue/" + URLEncoder.encode(issueKey, StandardCharsets.UTF_8)
+                + "?fields=issuelinks";
+        HttpResponse<String> response;
+        try {
+            response = client().send(request(url, auth).GET().build(), HttpResponse.BodyHandlers.ofString());
+        } catch (HttpTimeoutException e) {
+            log("link lookup", baseUrl, e, secret, auth);
+            return new LookupFailed("Jira did not answer within " + timeoutSeconds() + "s reading the links of "
+                    + issueKey);
+        } catch (IOException e) {
+            log("link lookup", baseUrl, e, secret, auth);
+            return new LookupFailed(JiraService.redact("Could not reach Jira at " + baseUrl + " ("
+                    + e.getClass().getSimpleName() + ")", secret, auth));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new LookupFailed("Reading the links of " + issueKey + " was interrupted");
+        }
+        if (response.statusCode() != 200) {
+            LOG.log(Level.WARNING, "Jira link lookup at " + baseUrl + " answered HTTP " + response.statusCode());
+            return new LookupFailed(JiraService.redact("Could not read the links of " + issueKey + ": "
+                    + createFailure(response.statusCode(), response.body()), secret, auth));
+        }
+        return parseLinks(response.body(), issueKey);
+    }
+
+    /**
+     * Creates the Blocks link with {@code inwardIssue = prerequisite} and
+     * {@code outwardIssue = dependent}, once, without retry. A missing
+     * Blocks type, a 403 or any other status is a confirmed failure; a
+     * timeout or interrupt after sending is uncertain.
+     */
+    public LinkOutcome createBlocksLink(JiraConnection connection, String secret, String prerequisiteKey,
+                                        String dependentKey) {
+        Optional<String> refusal = writeRefusal(connection, secret);
+        if (refusal.isPresent()) {
+            return new LinkFailed(refusal.get());
+        }
+        if (prerequisiteKey == null || prerequisiteKey.isBlank() || dependentKey == null
+                || dependentKey.isBlank()) {
+            return new LinkFailed("Both Jira issue keys are needed to link them");
+        }
+        String baseUrl = connection.baseUrl();
+        String auth = JiraService.authorization(connection, secret);
+        String payload = JsonWriter.write(JsonObject.empty()
+                .put("type", JsonObject.empty().put("name", new JsonString("Blocks")))
+                .put("inwardIssue", JsonObject.empty().put("key", new JsonString(prerequisiteKey)))
+                .put("outwardIssue", JsonObject.empty().put("key", new JsonString(dependentKey))));
+        HttpResponse<String> response;
+        try {
+            response = client().send(request(baseUrl + "/rest/api/2/issueLink", auth)
+                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+        } catch (HttpTimeoutException e) {
+            log("link", baseUrl, e, secret, auth);
+            return new LinkUncertain("Jira did not answer within " + timeoutSeconds() + "s; whether "
+                    + prerequisiteKey + " now blocks " + dependentKey + " is unknown -- check the issue links"
+                    + " before retrying");
+        } catch (IOException e) {
+            log("link", baseUrl, e, secret, auth);
+            return new LinkFailed(JiraService.redact("Could not reach Jira at " + baseUrl + " ("
+                    + e.getClass().getSimpleName() + ")", secret, auth));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new LinkUncertain("Linking " + prerequisiteKey + " to " + dependentKey + " was interrupted;"
+                    + " whether the link exists is unknown -- check the issue links before retrying");
+        }
+        if (response.statusCode() == 201 || response.statusCode() == 200) {
+            return new Linked();
+        }
+        LOG.log(Level.WARNING, "Jira issue link at " + baseUrl + " answered HTTP " + response.statusCode());
+        return new LinkFailed(JiraService.redact(linkFailure(response.statusCode(), response.body()), secret, auth));
+    }
+
+    /**
+     * Whether {@code entries}, read from the {@code queried} end, already
+     * hold prerequisite -blocks-> dependent: from the prerequisite the other
+     * issue must be the outward one and the dependent; from the dependent it
+     * must be the inward one and the prerequisite. Another type or the
+     * reverse direction is not presence. Pure.
+     */
+    public static boolean blocksPresent(List<LinkEntry> entries, Queried queried, String prerequisiteKey,
+                                        String dependentKey) {
+        for (LinkEntry entry : entries) {
+            if (!"Blocks".equals(entry.typeName())) {
+                continue;
+            }
+            boolean match = queried == Queried.PREREQUISITE
+                    ? entry.outwardKey().filter(dependentKey::equals).isPresent()
+                    : entry.inwardKey().filter(prerequisiteKey::equals).isPresent();
+            if (match) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The links of an {@code ?fields=issuelinks} answer; any structural doubt is a failure. Pure. */
+    static LinkLookup parseLinks(String body, String issueKey) {
+        String malformed = "Jira answered the links of " + issueKey + " in an unexpected shape";
+        try {
+            if (!(JsonParser.parse(body) instanceof JsonObject root)
+                    || !(root.get("fields") instanceof JsonObject fields)
+                    || !(fields.get("issuelinks") instanceof JsonArray array)) {
+                return new LookupFailed(malformed);
+            }
+            List<LinkEntry> entries = new ArrayList<>();
+            for (JsonValue element : array.elements()) {
+                if (!(element instanceof JsonObject entry)
+                        || !(entry.get("type") instanceof JsonObject type)
+                        || !(type.get("name") instanceof JsonString name) || name.value().isBlank()) {
+                    return new LookupFailed(malformed);
+                }
+                Optional<String> inward = issueKeyOf(entry.get("inwardIssue"));
+                Optional<String> outward = issueKeyOf(entry.get("outwardIssue"));
+                if (inward.isPresent() == outward.isPresent()) {
+                    return new LookupFailed(malformed);
+                }
+                entries.add(new LinkEntry(name.value(), inward, outward));
+            }
+            return new Links(entries);
+        } catch (JsonParseException e) {
+            LOG.log(Level.DEBUG, "Unparseable Jira issue links answer", e);
+            return new LookupFailed(malformed);
+        }
+    }
+
+    private static Optional<String> issueKeyOf(JsonValue value) {
+        return value instanceof JsonObject obj && obj.get("key") instanceof JsonString key
+                && !key.value().isBlank() ? Optional.of(key.value()) : Optional.empty();
+    }
+
+    private static String linkFailure(int status, String body) {
+        return switch (status) {
+            case 400 -> JiraSearchResponse.errorMessages(body)
+                    .map(messages -> "Jira refused the link: " + messages)
+                    .orElse("Jira refused the link (HTTP 400); the Blocks link type may not exist");
+            case 403 -> "Jira refused the request (HTTP 403); the account may not link issues in this project";
+            case 404 -> "Jira did not find the issues or the Blocks link type (HTTP 404)";
+            default -> createFailure(status, body);
+        };
+    }
+
+    /** The refusal for a connection/secret not usable for a write, or empty. */
+    private Optional<String> writeRefusal(JiraConnection connection, String secret) {
+        Objects.requireNonNull(connection, "connection");
+        String baseUrl = connection.baseUrl();
+        Optional<String> refusal = JiraConnection.baseUrlRefusal(baseUrl);
+        if (refusal.isPresent() && !loopbackHttpAllowed(baseUrl)) {
+            return refusal;
+        }
+        if (connection.deployment() == JiraConnection.Deployment.CLOUD && connection.email().isEmpty()) {
+            return Optional.of("Jira Cloud needs the account email; open Jira Settings");
+        }
+        if (secret == null || secret.isBlank()) {
+            return Optional.of("No Jira API token is stored for this project; open Jira Settings");
+        }
+        return Optional.empty();
     }
 
     /** Stores the metadata; empty on success, else why it was not stored. */

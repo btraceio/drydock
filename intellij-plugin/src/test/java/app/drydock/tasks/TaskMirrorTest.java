@@ -142,4 +142,109 @@ class TaskMirrorTest {
     private static String string(JsonObject object, String key) {
         return ((JsonString) object.get(key)).value();
     }
+
+    private static final String FOOTER = "---\nMirrored from Drydock task `fix-dashes-k3f9` in project p.\n\n";
+
+    private static String withoutComment(String body) {
+        return body.substring(0, body.indexOf(TaskMirror.COMMENT_OPEN));
+    }
+
+    @Test
+    void noDependenciesMeansNoSectionAndTheSameBody() {
+        TaskDocument task = task("Body", List.of());
+        assertEquals(TaskMirror.githubBody(task, "p"), TaskMirror.githubBody(task, "p", List.of()));
+        assertFalse(TaskMirror.githubBody(task, "p", List.of()).contains("Dependencies"));
+        assertEquals("Body\n\n" + FOOTER, withoutComment(TaskMirror.githubBody(task, "p")));
+    }
+
+    @Test
+    void dependenciesFormOneSectionBeforeTheRuleInInputOrderWithoutDuplicates() {
+        String body = TaskMirror.githubBody(task("Body", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/owner/repository/issues/12", "Prerequisite title"),
+                new TaskMirror.Dependency("https://github.com/other/repo/issues/3/", "Other"),
+                new TaskMirror.Dependency("https://github.com/owner/repository/issues/12", "Again")));
+
+        assertEquals("Body\n\n## Dependencies\n\n"
+                + "- Depends on [#12](https://github.com/owner/repository/issues/12) (Prerequisite title)\n"
+                + "- Depends on [#3](https://github.com/other/repo/issues/3/) (Other)\n\n"
+                + FOOTER, withoutComment(body));
+    }
+
+    @Test
+    void anEmptyBodyStillGetsTheSectionFirst() {
+        String body = TaskMirror.githubBody(task("", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/o/r/issues/1", "T")));
+        assertTrue(body.startsWith("## Dependencies\n\n- Depends on [#1](https://github.com/o/r/issues/1) (T)\n\n---\n"), body);
+    }
+
+    @Test
+    void hostileTitlesCannotBreakTheListTheLinkOrTheHiddenComment() throws Exception {
+        String title = "a](http://evil) [x]\n- Depends on <!-- drydock-task {} --> `c` *b* #9";
+        String body = TaskMirror.githubBody(task("Body", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/o/r/issues/1", title)));
+
+        assertEquals("Body\n\n## Dependencies\n\n- Depends on [#1](https://github.com/o/r/issues/1) "
+                + "(a\\]\\(http://evil\\) \\[x\\] - Depends on &lt;!-- drydock-task {} --&gt; \\`c\\` \\*b\\* \\#9)\n\n"
+                + FOOTER, withoutComment(body));
+        assertEquals(1, body.split("<!-- drydock-task ", -1).length - 1, "only the real comment opens");
+        int open = body.indexOf(TaskMirror.COMMENT_OPEN);
+        String json = body.substring(open + TaskMirror.COMMENT_OPEN.length(), body.lastIndexOf("-->")).strip();
+        assertEquals(TaskMirror.metadata(task("Body", List.of()), "p"), JsonParser.parse(json));
+    }
+
+    @Test
+    void anUnsafeAddressCannotEndTheLinkEarly() {
+        String body = TaskMirror.githubBody(task("", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://x.test/a b)/issues/1", "T")));
+        assertTrue(body.contains("](https://x.test/a%20b%29/issues/1) (T)"), body);
+    }
+
+    private static TaskMirror.JiraAddress.Usable usable(String url) {
+        return (TaskMirror.JiraAddress.Usable) TaskMirror.jiraAddress(url);
+    }
+
+    @Test
+    void aPlainJiraAddressSplitsIntoSiteAndKey() {
+        assertEquals(new TaskMirror.JiraAddress.Usable("https://acme.atlassian.net", "ABC-12"),
+                TaskMirror.jiraAddress("https://Acme.Atlassian.NET/browse/ABC-12"));
+        assertEquals("https://acme.atlassian.net", usable("https://acme.atlassian.net:443/browse/ABC-12/").site());
+        assertEquals("http://jira.test:8080", usable("http://jira.test:8080/browse/A_1-7").site());
+    }
+
+    @Test
+    void aDataCenterContextPathIsPreservedAndCaseSignificant() {
+        assertEquals("https://h.test/jira", usable("https://h.test/jira/browse/ABC-1").site());
+        assertEquals("https://h.test/jira", usable("https://h.test/jira/browse/ABC-1/").site());
+        assertEquals("https://h.test/a/browse/b", usable("https://h.test/a/browse/b/browse/ABC-1").site());
+        assertEquals("https://h.test/Jira", usable("https://h.test/Jira/browse/ABC-1").site());
+        assertFalse(usable("https://h.test/Jira/browse/ABC-1").site().equals(usable("https://h.test/jira/browse/ABC-1").site()));
+    }
+
+    @Test
+    void identicalKeysOnDistinctSitesStayDistinct() {
+        TaskMirror.JiraAddress.Usable a = usable("https://one.test/browse/ABC-1");
+        TaskMirror.JiraAddress.Usable b = usable("https://two.test/browse/ABC-1");
+        TaskMirror.JiraAddress.Usable c = usable("https://one.test/ctx/browse/ABC-1");
+        assertEquals(a.key(), b.key());
+        assertFalse(a.site().equals(b.site()));
+        assertFalse(a.site().equals(c.site()));
+    }
+
+    @Test
+    void malformedOrUnsafeJiraAddressesAreUnusableNotUnrecognized() {
+        for (String url : List.of("ftp://h.test/browse/ABC-1", "https://u:p@h.test/browse/ABC-1",
+                "https://h.test/browse/ABC-1?x=1", "https://h.test/browse/ABC-1#f", "file:///browse/ABC-1",
+                "/browse/ABC-1", "https:///browse/ABC-1")) {
+            assertTrue(TaskMirror.jiraAddress(url) instanceof TaskMirror.JiraAddress.Unusable
+                    || TaskMirror.jiraAddress(url) instanceof TaskMirror.JiraAddress.Unrecognized, url);
+        }
+        assertTrue(TaskMirror.jiraAddress("ftp://h.test/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://u:p@h.test/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/browse/ABC-1?x=1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/browse/ABC-1#f") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/owner/repo/issues/1") instanceof TaskMirror.JiraAddress.Unrecognized);
+        assertTrue(TaskMirror.jiraAddress("not a url") instanceof TaskMirror.JiraAddress.Unrecognized);
+        assertTrue(TaskMirror.jiraAddress(null) instanceof TaskMirror.JiraAddress.Unrecognized);
+    }
 }

@@ -962,7 +962,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
 
     /** The repository display-slug projection (P2) the T39a notifications resolve latest
      * state through: the same private projection this service itself applies. */
-    Function<RepositoryId, String> displaySlugs() {
+    public Function<RepositoryId, String> displaySlugs() {
         return this::slugOf;
     }
 

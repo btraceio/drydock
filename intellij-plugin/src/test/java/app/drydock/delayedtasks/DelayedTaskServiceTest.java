@@ -461,6 +461,34 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // 6g2. The public slug projection is the production one: it names local and remote
+    // shared projects, and is the mapping TaskGraph.of resolves qualified ids with.
+    @Test
+    void displaySlugsIsTheProductionProjectionTheGraphResolvesWith(@TempDir Path dir) throws Exception {
+        Path store = dir.resolve("store");
+        Path rootOf = Files.createDirectories(dir.resolve("alpha"));
+        RepositoryId localId = RepositoryId.newId();
+        RepositoryId remoteId = RepositoryId.newId();
+        SshRemote ssh = new SshRemote("box", "/srv/repo");
+        List<SharedProject> shared = List.of(
+                SharedProject.local(localId, rootOf, "Project Alpha", Instant.EPOCH),
+                new SharedProject(remoteId, ssh.placeholderRoot(), "Remote Beta", Instant.EPOCH,
+                        Optional.of(ssh)));
+        try (DelayedTaskService service = new DelayedTaskService(store, executor,
+                List::of, List::of, () -> shared)) {
+            await(service.initialize());
+            assertEquals("project-alpha", service.displaySlugs().apply(localId));
+            assertEquals("remote-beta", service.displaySlugs().apply(remoteId));
+            assertNull(service.displaySlugs().apply(RepositoryId.newId()), "unregistered has no slug");
+            TaskDocument remoteTask = await(service.create("Remote prerequisite", List.of(), remoteId)).document();
+            TaskDocument localTask = await(service.create("Local follow up",
+                    List.of("remote-beta:" + remoteTask.id().text()), localId)).document();
+            TaskGraph graph = TaskGraph.of(await(service.snapshot()), service.displaySlugs());
+            assertTrue(graph.brokenReferences().isEmpty(), graph.brokenReferences().toString());
+            assertEquals(List.of(localTask), graph.dependents().get(remoteTask.id()));
+        }
+    }
+
     // 6h. The production default resolver over real git (no stub): a session in a linked
     // worktree resolves to the registered MAIN CHECKOUT through git worktree list.
     @Test
