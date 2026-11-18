@@ -112,6 +112,33 @@ class SearchTermsTest {
         assertTrue(parse("  ").isEmpty());
     }
 
+    // -- server-side search queries ---------------------------------------
+
+    @Test
+    void thePullRequestSearchQueryJoinsTextPrTermsWithThePlainText() {
+        SearchTerms<InboxModel.GroupKind> terms = parse("pr:12 pr:checkout \"dark mode\" fix");
+
+        // Number terms resolve by exact lookup, never by --search; a quoted
+        // span stays one quoted token so gh searches the phrase.
+        assertEquals("checkout \"dark mode\" fix", terms.pullRequestSearchQuery());
+        assertEquals(List.of(12), terms.pullRequestNumbers());
+    }
+
+    @Test
+    void theIssueSearchQueryJoinsIssueTermsWithThePlainText() {
+        assertEquals("PROJ-7 allocation", parse("issue:PROJ-7 allocation").issueSearchQuery());
+        assertEquals("idle", parse("pr:12 idle").issueSearchQuery(),
+                "the plain text narrows issue titles too");
+    }
+
+    @Test
+    void noTermsMeansNoSearchQueryAndNoExactLookups() {
+        SearchTerms<InboxModel.GroupKind> empty = parse("");
+        assertEquals("", empty.pullRequestSearchQuery());
+        assertEquals("", empty.issueSearchQuery());
+        assertTrue(empty.pullRequestNumbers().isEmpty());
+    }
+
     // -- pull request matching --------------------------------------------
 
     @Test

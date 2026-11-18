@@ -2006,7 +2006,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     Set.copyOf(expansions.requested(SectionKind.WORKTREES)),
                     Set.copyOf(expansions.requestedGitHubIssues()),
                     Set.copyOf(expansions.requestedJiraGroups()),
-                    Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS)));
+                    Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS)),
+                    new TaskTreeInputs.ListingSearch(terms.pullRequestSearchQuery(), terms.issueSearchQuery(),
+                            terms.pullRequestNumbers()));
             // Only a completed gather knows which groups still exist: a deleted
             // group, an unregistered project or a disabled connection stops being
             // remembered as open. A failed gather never gets here and forgets nothing.

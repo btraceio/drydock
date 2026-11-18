@@ -259,7 +259,7 @@ class TaskTreePanelTargetTest {
             // As the panel's restoration does: project rows expand before their
             // sections, so a section's expandPath is "viewable". Programmatic, so
             // these expansions record nothing (a user's project expand records
-            // its listings; see the project-row cases).
+            // the row alone; see the project-row case).
             TreePath projectPath = new TreePath(project.getPath());
             tracker.runProgrammatic(() -> tree.expandPath(projectPath));
         }
@@ -284,6 +284,32 @@ class TaskTreePanelTargetTest {
         assertTrue(tree.isExpanded(sections.get("drydock:ISSUES")));
         assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
+        assertTrue(rebuilds.isEmpty());
+    }
+
+    @Test
+    void expandingAProjectRowRecordsOnlyTheRowAndFetchesNothing() {
+        Map<String, TreePath> sections = new HashMap<>();
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(
+                changed -> rebuilds.add(changed), TaskTreePanel::projectRootOf);
+        JTree tree = listingTree(tracker, sections);
+
+        // The restoration already expanded the row; collapse (a real event, so
+        // the record is dropped) then expand again as the user's gesture does.
+        TreePath projectPath = sections.get("profiling-backend:ISSUES").getParentPath();
+        tree.collapsePath(projectPath);
+        tree.expandPath(projectPath);
+
+        // Expanding the row unfolds the row alone: nothing beneath it is
+        // opened, and no listing fetch is asked for.
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedProjects());
+        assertTrue(tracker.requestedGitHubIssues().isEmpty(),
+                "the GitHub node fetches only on its own expansion");
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty(),
+                "the Pull Requests section fetches only on its own expansion");
+        assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty());
+        assertTrue(tracker.requestedIssueSections().isEmpty());
         assertTrue(rebuilds.isEmpty());
     }
 
@@ -1101,7 +1127,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void openingAProjectRowRecordsItsListingsWithOneRebuild() {
+    void openingAProjectRowRecordsTheRowAloneWithNoRebuild() {
         DefaultMutableTreeNode root = modelTree(everyCollapsibleKind(REGISTERED_ROOT));
         List<Boolean> rebuilds = new ArrayList<>();
         ListingExpansionTracker tracker = new ListingExpansionTracker(rebuilds::add, TaskTreePanel::projectRootOf);
@@ -1112,14 +1138,16 @@ class TaskTreePanelTargetTest {
 
         expand(tracker, pathAt(root, 0));
         assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedProjects());
-        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedIssueSections());
-        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedGitHubIssues());
-        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        assertTrue(tracker.requestedGitHubIssues().isEmpty(),
+                "the GitHub node fetches only on its own expansion");
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty(),
+                "the Pull Requests section fetches only on its own expansion");
         assertTrue(tracker.requested(SectionKind.WORKTREES).isEmpty(), "worktrees stay opened by hand");
-        assertEquals(List.of(false), rebuilds, "one rebuild fetches both listings");
+        assertTrue(tracker.requestedIssueSections().isEmpty(), "nothing under the row opens with it");
+        assertTrue(rebuilds.isEmpty(), "opening the row fetches nothing");
 
         expand(tracker, pathAt(root, 0));
-        assertEquals(List.of(false), rebuilds, "re-opening asks for nothing new");
+        assertTrue(rebuilds.isEmpty(), "re-opening asks for nothing new");
     }
 
     @Test

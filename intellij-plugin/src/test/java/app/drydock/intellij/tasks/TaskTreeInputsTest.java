@@ -7,6 +7,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
@@ -43,8 +44,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -63,6 +63,91 @@ class TaskTreeInputsTest {
         assertTrue(TaskTreeInputs.githubIssuesWanted(Set.of(ROOT), ROOT), "the opened node is fetched");
         // Only the root the user opened, not every registered project.
         assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), ROOT));
+    }
+
+    // --- Search beyond the fetch limit: the search rows only widen the pool ---
+
+    @Test
+    void baseRowsWinAndSearchRowsFillTheNumbersTheBaseMisses() {
+        GhCliService.OpenPullRequest base = pr(100, "newest", "h");
+        GhCliService.OpenPullRequest searched = pr(9, "beyond the window", "old");
+        GhCliService.OpenPullRequest duplicate = pr(100, "searched copy", "h");
+
+        List<GhCliService.OpenPullRequest> merged =
+                TaskTreeInputs.mergePullRequests(List.of(base), List.of(searched, duplicate));
+
+        assertEquals(List.of(base, searched), merged, "the base row keeps its fields, the extra row fills 9");
+    }
+
+    @Test
+    void aCompletedSearchFetchWidensTheBaseListingWithoutAThrow() throws Exception {
+        TaskTreeInputs inputs = new TaskTreeInputs(onChange -> () -> { });
+        GhCliService.OpenPullRequest beyond = pr(9, "beyond the window", "old");
+        seedSearchPullRequests(inputs, ROOT, "window fix",
+                CompletableFuture.completedFuture(new GhCliService.PullRequestListing.Listed(List.of(beyond))));
+
+        GhCliService.PullRequestListing base = new GhCliService.PullRequestListing.Listed(
+                List.of(pr(100, "newest", "h")));
+        GhCliService.PullRequestListing merged = searchedPullRequests(inputs, ROOT, Optional.empty(), base,
+                new TaskTreeInputs.ListingSearch("window fix", "", List.of()));
+
+        assertEquals(List.of(pr(100, "newest", "h"), beyond),
+                assertInstanceOf(GhCliService.PullRequestListing.Listed.class, merged).pullRequests());
+    }
+
+    @Test
+    void aFailedSearchFetchLeavesTheBaseListingAlone() throws Exception {
+        TaskTreeInputs inputs = new TaskTreeInputs(onChange -> () -> { });
+        seedSearchPullRequests(inputs, ROOT, "window fix",
+                CompletableFuture.completedFuture(new GhCliService.PullRequestListing.Failed("HTTP 502")));
+
+        GhCliService.PullRequestListing base = new GhCliService.PullRequestListing.Listed(
+                List.of(pr(100, "newest", "h")));
+        GhCliService.PullRequestListing merged = searchedPullRequests(inputs, ROOT, Optional.empty(), base,
+                new TaskTreeInputs.ListingSearch("window fix", "", List.of()));
+
+        assertSame(base, merged, "a failed search never masks the section's rows with nothing");
+    }
+
+    @Test
+    void noSearchMeansNoMergeEvenWhenTheCacheHoldsRows() throws Exception {
+        TaskTreeInputs inputs = new TaskTreeInputs(onChange -> () -> { });
+        seedSearchPullRequests(inputs, ROOT, "window fix",
+                CompletableFuture.completedFuture(new GhCliService.PullRequestListing.Listed(
+                        List.of(pr(9, "beyond the window", "old")))));
+
+        GhCliService.PullRequestListing base = new GhCliService.PullRequestListing.Listed(
+                List.of(pr(100, "newest", "h")));
+        assertSame(base, searchedPullRequests(inputs, ROOT, Optional.empty(), base,
+                TaskTreeInputs.ListingSearch.EMPTY));
+        GhCliService.PullRequestListing failed = new GhCliService.PullRequestListing.Failed("gh pr list exited 1");
+        assertSame(failed, searchedPullRequests(inputs, ROOT, Optional.empty(), failed,
+                new TaskTreeInputs.ListingSearch("window fix", "", List.of())),
+                "a failed base listing is the error row, not a candidate pool");
+    }
+
+    private static GhCliService.OpenPullRequest pr(int number, String title, String head) {
+        return new GhCliService.OpenPullRequest(number, title, head, "main", false,
+                Optional.empty(), Optional.empty(), false);
+    }
+
+    private static void seedSearchPullRequests(TaskTreeInputs inputs, Path root, String query,
+                                               CompletableFuture<GhCliService.PullRequestListing> lookup)
+            throws ReflectiveOperationException {
+        Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "searchPullRequestCache");
+        cache.put(root, record("CachedSearchPullRequests", query,
+                System.nanoTime() + TimeUnit.MINUTES.toNanos(5), lookup, null));
+    }
+
+    private static GhCliService.PullRequestListing searchedPullRequests(TaskTreeInputs inputs, Path root,
+                                                                        Optional<String> repository,
+                                                                        GhCliService.PullRequestListing base,
+                                                                        TaskTreeInputs.ListingSearch search)
+            throws ReflectiveOperationException {
+        Method method = TaskTreeInputs.class.getDeclaredMethod("searchedPullRequests", Path.class,
+                Optional.class, GhCliService.PullRequestListing.class, TaskTreeInputs.ListingSearch.class);
+        method.setAccessible(true);
+        return (GhCliService.PullRequestListing) method.invoke(inputs, root, repository, base, search);
     }
 
     // --- Origin-remote detection: only git's definitive answer is cached ---

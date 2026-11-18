@@ -265,6 +265,62 @@ class GhCliPullRequestListingTest {
                 .pullRequests().get(0).ciFailures());
     }
 
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void theSearchQueryRidesArgvBeforeTheLimit(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "printf '%s' '[{\"number\":9,\"title\":\"old\",\"headRefName\":\"h\",\"baseRefName\":\"main\"}]'\n");
+
+        GhCliService.PullRequestListing listing = GhCliService.searchPullRequestsWith(Optional.of(gh), dir,
+                Optional.of("o/r"), "login token", Duration.ofSeconds(15));
+
+        // The query rides --search and the limit stays behind it: the server
+        // bounds the matches, not the repository.
+        assertEquals(List.of("args=pr list --state open --search login token --limit 100 --json "
+                + "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup --repo o/r"),
+                Files.readAllLines(receipt));
+        assertEquals(9, assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
+                .pullRequests().get(0).number());
+    }
+
+    @Test
+    void missingGhMakesTheSearchedListingUnsupportedToo() {
+        assertInstanceOf(GhCliService.PullRequestListing.Unsupported.class,
+                GhCliService.searchPullRequestsWith(Optional.empty(), Path.of("."), Optional.empty(),
+                        "query", Duration.ofSeconds(15)));
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void theDetailLookupAsksForEveryListingField(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "printf '%s' '{\"number\":500,\"title\":\"old\",\"headRefName\":\"h\",\"baseRefName\":\"main\"}'\n");
+
+        Optional<GhCliService.OpenPullRequest> answer =
+                GhCliService.pullRequestDetailWith(gh, dir, Optional.of("o/r"), 500);
+
+        assertEquals(List.of("args=pr view 500 --json "
+                + "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup --repo o/r"),
+                Files.readAllLines(receipt));
+        assertEquals(500, answer.orElseThrow().number());
+        assertEquals("old", answer.orElseThrow().title());
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aDetailLookupOfAnUnknownNumberAnswersEmptyWithAWarning(@TempDir Path dir) throws Exception {
+        Path gh = scriptedGh(dir, "echo 'could not find pull request' >&2\nexit 1\n");
+        List<LogRecord> warnings = new ArrayList<>();
+
+        Optional<GhCliService.OpenPullRequest> answer = warningsDuring(warnings, () ->
+                GhCliService.pullRequestDetailWith(gh, dir, Optional.empty(), 999999));
+
+        assertTrue(answer.isEmpty());
+        assertEquals(1, warnings.size(), warnings::toString);
+    }
+
     @Test
     void missingGhIsUnsupportedAndNotAWarning() throws Exception {
         List<LogRecord> warnings = new ArrayList<>();

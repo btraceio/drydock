@@ -361,6 +361,19 @@ public final class GhCliService implements AutoCloseable {
         return openPullRequestsWith(locate(), root, repository, PROCESS_TIMEOUT);
     }
 
+    /** The open-PR listing narrowed by {@code query} (see {@link #searchPullRequestsWith}). */
+    public CompletableFuture<PullRequestListing> searchPullRequests(Path root, Optional<String> repository,
+                                                                    String query) {
+        return CompletableFuture.supplyAsync(
+                () -> searchPullRequestsWith(locate(), root, repository, query, PROCESS_TIMEOUT), executor);
+    }
+
+    /** The open-issue listing narrowed by {@code query} (see {@link #searchIssuesWith}). */
+    public CompletableFuture<IssueListing> searchIssues(Path root, Optional<String> repository, String query) {
+        return CompletableFuture.supplyAsync(
+                () -> searchIssuesWith(locate(), root, repository, query), executor);
+    }
+
     /**
      * The open-PR listing with {@code gh} already looked up (empty: not
      * installed); static so argv, bounds and failure logging are testable
@@ -376,9 +389,39 @@ public final class GhCliService implements AutoCloseable {
         if (repository.filter(value -> !validRepository(value)).isPresent()) {
             return new PullRequestListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
         }
-        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list",
-                "--state", "open",
-                "--limit", String.valueOf(PR_LIST_LIMIT),
+        return pullRequestListing(gh, root, repository, List.of(), timeout);
+    }
+
+    /**
+     * The open-PR listing narrowed by a GitHub search query, with {@code gh}
+     * already looked up (empty: not installed); static so argv, bounds and
+     * failure logging are testable with a scripted gh. The query rides
+     * {@code --search}: the server applies it before {@code --limit}, so the
+     * limit bounds the matches, not the repository — a search reaches PRs
+     * the plain listing's newest-{@link #PR_LIST_LIMIT} window never shows.
+     */
+    static PullRequestListing searchPullRequestsWith(Optional<Path> located, Path root,
+                                                     Optional<String> repository, String query,
+                                                     Duration timeout) {
+        Path gh = located.orElse(null);
+        if (gh == null) {
+            return new PullRequestListing.Unsupported();
+        }
+        if (repository.filter(value -> !validRepository(value)).isPresent()) {
+            return new PullRequestListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
+        }
+        return pullRequestListing(gh, root, repository, List.of("--search", query), timeout);
+    }
+
+    /**
+     * One {@code gh pr list} run and its parsed rows; the plain and the
+     * searched listing share every field, bound and failure answer.
+     */
+    private static PullRequestListing pullRequestListing(Path gh, Path root, Optional<String> repository,
+                                                         List<String> selection, Duration timeout) {
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list", "--state", "open"));
+        command.addAll(selection);
+        command.addAll(List.of("--limit", String.valueOf(PR_LIST_LIMIT),
                 "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup"));
         repository.ifPresent(value -> {
             command.add("--repo");
@@ -455,6 +498,41 @@ public final class GhCliService implements AutoCloseable {
         }
         return parseBranchPullRequests("[" + result.stdout() + "]").stream()
                 .filter(pr -> pr.number() == number).findFirst();
+    }
+
+    /**
+     * Reads one PR by number with the full row fields the listing carries
+     * (mergeability and CI included), so an exact-number search hit renders
+     * as the same row a listing row does — including PRs absent from the
+     * newest-{@link #PR_LIST_LIMIT} listing window.
+     */
+    public CompletableFuture<Optional<OpenPullRequest>> pullRequestDetail(Path root, Optional<String> repository,
+                                                                          int number) {
+        return CompletableFuture.supplyAsync(
+                () -> locate().flatMap(gh -> pullRequestDetailWith(gh, root, repository, number)), executor);
+    }
+
+    /** The pure half of {@link #pullRequestDetail}; static so argv is testable with a scripted gh. */
+    static Optional<OpenPullRequest> pullRequestDetailWith(Path gh, Path root, Optional<String> repository,
+                                                           int number) {
+        if (number <= 0 || repository.filter(value -> !validRepository(value)).isPresent()) {
+            throw new IllegalArgumentException("Use a positive PR number and a valid repository");
+        }
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "view", String.valueOf(number),
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup"));
+        repository.ifPresent(value -> {
+            command.add("--repo");
+            command.add(value);
+        });
+        ProcessResult result = runIn(root, command);
+        if (result == null || result.exitCode() != 0) {
+            LOG.log(Level.WARNING, "Could not read PR #" + number + repository.map(r -> " in " + r).orElse("")
+                    + (result == null ? " (command did not complete)" : ": " + ProcessRunner.excerpt(result.stderr())));
+            return Optional.empty();
+        }
+        return parsePullRequestListing("[" + result.stdout() + "]") instanceof PullRequestListing.Listed listed
+                ? listed.pullRequests().stream().filter(pr -> pr.number() == number).findFirst()
+                : Optional.empty();
     }
 
     /**
@@ -633,11 +711,35 @@ public final class GhCliService implements AutoCloseable {
         if (gh == null) {
             return new IssueListing.Unsupported();
         }
+        return issueListing(gh, root, repository, List.of());
+    }
+
+    /**
+     * The open-issue listing narrowed by a GitHub search query, with {@code gh}
+     * already looked up (empty: not installed); static so argv, bounds and
+     * failure logging are testable with a scripted gh. The query rides
+     * {@code --search}: the server applies it before {@code --limit}, so the
+     * limit bounds the matches, not the repository — a search reaches issues
+     * the plain listing's newest-{@link #ISSUE_LIST_LIMIT} window never shows.
+     */
+    static IssueListing searchIssuesWith(Optional<Path> located, Path root, Optional<String> repository,
+                                         String query) {
+        Path gh = located.orElse(null);
+        if (gh == null) {
+            return new IssueListing.Unsupported();
+        }
+        return issueListing(gh, root, repository, List.of("--search", query));
+    }
+
+    /** One {@code gh issue list} run and its parsed rows; the plain and the searched listing share everything else. */
+    private static IssueListing issueListing(Path gh, Path root, Optional<String> repository,
+                                             List<String> selection) {
         if (repository.filter(value -> !validRepository(value)).isPresent()) {
             return new IssueListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
         }
-        List<String> command = new ArrayList<>(List.of(gh.toString(), "issue", "list",
-                "--state", "open", "--limit", String.valueOf(ISSUE_LIST_LIMIT),
+        List<String> command = new ArrayList<>(List.of(gh.toString(), "issue", "list", "--state", "open"));
+        command.addAll(selection);
+        command.addAll(List.of("--limit", String.valueOf(ISSUE_LIST_LIMIT),
                 "--json", "number,title,url,labels,assignees,updatedAt"));
         repository.ifPresent(value -> {
             command.add("--repo");

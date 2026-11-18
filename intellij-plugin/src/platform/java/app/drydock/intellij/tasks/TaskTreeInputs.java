@@ -12,6 +12,8 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.IssueListing;
+import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.JiraIssueListing;
@@ -118,6 +120,12 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
+    /** Each project's latest search-scoped pull-request fetch, keyed by its main-checkout root. */
+    private final Map<Path, CachedSearchPullRequests> searchPullRequestCache = new ConcurrentHashMap<>();
+    /** Each project's latest search-scoped issue fetch, keyed by its main-checkout root. */
+    private final Map<Path, CachedSearchIssues> searchIssueCache = new ConcurrentHashMap<>();
+    /** Exact-number PR lookups keyed by (root, repository, number). */
+    private final Map<ExactPullRequestKey, CachedExactPullRequest> exactPullRequestCache = new ConcurrentHashMap<>();
     /** Runs when a badge lookup or listing this gather did not wait for completes; the panel rebuilds. */
     private volatile Runnable lateData = () -> { };
     /** What each GitHub and Jira listing shows now; a gather never waits for one. */
@@ -179,6 +187,48 @@ final class TaskTreeInputs implements AutoCloseable {
     private record CachedPullRequests(long expiresAt, CompletableFuture<PullRequestListing> listing) { }
 
     /**
+     * What the search field asks the listings to reach beyond their fetch
+     * limit: the server-side queries (empty: nothing to ask) and the
+     * {@code pr:} terms that name a PR by number and resolve by exact
+     * lookup instead. Built by the panel from the parsed search text;
+     * {@link #EMPTY} when no search is active.
+     */
+    record ListingSearch(String pullRequestQuery, String issueQuery, List<Integer> pullRequestNumbers) {
+
+        static final ListingSearch EMPTY = new ListingSearch("", "", List.of());
+
+        boolean searchesPullRequests() {
+            return !pullRequestQuery.isEmpty() || !pullRequestNumbers().isEmpty();
+        }
+
+        boolean searchesIssues() {
+            return !issueQuery.isEmpty();
+        }
+    }
+
+    /**
+     * One project's latest search-scoped listing: the query it answers, the
+     * running fetch, and the last completed answer of the same query,
+     * served while a refresh after the TTL is in flight so typing does not
+     * make the searched rows blink off. A changed query replaces the entry:
+     * only the newest query's rows may merge.
+     */
+    private record CachedSearchPullRequests(String query, long expiresAt,
+                                            CompletableFuture<PullRequestListing> lookup,
+                                            PullRequestListing.Listed previous) { }
+
+    private record CachedSearchIssues(String query, long expiresAt,
+                                      CompletableFuture<IssueListing> lookup,
+                                      IssueListing.Listed previous) { }
+
+    /** One exact-number PR lookup: (root, repository, number) and its cached answer. */
+    private record ExactPullRequestKey(Path root, Optional<String> repository, int number) { }
+
+    private record CachedExactPullRequest(long expiresAt,
+                                          CompletableFuture<Optional<OpenPullRequest>> lookup,
+                                          Optional<OpenPullRequest> previous) { }
+
+    /**
      * One project's head-branch PR map: the current lookup and the last
      * answer, which is served while a refresh after the TTL is in flight so
      * the badges do not blink off once a minute.
@@ -230,6 +280,9 @@ final class TaskTreeInputs implements AutoCloseable {
         issueCache.clear();
         pullRequestCache.clear();
         branchPullRequestCache.clear();
+        searchPullRequestCache.clear();
+        searchIssueCache.clear();
+        exactPullRequestCache.clear();
         targets.clear();
         remoteCache.clear();
         listingAnswers.forgetAll();
@@ -253,6 +306,7 @@ final class TaskTreeInputs implements AutoCloseable {
     /** Forgets {@code root}'s cached issue listing, so the next gather re-queries it. */
     void invalidateIssues(Path root) {
         issueCache.keySet().removeIf(key -> key.root().equals(root));
+        searchIssueCache.remove(root);
         listingAnswers.forget(root);
     }
 
@@ -260,6 +314,8 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        searchPullRequestCache.remove(root);
+        exactPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         listingAnswers.forget(root);
     }
 
@@ -282,7 +338,7 @@ final class TaskTreeInputs implements AutoCloseable {
     TaskTreeModel.Inputs gather(Project here, String filter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
                                 Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
-                                Set<Path> requestedPullRequests) {
+                                Set<Path> requestedPullRequests, ListingSearch search) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
@@ -338,7 +394,10 @@ final class TaskTreeInputs implements AutoCloseable {
                     if (githubIssuesWanted(requestedGitHubIssues, root)) {
                         listingAnswers.now(root, new IssueKey(root, githubSettings.repository()),
                                         issuesOf(root, githubSettings.repository()), ISSUES_DID_NOT_COMPLETE)
-                                .ifPresentOrElse(listing -> issues.put(root, listing), () -> pendingIssues.add(root));
+                                .ifPresentOrElse(
+                                        listing -> issues.put(root,
+                                                searchedIssues(root, githubSettings.repository(), listing, search)),
+                                        () -> pendingIssues.add(root));
                     }
                 } else {
                     githubGhostRoots.add(root);
@@ -375,7 +434,8 @@ final class TaskTreeInputs implements AutoCloseable {
                 if (requestedPullRequests.contains(root)) {
                     listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
                                     pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
-                            .ifPresent(listing -> pullRequests.put(root, listing));
+                            .ifPresent(listing -> pullRequests.put(root,
+                                    searchedPullRequests(root, githubSettings.repository(), listing, search)));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
                     // only once pull requests themselves have been requested.
@@ -730,6 +790,160 @@ final class TaskTreeInputs implements AutoCloseable {
         // openPullRequestsBlocking never completes exceptionally (every
         // failure becomes a Failed listing), so join on a done future is safe.
         return listing.isDone() && listing.join() instanceof PullRequestListing.Failed;
+    }
+
+    /**
+     * {@code base} widened by the rows a server-side search finds beyond
+     * the fetch limit: the limit bounds the plain listing's newest-100
+     * window, and the client-side filter over that window alone made older
+     * PRs and issues unreachable by search. The searched rows ride
+     * {@code --search} (the server applies the query before its limit) and
+     * exact-number lookups; they only ever widen the pool — the model's own
+     * matcher still decides what is shown, so a search hit the client would
+     * reject never appears. Only a Listed base widens: a failed plain
+     * listing is the section's error row, not a candidate pool. Pure apart
+     * from the search fetches it starts (never waited on; their completion
+     * requests one more rebuild through {@link #onLateData}).
+     */
+    private PullRequestListing searchedPullRequests(Path root, Optional<String> repository,
+                                                    PullRequestListing base, ListingSearch search) {
+        if (!(base instanceof PullRequestListing.Listed listed) || !search.searchesPullRequests()) {
+            return base;
+        }
+        List<OpenPullRequest> extra = new ArrayList<>();
+        if (!search.pullRequestQuery().isEmpty()) {
+            extra.addAll(searchPullRequestRows(root, repository, search.pullRequestQuery()));
+        }
+        for (int number : search.pullRequestNumbers()) {
+            exactPullRequest(root, repository, number).ifPresent(extra::add);
+        }
+        if (extra.isEmpty()) {
+            return base;
+        }
+        return new PullRequestListing.Listed(mergePullRequests(listed.pullRequests(), extra));
+    }
+
+    /** Same rule for a GitHub issue listing. */
+    private IssueListing searchedIssues(Path root, Optional<String> repository,
+                                        IssueListing base, ListingSearch search) {
+        if (!(base instanceof IssueListing.Listed listed) || !search.searchesIssues()) {
+            return base;
+        }
+        List<OpenIssue> extra = searchIssueRows(root, repository, search.issueQuery());
+        if (extra.isEmpty()) {
+            return base;
+        }
+        Map<Integer, OpenIssue> merged = new LinkedHashMap<>();
+        for (OpenIssue row : listed.issues()) {
+            merged.put(row.number(), row);
+        }
+        for (OpenIssue row : extra) {
+            merged.putIfAbsent(row.number(), row);
+        }
+        return new IssueListing.Listed(List.copyOf(merged.values()));
+    }
+
+    /** Base rows win; a searched row only fills a number the base does not carry. Pure. */
+    static List<OpenPullRequest> mergePullRequests(List<OpenPullRequest> base, List<OpenPullRequest> extra) {
+        Map<Integer, OpenPullRequest> merged = new LinkedHashMap<>();
+        for (OpenPullRequest row : base) {
+            merged.put(row.number(), row);
+        }
+        for (OpenPullRequest row : extra) {
+            merged.putIfAbsent(row.number(), row);
+        }
+        return List.copyOf(merged.values());
+    }
+
+    /**
+     * The searched rows of {@code root}'s latest query: the running fetch's
+     * answer when it is done, else the previous answer of the same query
+     * (a failed re-query keeps showing what the last one found), else
+     * none yet. A changed query or an expired entry starts one new fetch;
+     * its completion requests one more rebuild.
+     */
+    private List<OpenPullRequest> searchPullRequestRows(Path root, Optional<String> repository, String query) {
+        long now = System.nanoTime();
+        CachedSearchPullRequests cached = searchPullRequestCache.get(root);
+        if (cached == null || !cached.query().equals(query) || cached.expiresAt() <= now) {
+            PullRequestListing.Listed previous =
+                    cached != null && cached.query().equals(query) ? cached.previous() : null;
+            CompletableFuture<PullRequestListing> lookup = github.searchPullRequests(root, repository, query);
+            cached = new CachedSearchPullRequests(query, now + ISSUE_CACHE_NANOS, lookup, previous);
+            searchPullRequestCache.put(root, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((ignored, failure) -> lateData.run());
+            }
+        }
+        return searchedRows(cached);
+    }
+
+    private List<OpenPullRequest> searchedRows(CachedSearchPullRequests cached) {
+        PullRequestListing answer = cached.lookup().isDone()
+                ? completedPullRequests(cached.lookup()) : null;
+        PullRequestListing.Listed listed = answer instanceof PullRequestListing.Listed l ? l : cached.previous();
+        return listed == null ? List.of() : listed.pullRequests();
+    }
+
+    private List<OpenIssue> searchIssueRows(Path root, Optional<String> repository, String query) {
+        long now = System.nanoTime();
+        CachedSearchIssues cached = searchIssueCache.get(root);
+        if (cached == null || !cached.query().equals(query) || cached.expiresAt() <= now) {
+            IssueListing.Listed previous =
+                    cached != null && cached.query().equals(query) ? cached.previous() : null;
+            CompletableFuture<IssueListing> lookup = github.searchIssues(root, repository, query);
+            cached = new CachedSearchIssues(query, now + ISSUE_CACHE_NANOS, lookup, previous);
+            searchIssueCache.put(root, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((ignored, failure) -> lateData.run());
+            }
+        }
+        if (cached.lookup().isDone()) {
+            IssueListing answer = completedIssues(cached.lookup());
+            IssueListing.Listed listed = answer instanceof IssueListing.Listed l ? l : cached.previous();
+            return listed == null ? List.of() : listed.issues();
+        }
+        return cached.previous() == null ? List.of() : cached.previous().issues();
+    }
+
+    /** The finished lookup's listing, or null while it runs (every failure is a Failed listing, never a throw). */
+    private static PullRequestListing completedPullRequests(CompletableFuture<PullRequestListing> lookup) {
+        return lookup.isDone() && !lookup.isCompletedExceptionally() ? lookup.join() : null;
+    }
+
+    private static IssueListing completedIssues(CompletableFuture<IssueListing> lookup) {
+        return lookup.isDone() && !lookup.isCompletedExceptionally() ? lookup.join() : null;
+    }
+
+    /** One exact-number PR lookup with the same run/previous-answer cadence as the searched rows. */
+    private Optional<OpenPullRequest> exactPullRequest(Path root, Optional<String> repository, int number) {
+        ExactPullRequestKey key = new ExactPullRequestKey(root, repository, number);
+        long now = System.nanoTime();
+        CachedExactPullRequest cached = exactPullRequestCache.get(key);
+        if (cached == null || cached.expiresAt() <= now) {
+            Optional<OpenPullRequest> previous = Optional.empty();
+            if (cached != null) {
+                previous = cached.lookup().isDone()
+                        ? completedExact(cached.lookup()) : cached.previous();
+            }
+            CompletableFuture<Optional<OpenPullRequest>> lookup =
+                    github.pullRequestDetail(root, repository, number);
+            cached = new CachedExactPullRequest(now + ISSUE_CACHE_NANOS, lookup, previous);
+            exactPullRequestCache.put(key, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((ignored, failure) -> lateData.run());
+            }
+        }
+        if (cached.lookup().isDone()) {
+            Optional<OpenPullRequest> answer = completedExact(cached.lookup());
+            return answer != null ? answer : cached.previous();
+        }
+        return cached.previous();
+    }
+
+    /** The finished lookup's answer, or null while it runs (a failed lookup answered empty, never a throw). */
+    private static Optional<OpenPullRequest> completedExact(CompletableFuture<Optional<OpenPullRequest>> lookup) {
+        return lookup.isDone() && !lookup.isCompletedExceptionally() ? lookup.join() : null;
     }
 
     /**

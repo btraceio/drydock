@@ -119,6 +119,61 @@ final class SearchTerms<G> {
         return issues;
     }
 
+    /**
+     * The server-side query for a pull-request search fetch: the
+     * {@code pr:} terms that name a PR by text — number terms are left out,
+     * they resolve by exact lookup ({@link #pullRequestNumbers()}) — plus
+     * the plain text, with every multi-word span re-quoted for gh's
+     * {@code --search}. Empty when no fetch is worth starting. Pure.
+     */
+    String pullRequestSearchQuery() {
+        List<String> tokens = new ArrayList<>();
+        for (String term : pullRequests) {
+            if (!term.isBlank() && !isDigits(unhash(term))) {
+                tokens.add(searchToken(term));
+            }
+        }
+        for (String token : plain) {
+            tokens.add(searchToken(token));
+        }
+        return String.join(" ", tokens);
+    }
+
+    /** Same rule for a GitHub issue search fetch; empty when nothing to ask. Pure. */
+    String issueSearchQuery() {
+        List<String> tokens = new ArrayList<>();
+        for (String term : issues) {
+            if (!term.isBlank()) {
+                tokens.add(searchToken(term));
+            }
+        }
+        for (String token : plain) {
+            tokens.add(searchToken(token));
+        }
+        return String.join(" ", tokens);
+    }
+
+    /** The {@code pr:} terms that name a PR by number ({@code 12}, {@code #12}). Pure. */
+    List<Integer> pullRequestNumbers() {
+        List<Integer> numbers = new ArrayList<>();
+        for (String term : pullRequests) {
+            String needle = unhash(term);
+            if (isDigits(needle)) {
+                try {
+                    numbers.add(Integer.parseInt(needle));
+                } catch (NumberFormatException ignored) {
+                    // Longer than an int: no PR carries that number.
+                }
+            }
+        }
+        return List.copyOf(numbers);
+    }
+
+    /** One term for gh's {@code --search}: multi-word spans stay one quoted token. */
+    private static String searchToken(String term) {
+        return term.contains(" ") ? '"' + term + '"' : term;
+    }
+
     /** The decoded {@code is:<group>} constraints. */
     Set<G> groupKinds() {
         return groupKinds;
