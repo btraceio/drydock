@@ -30,6 +30,7 @@ import app.drydock.tasks.TaskStatus;
 
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -118,6 +119,50 @@ public class TaskMenuFactsPlatformTest extends BasePlatformTestCase {
         assertNull(misses.showSession());
     }
 
+    /** A session row's link lists: its pull requests, then its tasks' mirrors split by kind. */
+    public void testATaskRowCarriesItsPullRequestsAndItsTaskMirrorsAsLinkLists() throws Exception {
+        TaskRow lead = session("pr-40", Optional.of(branchPr(40, "pr-40")));
+        String sessionId = lead.session().id().toString();
+        // The target PR differs from the branch PR: both pages go into the
+        // list, target first.
+        TaskRow targeted = new TaskRow(lead.session().toBuilder()
+                .targetPullRequest(Optional.of(app.drydock.domain.PullRequestTarget.fromUrl(
+                        "https://github.com/x/y/pull/7"))).build(),
+                lead.activity(), lead.running(), lead.branch(), lead.placement(),
+                lead.readOnly(), lead.folderMissing(), lead.resumable(), lead.branchPullRequest());
+        TaskDocument mirrored = mirroredDocument(TASK_ID, sessionId,
+                List.of("https://github.com/x/y/issues/12", "https://acme.atlassian.net/browse/PROJ-7",
+                        "https://example.org/unclassifiable"));
+        // mirrorsOfSession reads the task service's published composition,
+        // not the factsFor argument -- the tree paints from the same source --
+        // so the test publishes the hand-built one through the same field
+        // the watcher writes, and restores what it parked.
+        Field watched = app.drydock.delayedtasks.DelayedTaskService.class.getDeclaredField("watchedSnapshot");
+        watched.setAccessible(true);
+        Object service = DrydockPluginService.getInstance().taskService();
+        app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot parked =
+                (app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot) watched.get(service);
+        watched.set(service, watched(sessionId, mirrored));
+        try {
+            TaskMenu.MenuFacts facts = TaskMenu.factsFor(targeted, false, List.of(),
+                    TaskTreePanel.TaskLayer.EMPTY, null);
+            assertEquals(List.of("https://github.com/x/y/pull/7", "https://github.com/x/y/pull/40"),
+                    facts.prUrls());
+            assertEquals(List.of("https://github.com/x/y/issues/12"), facts.githubUrls());
+            assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-7"), facts.jiraUrls());
+        } finally {
+            watched.set(service, parked);
+        }
+
+        // No target, no branch PR, a task with no mirrors: every list empty,
+        // so the session menu offers only the project window.
+        TaskMenu.MenuFacts plain = TaskMenu.factsFor(session("pr-41"), false, List.of(),
+                TaskTreePanel.TaskLayer.EMPTY, null);
+        assertEquals(List.of(), plain.prUrls());
+        assertEquals(List.of(), plain.githubUrls());
+        assertEquals(List.of(), plain.jiraUrls());
+    }
+
     // Fixtures: the shapes the real tree builder produces, hand-built.
 
     private static TaskRow session(String branch) {
@@ -136,7 +181,7 @@ public class TaskMenuFactsPlatformTest extends BasePlatformTestCase {
 
     private static BranchPullRequest branchPr(int number, String head) {
         return new BranchPullRequest(number, PrInfo.PrLifecycle.OPEN, false, head, "Speed up",
-                Optional.empty());
+                Optional.of("https://github.com/x/y/pull/" + number));
     }
 
     private static PullRequestRow pullRequest(int number, String head) {
@@ -168,9 +213,17 @@ public class TaskMenuFactsPlatformTest extends BasePlatformTestCase {
     }
 
     private static TaskDocument document(TaskId id) {
+        return mirroredDocument(id, List.of(), List.of());
+    }
+
+    private static TaskDocument mirroredDocument(TaskId id, List<String> sessions, List<String> mirrors) {
         return new TaskDocument(id, RepositoryId.newId(), "Fix allocation profile",
                 TaskStatus.STARTED, app.drydock.tasks.DoneBy.AGENT, Optional.of(NOW),
-                List.of(), List.of(), "", "body");
+                List.of(), sessions, mirrors, "", "body");
+    }
+
+    private static TaskDocument mirroredDocument(TaskId id, String sessionId, List<String> mirrors) {
+        return mirroredDocument(id, List.of(sessionId), mirrors);
     }
 
     private static WatchedSnapshot watched(TaskDocument... documents) {
@@ -178,8 +231,26 @@ public class TaskMenuFactsPlatformTest extends BasePlatformTestCase {
         for (TaskDocument document : documents) {
             byId.put(document.id(), document);
         }
+        return watched(Map.of(), documents);
+    }
+
+    /** The watched snapshot with the session-reference index stated, as TaskFiles.scan computes it. */
+    private static WatchedSnapshot watched(String sessionId, TaskDocument... documents) {
+        Map<TaskId, TaskDocument> byId = new LinkedHashMap<>();
+        for (TaskDocument document : documents) {
+            byId.put(document.id(), document);
+        }
+        return watched(Map.of(sessionId, List.of(documents)), documents);
+    }
+
+    private static WatchedSnapshot watched(Map<String, List<TaskDocument>> bySessionReference,
+                                           TaskDocument... documents) {
+        Map<TaskId, TaskDocument> byId = new LinkedHashMap<>();
+        for (TaskDocument document : documents) {
+            byId.put(document.id(), document);
+        }
         return new WatchedSnapshot(new TaskSnapshot(List.of(documents),
-                List.of(documents[0].repository()), byId, Map.of(), List.of(), List.of()),
+                List.of(documents[0].repository()), byId, bySessionReference, List.of(), List.of()),
                 List.of(), null);
     }
 }

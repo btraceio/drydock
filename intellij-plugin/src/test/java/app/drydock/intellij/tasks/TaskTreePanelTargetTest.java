@@ -74,7 +74,7 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
-    void projectWindowIsOfferedOnPresentLocalProjectRowsOnly() {
+    void projectWindowIsOfferedOnPresentLocalProjectRowsAndTheirSessions() {
         SharedProject registered = SharedProject.local(
                 RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
         ProjectRow row = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
@@ -82,16 +82,39 @@ class TaskTreePanelTargetTest {
         ProjectRow remote = new ProjectRow(new SharedProject(RepositoryId.newId(), REGISTERED_ROOT,
                         "remote checkout", NOW, Optional.of(new SshRemote("acme.dev", "/srv/git/profiling-backend"))),
                 false, false, List.of(), List.of(), 0);
+        TaskRow session = new TaskRow(sessionOfWorkingDirectory(REGISTERED_ROOT), Optional.empty(), false,
+                Optional.of("fix-allocation-profile"), new TaskPlacement.Idle(true), false, false, false);
+        TaskRow missingWorktree = new TaskRow(sessionOfWorkingDirectory(REGISTERED_ROOT), Optional.empty(), false,
+                Optional.of("fix-allocation-profile"), new TaskPlacement.Idle(true), false, true, false);
 
-        assertTrue(TaskTreePanel.offersProjectWindow(row, REGISTERED_ROOT));
+        assertTrue(TaskTreePanel.offersProjectWindow(row, registered));
         assertFalse(TaskTreePanel.offersProjectWindow(row, null),
-                "an unresolved main root offers nothing");
-        assertFalse(TaskTreePanel.offersProjectWindow(missing, REGISTERED_ROOT),
+                "an unresolved project offers nothing");
+        assertFalse(TaskTreePanel.offersProjectWindow(missing, registered),
                 "a folder the tree saw missing is not offered; the click still re-checks");
-        assertFalse(TaskTreePanel.offersProjectWindow(remote, REGISTERED_ROOT),
+        assertFalse(TaskTreePanel.offersProjectWindow(remote, remote.project()),
                 "a remote project's root is a placeholder only the standalone app opens");
         assertFalse(TaskTreePanel.offersProjectWindow(new IdleWorktree(LINKED_WORKTREE,
-                "fix-allocation-profile", Optional.empty(), false, false), REGISTERED_ROOT));
+                "fix-allocation-profile", Optional.empty(), false, false), registered));
+        // The session row shares the gate: its own window is the project's
+        // main checkout, offered while the project is local and present.
+        assertTrue(TaskTreePanel.offersProjectWindow(session, registered));
+        assertFalse(TaskTreePanel.offersProjectWindow(missingWorktree, registered),
+                "a session whose folder the tree saw missing is not offered");
+        assertFalse(TaskTreePanel.offersProjectWindow(session, null));
+        assertFalse(TaskTreePanel.offersProjectWindow(session,
+                new SharedProject(RepositoryId.newId(), REGISTERED_ROOT, "remote checkout", NOW,
+                        Optional.of(new SshRemote("acme.dev", "/srv/git/profiling-backend")))),
+                "a remote project's session opens no window from a placeholder root");
+    }
+
+    /** A minimal session of the registered project, for the Project Window gate. */
+    private static ManagedAgentSession sessionOfWorkingDirectory(Path directory) {
+        return new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), RepositoryId.newId(), "Fix allocation profile",
+                AgentBinding.unlaunched(AgentKind.CLAUDE, SessionMode.WRITES),
+                SessionWorkspace.inRepository(directory), NOW)
+                .build();
     }
 
     @Test

@@ -151,6 +151,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The main checkout of the project the selected row belongs to. */
     public static final DataKey<Path> SELECTED_PROJECT_ROOT = DataKey.create("drydock.task.projectRoot");
 
+    /** The registered project the selected row belongs to; tree selections only. */
+    public static final DataKey<SharedProject> SELECTED_PROJECT = DataKey.create("drydock.task.project");
+
     /** The selected Tasks section (T20a), for its New Task action and the context menu. */
     static final DataKey<TasksSection> SELECTED_TASKS_SECTION =
             DataKey.create("drydock.task.tasksSection");
@@ -538,7 +541,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
         // Raises the project's main checkout in its own IDE window, opening
         // one when no window shows it: the shared raise-or-open (RaiseOrOpenWindow)
-        // for a task's worktree, applied to the checkout itself. A remote
+        // for a task's worktree, applied to the checkout itself. Offered on
+        // the project row and on the project's session rows alike. A remote
         // project has placeholder roots only the standalone app opens; a
         // folder gone since the tree's last pass is re-checked, and said,
         // at the click.
@@ -548,7 +552,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             @Override
             public void update(@NotNull AnActionEvent e) {
                 TaskActions.present(e, offersProjectWindow(e.getData(SELECTED_NODE),
-                        e.getData(SELECTED_PROJECT_ROOT)));
+                        e.getData(SELECTED_PROJECT)));
             }
 
             @Override
@@ -558,10 +562,84 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
             @Override
             public void actionPerformed(@NotNull AnActionEvent e) {
-                if (e.getData(SELECTED_NODE) instanceof ProjectRow row
-                        && e.getData(SELECTED_PROJECT_ROOT) instanceof Path root) {
-                    TaskWindows.openCheckoutWindow(project, root, row.project().displayName());
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                if (selected != null && e.getData(SELECTED_PROJECT_ROOT) instanceof Path root) {
+                    TaskWindows.openCheckoutWindow(project, root, selected.displayName());
                 }
+            }
+        };
+        // The session row's split link entries, one per kind. A single page
+        // is the direct entry, whose label names it (PR #9, GitHub Issue #12,
+        // Jira PROJ-123); several pages become a submenu with one child per
+        // page, built per popup from the menu facts. The update recomputes
+        // the same list the facts carry, from the selected node and the
+        // task service's cached snapshot — memory only.
+        AnAction openPullRequest = new DumbAwareAction("Pull Request",
+                "Open the session's pull request page in the browser", AllIcons.Vcs.Vendors.Github) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                List<String> urls = node instanceof TaskRow row ? TaskMenu.prUrlsOf(row) : List.of();
+                if (urls.size() == 1) {
+                    e.getPresentation().setText(TaskMenu.pullRequestLabel(urls.get(0)));
+                }
+                TaskActions.present(e, urls.size() == 1);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                if (e.getData(SELECTED_NODE) instanceof TaskRow row) {
+                    TaskMenu.prUrlsOf(row).forEach(BrowserUtil::browse);
+                }
+            }
+        };
+        AnAction openGithubTickets = new DumbAwareAction("GitHub Issue",
+                "Open the GitHub issue this session's task mirrors in the browser",
+                AllIcons.Vcs.Vendors.Github) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                List<String> urls = selectedGithubTickets(e);
+                if (urls.size() == 1) {
+                    e.getPresentation().setText(TaskMenu.githubIssueLabel(urls.get(0)));
+                }
+                TaskActions.present(e, urls.size() == 1);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                selectedGithubTickets(e).forEach(BrowserUtil::browse);
+            }
+        };
+        AnAction openJiraTickets = new DumbAwareAction("Jira Ticket",
+                "Open the Jira ticket this session's task mirrors in the browser",
+                TaskTreeRenderer.JIRA_ICON) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                List<String> urls = selectedJiraTickets(e);
+                if (urls.size() == 1) {
+                    e.getPresentation().setText(TaskMenu.jiraTicketLabel(urls.get(0)));
+                }
+                TaskActions.present(e, urls.size() == 1);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                selectedJiraTickets(e).forEach(BrowserUtil::browse);
             }
         };
         AnAction openInGitHub = new DumbAwareAction("Open in GitHub",
@@ -854,6 +932,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
         menuActions.put(TaskMenu.Item.OPEN_MAIN_CHECKOUT, openMainCheckout);
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
+        menuActions.put(TaskMenu.Item.OPEN_PULL_REQUEST, openPullRequest);
+        menuActions.put(TaskMenu.Item.OPEN_GITHUB_TICKETS, openGithubTickets);
+        menuActions.put(TaskMenu.Item.OPEN_JIRA_TICKETS, openJiraTickets);
         menuActions.put(TaskMenu.Item.OPEN_IN_WORKBENCH, openInWorkbench);
         menuActions.put(TaskMenu.Item.RESOLVE_CONFLICTS, resolveConflicts);
         menuActions.put(TaskMenu.Item.QUICK_REVIEW, quickReview);
@@ -1043,6 +1124,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_MAIN_CHECKOUT,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
+                TaskMenu.Item.OPEN_PULL_REQUEST, TaskMenu.Item.OPEN_GITHUB_TICKETS, TaskMenu.Item.OPEN_JIRA_TICKETS,
                 TaskMenu.Item.SHOW_TASK, TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_SESSION,
                 TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS,
                 TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
@@ -1313,6 +1395,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             sink.set(SELECTED_NODES, selected);
         }
         selectedProjectRoot().ifPresent(root -> sink.set(SELECTED_PROJECT_ROOT, root));
+        selectedProject().ifPresent(row -> sink.set(SELECTED_PROJECT, row.project()));
         focusTarget().ifPresent(target -> sink.set(FOCUS_TARGET, target));
     }
 
@@ -1340,12 +1423,35 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 ? colored.getFragmentTagAt(event.getX() - bounds.x) : null;
     }
 
+    /**
+     * The registered project of the selection's project row, walking up the
+     * selection's tree path: the Project Window entry needs the project's
+     * remote flag and display name, which the root alone does not carry.
+     * Multi-row selections keep the first path's project, as the root does;
+     * a mixed selection's menu offers nothing that would use it.
+     */
+    private Optional<ProjectRow> selectedProject() {
+        if (!browsing) {
+            return Optional.empty();
+        }
+        TreePath[] paths = tree.getSelectionPaths();
+        if (paths == null || paths.length == 0) {
+            return Optional.empty();
+        }
+        return projectRowOf(paths[0]);
+    }
+
     /** The main checkout of the project row at or above {@code path}. */
     static Optional<Path> projectRootOf(TreePath path) {
+        return projectRowOf(path).map(row -> row.project().root());
+    }
+
+    /** The project row at or above {@code path}. */
+    static Optional<ProjectRow> projectRowOf(TreePath path) {
         for (TreePath at = path; at != null; at = at.getParentPath()) {
             if (at.getLastPathComponent() instanceof DefaultMutableTreeNode node
                     && node.getUserObject() instanceof ProjectRow row) {
-                return Optional.of(row.project().root());
+                return Optional.of(row);
             }
         }
         return Optional.empty();
@@ -1366,18 +1472,38 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
     }
 
+    /** The GitHub issue pages the selected session's tasks mirror; empty for any other row. */
+    private static List<String> selectedGithubTickets(AnActionEvent e) {
+        return e.getData(SELECTED_NODE) instanceof TaskRow row
+                ? TaskMenu.githubIssuesOf(TaskMirroring.mirrorsOfSession(row.session().id().toString()))
+                : List.of();
+    }
+
+    /** The Jira ticket pages the selected session's tasks mirror; empty for any other row. */
+    private static List<String> selectedJiraTickets(AnActionEvent e) {
+        return e.getData(SELECTED_NODE) instanceof TaskRow row
+                ? TaskMenu.jiraTicketsOf(TaskMirroring.mirrorsOfSession(row.session().id().toString()))
+                : List.of();
+    }
+
     /**
      * The Project Window entry's row gate: a project row of a local project
-     * whose folder the tree's last pass found present, with its main root
-     * resolved. A remote project's root is a placeholder only the standalone
-     * app opens, and a folder-present answer is re-checked at the click.
-     * Pure, so the gate is testable without the action system.
+     * whose folder the tree's last pass found present, or one of that
+     * project's session rows under the same gate — the session belongs to a
+     * project, and the window that opens is the project's main checkout, not
+     * the session's worktree. A remote project's root is a placeholder only
+     * the standalone app opens, and a folder-present answer is re-checked at
+     * the click. Pure, so the gate is testable without the action system.
      */
-    static boolean offersProjectWindow(TaskNode node, Path mainRoot) {
-        return node instanceof ProjectRow row
-                && !row.project().isRemote()
-                && !row.folderMissing()
-                && mainRoot != null;
+    static boolean offersProjectWindow(TaskNode node, SharedProject project) {
+        if (project == null || project.isRemote()) {
+            return false;
+        }
+        return switch (node) {
+            case ProjectRow row -> !row.folderMissing();
+            case TaskRow task -> !task.folderMissing();
+            case null, default -> false;
+        };
     }
 
     /**
