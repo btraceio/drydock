@@ -47,7 +47,7 @@ class AttentionPlanTest {
     }
 
     @Test
-    void aShownSessionOffersRaise() {
-        assertEquals(List.of("Raise window", "Snooze"), AttentionPlan.actions(true));
+    void aShownSessionOffersShowSession() {
+        assertEquals(List.of("Show session", "Snooze"), AttentionPlan.actions(true));
     }
 }

@@ -9,6 +9,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.PlatformDataKeys;
 import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -58,7 +59,9 @@ public final class AgentTabActions {
      * choice the user saw, so a Show-agent click whose execution ended
      * before the click shows (and says the agent ended) — never the resume
      * or start a dispatch on the now-stopped current state would run (A6).
-     * This carries the choice only where the click's event reuses the
+     * The paint also records the target and the window's selection it was
+     * painted for, so a click on a stale paint is rejected for every command,
+     * not only the lifecycle. This carries them only where the click's event reuses the
      * painted presentation: the tab popup's menu item clones its own
      * updated presentation, user data included. The header does NOT —
      * the SDK's {@code ActionButton} builds the click's event from a fresh
@@ -66,8 +69,7 @@ public final class AgentTabActions {
      * {@code ActionButton.createAnEvent}), so this is null on every header
      * click; {@link #PAINTED_INTENT} carries the header's choice instead.
      */
-    private static final Key<SessionCommands.State> PRESENTED_STATE =
-            Key.create("Drydock.AgentTab.PresentedState");
+    private static final Key<Painted> PRESENTED = Key.create("Drydock.AgentTab.Presented");
 
     /**
      * The header's painted lifecycle choice, stored as an opaque
@@ -90,12 +92,40 @@ public final class AgentTabActions {
      * cannot borrow another tab's choice. The project is held by its
      * location hash, not by reference.
      */
-    record Painted(String projectHash, ManagedSessionId session, SessionCommands.State state) {
+    record Painted(String projectHash, ManagedSessionId session, SessionCommands.State state,
+                   Optional<ManagedSessionId> selection) {
 
+        /**
+         * Whether a click on {@code target} still belongs to this paint: the
+         * same project and session, and the project's host selection has not
+         * moved since the paint (a moved selection is a newer generation).
+         */
         boolean paintedFor(AgentTabCommands.Target target) {
             return projectHash.equals(target.project().getLocationHash())
-                    && session.equals(target.session().id());
+                    && session.equals(target.session().id())
+                    && selection.equals(selectionOf(target.project()));
         }
+    }
+
+    /**
+     * The window host's current selection — the generation a paint captures:
+     * a memory-only read of the project's controller; empty for a disposed
+     * project or while nothing is selected.
+     */
+    static Optional<ManagedSessionId> selectionOf(Project project) {
+        return project.isDisposed() ? Optional.empty()
+                : SessionHostController.getInstance(project).layout().current();
+    }
+
+    /**
+     * The window-scoped state {@link AgentTabCommands#stateOf} defines, with
+     * the resumable fact read by session id (controller facts first). Header,
+     * popup and click all read it here.
+     */
+    static SessionCommands.State stateOf(AgentTabCommands.Target target) {
+        return SessionCommands.stateOf(target.session(),
+                AgentTabCommands.knownResumable(target.project(), target.sessionId()),
+                AgentExecutionService.getInstance(target.project()).isRunning(target.sessionId()));
     }
 
     /** The shared machinery: resolution, the O(1) state read, one apply. */
@@ -118,7 +148,7 @@ public final class AgentTabActions {
             Optional<AgentTabCommands.Target> target = AgentTabCommands.resolve(e);
             if (target.isEmpty()) {
                 presentation.setEnabledAndVisible(false);
-                presentation.putClientProperty(PRESENTED_STATE, null);
+                presentation.putClientProperty(PRESENTED, null);
                 latch(e, null);
                 return;
             }
@@ -128,11 +158,13 @@ public final class AgentTabActions {
             // THIS tab's own window: a session that runs here deactivates,
             // one that runs elsewhere (or in no window) offers Show agent
             // (A6) — header and popup see the same choice.
-            SessionCommands.State state = AgentTabCommands.stateOf(tab);
+            SessionCommands.State state = stateOf(tab);
             AgentTabCommands.Shown shown = shown(tab, state, popup);
-            presentation.putClientProperty(PRESENTED_STATE, state);
+            Painted painted = new Painted(tab.project().getLocationHash(), tab.sessionId(), state,
+                    selectionOf(tab.project()));
+            presentation.putClientProperty(PRESENTED, painted);
             if (!popup) {
-                latch(e, new Painted(tab.project().getLocationHash(), tab.session().id(), state));
+                latch(e, painted);
             }
             if (!shown.visible()) {
                 presentation.setEnabledAndVisible(false);
@@ -160,16 +192,22 @@ public final class AgentTabActions {
             // The click re-resolves: the presentation that invited it was
             // built for a target that may since have closed.
             AgentTabCommands.resolve(e).ifPresent(target -> {
-                SessionCommands.State presented = e.getPresentation().getClientProperty(PRESENTED_STATE);
-                if (presented == null) {
-                    presented = latched(e, target);
+                Painted painted = e.getPresentation().getClientProperty(PRESENTED);
+                if (painted == null) {
+                    painted = latched(e);
                 }
-                if (presented == null && requiresPaintedIntent()) {
-                    // Fail closed: with no provable choice for THIS target
-                    // the click does nothing, rather than dispatch on a
-                    // current state that may launch (A6).
+                // Fail closed, for every command: a paint that belongs to
+                // another target or an older selection is stale, and a header
+                // click with no paint at all is unprovable. The lifecycle
+                // additionally needs the paint for its dispatch (A6); a
+                // popup item for another command is invoked on its own
+                // fresh presentation.
+                boolean stale = painted != null ? !painted.paintedFor(target)
+                        : requiresPaintedIntent() || !AgentTabCommands.isPopup(e.getPlace());
+                if (stale) {
                     return;
                 }
+                SessionCommands.State presented = painted == null ? null : painted.state();
                 if (seam != null) {
                     seam.run(target);
                 } else {
@@ -179,19 +217,29 @@ public final class AgentTabActions {
         }
 
         /**
-         * Records this paint's choice on the paint's own context component
-         * ({@link #PAINTED_INTENT}); null clears it. A no-op except for the
-         * lifecycle, the one command that dispatches on the painted choice.
+         * Records this paint on the paint's own context component
+         * ({@link #PAINTED_INTENT}); null clears it. Every command latches:
+         * each header button is per tab and per action, so none shares a
+         * component.
          */
-        void latch(AnActionEvent e, @Nullable Painted painted) {
+        final void latch(AnActionEvent e, @Nullable Painted painted) {
+            if (contextComponent(e) instanceof JComponent component) {
+                component.putClientProperty(PAINTED_INTENT, painted);
+            }
         }
 
-        /** The choice the header painted for {@code target}; null when none is provable. */
-        @Nullable SessionCommands.State latched(AnActionEvent e, AgentTabCommands.Target target) {
-            return null;
+        /** The paint this header button carries; null when none. */
+        final @Nullable Painted latched(AnActionEvent e) {
+            return contextComponent(e) instanceof JComponent component
+                    && component.getClientProperty(PAINTED_INTENT) instanceof Painted painted
+                    ? painted : null;
         }
 
-        /** Whether a click without a provable painted choice must do nothing. */
+        private static @Nullable Component contextComponent(AnActionEvent e) {
+            return e.getData(PlatformDataKeys.CONTEXT_COMPONENT);
+        }
+
+        /** Whether a click without a provable painted choice must do nothing, even in a popup. */
         boolean requiresPaintedIntent() {
             return false;
         }
@@ -211,7 +259,7 @@ public final class AgentTabActions {
 
     /** Whether the tab's session is hosted from another worktree (A8). */
     private static boolean hosted(AgentTabCommands.Target target) {
-        return HostedTab.placeIn(target.file(), target.project()).isPresent();
+        return HostedTab.placeIn(target.project(), target.sessionId()).isPresent();
     }
 
     /** Transfer eligibility, the strip's own rule: a map read, no agent. */
@@ -261,7 +309,7 @@ public final class AgentTabActions {
         @Override
         AgentTabCommands.Shown shown(AgentTabCommands.Target target, SessionCommands.State state,
                                      boolean popup) {
-            return AgentTabCommands.changes(AgentTabCommands.knownCheckoutGone(target.project(), target.file()),
+            return AgentTabCommands.changes(AgentTabCommands.knownCheckoutGone(target.project(), target.sessionId()),
                     hosted(target), state, target.session().displayName(), popup);
         }
 
@@ -294,29 +342,8 @@ public final class AgentTabActions {
         }
 
         @Override
-        final void latch(AnActionEvent e, @Nullable Painted painted) {
-            if (contextComponent(e) instanceof JComponent component) {
-                component.putClientProperty(PAINTED_INTENT, painted);
-            }
-        }
-
-        @Override
-        final @Nullable SessionCommands.State latched(AnActionEvent e, AgentTabCommands.Target target) {
-            if (contextComponent(e) instanceof JComponent component
-                    && component.getClientProperty(PAINTED_INTENT) instanceof Painted painted
-                    && painted.paintedFor(target)) {
-                return painted.state();
-            }
-            return null;
-        }
-
-        @Override
         final boolean requiresPaintedIntent() {
             return true;
-        }
-
-        private static @Nullable Component contextComponent(AnActionEvent e) {
-            return e.getData(PlatformDataKeys.CONTEXT_COMPONENT);
         }
 
         @Override
@@ -331,7 +358,7 @@ public final class AgentTabActions {
                 return;
             }
             SessionCommandHandlers.lifecycle(target.project(), target.session(), presented,
-                    AgentTabCommands.knownResumable(target.project(), target.file()), () -> {
+                    AgentTabCommands.knownResumable(target.project(), target.sessionId()), () -> {
                     });
         }
     }

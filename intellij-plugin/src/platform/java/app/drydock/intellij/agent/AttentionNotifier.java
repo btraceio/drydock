@@ -40,7 +40,7 @@ import java.util.Set;
  * one that stopped waiting before the notification went out.</p>
  *
  * <p>The answer is always given in the agent's own tab; drydock never
- * proxies it. "Raise window" brings that window and tab to the front with
+ * proxies it. "Show session" brings that window and tab to the front with
  * the keyboard in the terminal; "Snooze" acknowledges without raising, so
  * the dots go back to blue until the agent next asks.</p>
  *

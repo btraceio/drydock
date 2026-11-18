@@ -1,10 +1,13 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.domain.ManagedSessionId;
+
 import com.intellij.openapi.actionSystem.ActionPlaces;
 
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -228,5 +231,84 @@ class AgentTabCommandsTest {
         AgentTabCommands.Shown done = AgentTabCommands.done(idle(true, false), NAME, false);
         assertEquals("Done…", done.text());
         assertEquals(SessionCommands.Command.DONE.icon(), done.icon());
+    }
+
+    // ---- id-keyed facts: precedence of controller facts over the legacy editor fact ----
+
+    private static final ManagedSessionId ID = ManagedSessionId.newId();
+
+    private static SessionPaneFacts known(boolean resumable, boolean checkoutGone) {
+        return new SessionPaneFacts(SessionPaneFacts.State.KNOWN, "", Optional.empty(), resumable,
+                Optional.empty(), false, checkoutGone);
+    }
+
+    private static Function<ManagedSessionId, Optional<SessionPaneFacts>> answering(SessionPaneFacts facts) {
+        return id -> id.equals(ID) ? Optional.of(facts) : Optional.empty();
+    }
+
+    private static final Function<ManagedSessionId, Optional<SessionPaneFacts>> NOTHING = id -> Optional.empty();
+
+    @Test
+    void aResolvedIdFactIsTheAnswer() {
+        assertEquals(Optional.of(true), AgentTabCommands.knownResumable(answering(known(true, false)), ID));
+        assertEquals(Optional.of(false), AgentTabCommands.knownCheckoutGone(answering(known(true, false)), ID));
+    }
+
+    @Test
+    void anUnresolvedIdAnswerSaysNothing() {
+        SessionPaneFacts loading = new SessionPaneFacts(SessionPaneFacts.State.LOADING, "", Optional.empty(),
+                false, Optional.empty(), false, false);
+        assertEquals(Optional.empty(), AgentTabCommands.knownResumable(answering(loading), ID));
+    }
+
+    @Test
+    void aMissingIdFactIsNoFact() {
+        assertEquals(Optional.empty(), AgentTabCommands.knownResumable(NOTHING, ID));
+        assertEquals(Optional.empty(), AgentTabCommands.knownCheckoutGone(NOTHING, ID));
+    }
+
+    // ---- canonical host file: the project's last focused attached pane ----
+
+    private static SessionHostController.Layout layout(ManagedSessionId primary, ManagedSessionId held,
+                                                       ManagedSessionId current) {
+        return new SessionHostController.Layout(Optional.ofNullable(primary), Optional.ofNullable(held),
+                Optional.ofNullable(current), Optional.empty(), SessionHostModel.Slot.NONE);
+    }
+
+    @Test
+    void theCanonicalTargetIsTheCurrentSessionOfAnAttachedPrimaryOrHeldPane() {
+        ManagedSessionId other = ManagedSessionId.newId();
+        assertEquals(Optional.of(ID),
+                AgentTabCommands.lastFocusedAttached(layout(ID, null, ID), true));
+        assertEquals(Optional.of(ID), AgentTabCommands.lastFocusedAttached(layout(other, ID, ID), true),
+                "a held pane the user focused last is the target, not the primary");
+    }
+
+    @Test
+    void anUnattachedHostHasNoCanonicalTarget() {
+        assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(ID, null, ID), false));
+    }
+
+    @Test
+    void aCurrentSessionThatLeftBothSlotsIsNoTargetAndNothingIsSubstituted() {
+        ManagedSessionId other = ManagedSessionId.newId();
+        assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(other, null, ID), true));
+        assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(null, null, ID), true));
+    }
+
+    @Test
+    void aHostWithNothingActivatedHasNoCanonicalTarget() {
+        assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(ID, null, null), true));
+    }
+
+    @Test
+    void eachProjectResolvesFromItsOwnLayoutOnly() {
+        ManagedSessionId foreignSession = ManagedSessionId.newId();
+        SessionHostController.Layout own = layout(ID, null, ID);
+        SessionHostController.Layout foreign = layout(foreignSession, null, foreignSession);
+        assertEquals(Optional.of(ID), AgentTabCommands.lastFocusedAttached(own, true));
+        assertEquals(Optional.of(foreignSession), AgentTabCommands.lastFocusedAttached(foreign, true));
+        assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(null, null, null), true),
+                "a foreign project's idle host does not borrow this one's pane");
     }
 }

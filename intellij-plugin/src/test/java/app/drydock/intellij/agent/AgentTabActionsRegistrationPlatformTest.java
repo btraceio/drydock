@@ -1,6 +1,14 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.agent.api.AgentKind;
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionMode;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.intellij.IsolatedCatalog;
 
 import com.intellij.ide.DataManager;
 import com.intellij.ide.impl.HeadlessDataManager;
@@ -16,13 +24,21 @@ import com.intellij.openapi.actionSystem.DataSink;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.actionSystem.UiDataProvider;
+import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.testFramework.LightVirtualFile;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JComponent;
 import javax.swing.JPanel;
+
+import java.beans.PropertyChangeListener;
+import java.nio.file.Path;
+import java.time.Instant;
 
 /**
  * The registration half of the agent-tab actions (A7, A9): the XML ids
@@ -102,6 +118,76 @@ public class AgentTabActionsRegistrationPlatformTest extends BasePlatformTestCas
         assertInvisibleEverywhere(file, ActionPlaces.ACTION_SEARCH);
     }
 
+    public void testF_CanonicalFileShowsEveryCommandOnlyForTheAttachedFocusedPane() {
+        SessionHostFile host = AgentConsoleFileSystem.getInstance().sessionHostFile();
+        SessionHostController controller = SessionHostController.getInstance(getProject());
+        assertHidden(host, ActionPlaces.EDITOR_TAB_POPUP, "nothing activated");
+
+        controller.show(session.id());
+        assertHidden(host, ActionPlaces.EDITOR_TAB_POPUP, "activated but no attached editor");
+
+        Lease owner = new Lease();
+        assertTrue(controller.acquireLease(owner));
+        try {
+            Presentation lifecycle = update("Drydock.AgentTab.Lifecycle", host, ActionPlaces.EDITOR_TAB);
+            assertTrue("the header lifecycle shows for the attached pane", lifecycle.isVisible());
+            assertTrue("the label names the target: " + lifecycle.getText(),
+                    lifecycle.getText().contains("Target"));
+            assertTrue(update("Drydock.AgentTab.Done", host, ActionPlaces.EDITOR_TAB_POPUP).isVisible());
+            assertHidden(new LightVirtualFile("A.java"), ActionPlaces.EDITOR_TAB_POPUP,
+                    "an ordinary file stays hidden while the host is attached");
+            assertHidden(host, ActionPlaces.EDITOR_POPUP, "an unsupported place");
+        } finally {
+            controller.releaseLease(owner);
+        }
+        assertHidden(host, ActionPlaces.EDITOR_TAB_POPUP, "the released attachment is no target");
+    }
+
+    public void testG_CanonicalFileOfAnotherProjectHasNoTarget() {
+        SessionHostFile host = AgentConsoleFileSystem.getInstance().sessionHostFile();
+        SessionHostController controller = SessionHostController.getInstance(getProject());
+        controller.show(session.id());
+        Lease owner = new Lease();
+        assertTrue(controller.acquireLease(owner));
+        try {
+            Presentation presentation = new Presentation();
+            ActionManager.getInstance().getAction("Drydock.AgentTab.Done").update(
+                    AnActionEvent.createEvent(DataContext.EMPTY_CONTEXT, presentation,
+                            ActionPlaces.EDITOR_TAB_POPUP, ActionUiKind.NONE, null));
+            assertFalse("no project in the context: no target", presentation.isVisible());
+        } finally {
+            controller.releaseLease(owner);
+        }
+    }
+
+    private void assertHidden(VirtualFile file, String place, String why) {
+        for (String id : ACTION_IDS) {
+            assertFalse(id + " at " + place + ": " + why, update(id, file, place).isVisible());
+        }
+    }
+
+    private Presentation update(String id, VirtualFile file, String place) {
+        Presentation presentation = new Presentation();
+        ActionManager.getInstance().getAction(id).update(AnActionEvent.createEvent(
+                DataManager.getInstance().getDataContext(new TabPanel(getProject(), file)),
+                presentation, place, ActionUiKind.NONE, null));
+        return presentation;
+    }
+
+    /** An identity-only attachment token, as the controller's lease takes. */
+    private static final class Lease extends UserDataHolderBase implements FileEditor {
+        private final JPanel component = new JPanel();
+        @Override public JComponent getComponent() { return component; }
+        @Override public JComponent getPreferredFocusedComponent() { return null; }
+        @Override public String getName() { return "stub"; }
+        @Override public void setState(FileEditorState state) { }
+        @Override public boolean isModified() { return false; }
+        @Override public boolean isValid() { return true; }
+        @Override public void addPropertyChangeListener(PropertyChangeListener listener) { }
+        @Override public void removePropertyChangeListener(PropertyChangeListener listener) { }
+        @Override public void dispose() { }
+    }
+
     /** Every real action's real update(), applied to this file and place. */
     private void assertInvisibleEverywhere(VirtualFile file, String place) {
         ActionManager actions = ActionManager.getInstance();
@@ -142,9 +228,28 @@ public class AgentTabActionsRegistrationPlatformTest extends BasePlatformTestCas
                 ActionPlaces.EDITOR_TAB, ActionUiKind.NONE, null);
     }
 
+    private ManagedAgentSession session;
+
+    @Override
+    protected void tearDown() throws Exception {
+        try {
+            if (session != null) {
+                IsolatedCatalog.remove(session.id());
+            }
+        } finally {
+            super.tearDown();
+        }
+    }
+
     @Override
     protected void setUp() throws Exception {
+        IsolatedCatalog.assertSandboxed();
         super.setUp();
+        session = new ManagedAgentSession.Builder(ManagedSessionId.newId(), RepositoryId.newId(), "Target",
+                AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                SessionWorkspace.inRepository(Path.of("/wt/Target")), Instant.EPOCH)
+                .status(SessionStatus.INACTIVE).build();
+        IsolatedCatalog.seed(session);
         // The unit-test sandbox runs with HeadlessDataManager, whose contexts
         // skip the component-hierarchy provider walk a real IDE performs;
         // the update() probes below resolve their target through that walk,

@@ -1,21 +1,22 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
 
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CommonDataKeys;
 import com.intellij.openapi.actionSystem.PlatformDataKeys;
-import com.intellij.openapi.fileEditor.FileEditor;
-import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.vfs.VirtualFile;
 
 import javax.swing.Icon;
 
 import java.awt.Component;
 
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * The agent tab's target resolution and pure presentation decisions — the
@@ -39,9 +40,17 @@ final class AgentTabCommands {
     /**
      * The session a tab command applies to: the clicked tab's own file and
      * session, with the project its editors live in. Never the selected
-     * file's session (A7).
+     * file's session (A7). The file is either a legacy {@link AgentConsoleFile}
+     * (which names its session) or the canonical {@link SessionHostFile}
+     * (which names none; its session is the project's last focused attached
+     * pane).
      */
-    record Target(Project project, AgentConsoleFile file, ManagedAgentSession session) {
+    record Target(Project project, VirtualFile file, ManagedAgentSession session) {
+
+        /** The target session's id: the key the id-keyed fact reads take. */
+        ManagedSessionId sessionId() {
+            return session.id();
+        }
     }
 
     /**
@@ -67,26 +76,58 @@ final class AgentTabCommands {
     /**
      * The target of the tab command in {@code e}: the file the event's data
      * context carries — the right-clicked tab's file in the popup, the label's
-     * own file in the header — resolved to its session. Empty for any other
-     * place, any other file, a missing or disposed project, or a file whose
-     * session is not (yet) in the loaded catalog.
+     * own file in the header — resolved to its session. A legacy console file
+     * resolves to its own session. The canonical host file resolves to that
+     * project's last focused attached pane ({@link #lastFocusedAttached}), never
+     * to the globally selected editor. Empty for any other place, any other
+     * file, a missing or disposed project, a canonical file with no attached
+     * focused pane, or a session that is not (yet) in the loaded catalog.
      */
     static Optional<Target> resolve(AnActionEvent e) {
         if (!placeSupported(e.getPlace())) {
             return Optional.empty();
         }
-        if (!(e.getData(CommonDataKeys.VIRTUAL_FILE) instanceof AgentConsoleFile file)) {
+        VirtualFile file = e.getData(CommonDataKeys.VIRTUAL_FILE);
+        if (!(file instanceof AgentConsoleFile) && !(file instanceof SessionHostFile)) {
             return Optional.empty();
         }
         Project project = resolveProject(e);
         if (project == null || project.isDisposed()) {
             return Optional.empty();
         }
-        ManagedAgentSession session = AgentConsoleTabPresentation.sessionOf(file);
+        ManagedAgentSession session = file instanceof SessionHostFile
+                ? lastFocusedAttached(project).map(AgentConsoleTabPresentation::sessionById).orElse(null)
+                : AgentConsoleTabPresentation.sessionOf(file);
         if (session == null) {
             return Optional.empty();
         }
         return Optional.of(new Target(project, file, session));
+    }
+
+    /**
+     * The session of {@code project}'s last focused attached pane: read from
+     * that project's own controller only (memory-only, EDT), so a canonical
+     * tab never targets another window's pane. Nothing is selected, focused
+     * or acknowledged by asking.
+     */
+    static Optional<ManagedSessionId> lastFocusedAttached(Project project) {
+        SessionHostController controller = SessionHostController.getInstance(project);
+        return lastFocusedAttached(controller.layout(), controller.ageTickRunning());
+    }
+
+    /**
+     * The last intentionally activated session, only while the host's editor
+     * is attached ({@code attached}: the controller holds its attachment
+     * lease) and that session still sits in the primary or held slot — a
+     * closed held pane or a released attachment is no target, and nothing
+     * else is substituted for it.
+     */
+    static Optional<ManagedSessionId> lastFocusedAttached(SessionHostController.Layout layout, boolean attached) {
+        if (!attached) {
+            return Optional.empty();
+        }
+        return layout.current().filter(id ->
+                layout.primary().filter(id::equals).isPresent() || layout.held().filter(id::equals).isPresent());
     }
 
     /**
@@ -112,36 +153,44 @@ final class AgentTabCommands {
     }
 
     /**
-     * The resumable fact as an open editor for {@code file} knows it, or
-     * empty when no editor (or none resolved yet): a cold caller falls back
-     * to the strip's own rules through {@link SessionCommands#resumable}.
+     * The resumable fact for {@code id}: the window's {@link SessionHostController}
+     * answer when it holds a resolved one, else empty — a cold caller falls
+     * back to the strip's own rules through {@link SessionCommands#resumable}.
+     * Memory-only; EDT.
      */
-    static Optional<Boolean> knownResumable(Project project, AgentConsoleFile file) {
-        return editorFact(project, file).flatMap(AgentConsoleEditor::knownResumable);
+    static Optional<Boolean> knownResumable(Project project, ManagedSessionId id) {
+        return knownResumable(controllerFacts(project), id);
     }
 
     /**
-     * Whether the session's checkout is gone, as an open editor for
-     * {@code file} knows it; empty when no editor resolved the fact — the
-     * Changes command hides itself rather than guessing.
+     * Whether {@code id}'s checkout is gone, as the window's controller knows
+     * it; empty when it holds no resolved fact — the Changes command hides
+     * itself rather than guessing.
      */
-    static Optional<Boolean> knownCheckoutGone(Project project, AgentConsoleFile file) {
-        return editorFact(project, file).flatMap(AgentConsoleEditor::knownCheckoutGone);
+    static Optional<Boolean> knownCheckoutGone(Project project, ManagedSessionId id) {
+        return knownCheckoutGone(controllerFacts(project), id);
     }
 
-    /**
-     * The console editor open on {@code file}, if any: the per-editor facts
-     * ({@code resumable}, {@code checkoutGone}) are owned by the editor that
-     * worked them out off the EDT, so the tab surfaces read them rather than
-     * re-probing the disk. Only this file's editors are examined.
-     */
-    private static Optional<AgentConsoleEditor> editorFact(Project project, AgentConsoleFile file) {
-        for (FileEditor editor : FileEditorManager.getInstance(project).getAllEditors(file)) {
-            if (editor instanceof AgentConsoleEditor console) {
-                return Optional.of(console);
-            }
-        }
-        return Optional.empty();
+    static Optional<Boolean> knownResumable(Function<ManagedSessionId, Optional<SessionPaneFacts>> facts,
+                                            ManagedSessionId id) {
+        return resolvedFacts(facts, id).map(SessionPaneFacts::resumable);
+    }
+
+    static Optional<Boolean> knownCheckoutGone(Function<ManagedSessionId, Optional<SessionPaneFacts>> facts,
+                                               ManagedSessionId id) {
+        return resolvedFacts(facts, id).map(SessionPaneFacts::checkoutGone);
+    }
+
+    /** Only a KNOWN answer is a fact; LOADING, FAILED, DELETED and UNKNOWN say nothing about the session. */
+    static Optional<SessionPaneFacts> resolvedFacts(
+            Function<ManagedSessionId, Optional<SessionPaneFacts>> facts, ManagedSessionId id) {
+        return facts.apply(id).filter(known -> known.state() == SessionPaneFacts.State.KNOWN);
+    }
+
+    /** The window controller's facts; empty for a disposed project. Never starts a load. */
+    static Function<ManagedSessionId, Optional<SessionPaneFacts>> controllerFacts(Project project) {
+        return id -> project.isDisposed() ? Optional.empty()
+                : SessionHostController.getInstance(project).facts(id);
     }
 
     /**
@@ -158,7 +207,7 @@ final class AgentTabCommands {
      */
     static SessionCommands.State stateOf(Target target) {
         return SessionCommands.stateOf(target.session(),
-                knownResumable(target.project(), target.file()),
+                knownResumable(target.project(), target.sessionId()),
                 AgentExecutionService.getInstance(target.project()).isRunning(target.session().id()));
     }
 

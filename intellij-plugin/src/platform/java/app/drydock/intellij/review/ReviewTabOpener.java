@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Opens the Drydock Review tab — what the console strip's Changes link
  * does on both of its paths (AC18): in the session's own window
- * ({@code AgentConsoleEditor}'s non-hosted branch) and in the hosted jump
+ * ({@code SessionCommandHandlers}) and in the hosted jump
  * ({@code AgentConsoles}' "Changes ↗", which first raises that window).
  *
  * <p><strong>Order.</strong> The Changes link is a user-triggered load

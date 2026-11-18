@@ -49,6 +49,12 @@ public final class AgentConsoleFileSystem extends DeprecatedVirtualFileSystem im
      */
     private final Map<String, AgentConsoleFile> files = new ConcurrentHashMap<>();
 
+    /**
+     * The single Sessions document. Created with the filesystem, not looked up
+     * through the catalog, so it resolves while the catalog is still loading.
+     */
+    private final SessionHostFile sessionHost = new SessionHostFile(this);
+
     public static AgentConsoleFileSystem getInstance() {
         return (AgentConsoleFileSystem) VirtualFileManager.getInstance().getFileSystem(PROTOCOL);
     }
@@ -57,6 +63,11 @@ public final class AgentConsoleFileSystem extends DeprecatedVirtualFileSystem im
     public AgentConsoleFile fileFor(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
         return files.computeIfAbsent(sessionId.value().toString(), path -> new AgentConsoleFile(this, sessionId));
+    }
+
+    /** The canonical Sessions document; the same instance on every call. */
+    public SessionHostFile sessionHostFile() {
+        return sessionHost;
     }
 
     @Override
@@ -68,6 +79,9 @@ public final class AgentConsoleFileSystem extends DeprecatedVirtualFileSystem im
     public VirtualFile findFileByPath(String path) {
         if (path == null) {
             return null;
+        }
+        if (SessionHostFile.PATH.equals(path)) {
+            return sessionHost;
         }
         ManagedSessionId sessionId;
         try {
