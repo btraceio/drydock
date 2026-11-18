@@ -44,6 +44,16 @@ public record SharedProject(RepositoryId id, Path root, String displayName, Inst
         return new SharedProject(id, root, displayName, addedAt, Optional.empty());
     }
 
+    /**
+     * A remote (SSH) project: {@code root} is the remote's deterministic
+     * placeholder ({@link SshRemote#placeholderRoot}), and the carried
+     * {@link SshRemote} is the single source of remote truth the launch
+     * paths read.
+     */
+    public static SharedProject remote(RepositoryId id, SshRemote remote, String displayName, Instant addedAt) {
+        return new SharedProject(id, remote.placeholderRoot(), displayName, addedAt, Optional.of(remote));
+    }
+
     public boolean isRemote() {
         return remote.isPresent();
     }

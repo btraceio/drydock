@@ -13,6 +13,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
+import app.drydock.intellij.projects.RemoteRepositoryDialog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
@@ -966,9 +967,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 "Reveal the pull request this row works"));
         menuActions.put(TaskMenu.Item.SHOW_SESSION, showLinkedAction(ShowKind.SESSION, "Show Session",
                 "Reveal the session row this pull request belongs to"));
-        TreeMenu treeMenu = new TreeMenu(menuActions, workspaceBoxSettings, delayedTaskActions, newDelayedTask,
-                refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes, () -> displayedTasks,
-                TaskTreePanel::watchedSnapshot);
+        // The global add gesture for the popup's empty-space selection: the
+        // counterpart of the desktop app's sidebar "Add repository" menu. A
+        // remote (SSH) repository cannot be a window's project, so this is
+        // the one registration gesture that creates one.
+        AnAction addRemoteRepository = addRemoteRepositoryAction();
+        TreeMenu treeMenu = new TreeMenu(menuActions, workspaceBoxSettings, addRemoteRepository, delayedTaskActions,
+                newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
+                () -> displayedTasks, TaskTreePanel::watchedSnapshot);
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
         Disposer.register(this, popups);
         popups.register(tree, treeScroll.getViewport());
@@ -1308,6 +1314,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         private final Map<TaskMenu.Item, AnAction> actions;
         private final AnAction workspaceBoxSettings;
+        private final AnAction addRemoteRepository;
         private final AnAction[] delayedTaskActions;
         private final AnAction newDelayedTask;
         private final AnAction refreshTasksAction;
@@ -1319,12 +1326,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Supplier<TaskLayer> tasks;
         private final Supplier<WatchedSnapshot> watched;
 
-        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction workspaceBoxSettings, AnAction[] delayedTaskActions,
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction workspaceBoxSettings, AnAction addRemoteRepository,
+                 AnAction[] delayedTaskActions,
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched) {
             this.actions = actions;
             this.workspaceBoxSettings = workspaceBoxSettings;
+            this.addRemoteRepository = addRemoteRepository;
             this.delayedTaskActions = delayedTaskActions;
             this.newDelayedTask = newDelayedTask;
             this.refreshTasksAction = refreshTasksAction;
@@ -1361,6 +1370,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             }
             List<TaskNode> selection = e.getData(SELECTED_NODES);
             Path root = e.getData(SELECTED_PROJECT_ROOT);
+            // No selection (an empty area of the tree or the inbox): the
+            // global add gestures live here — the counterpart of the
+            // desktop app's sidebar "Add repository" menu. A remote (SSH)
+            // repository cannot be a window's project, so it is the one
+            // registration this popup offers outright.
+            if (e.getData(SELECTED_NODE) == null && selection == null && root == null) {
+                return new AnAction[] {addRemoteRepository};
+            }
             // The opt-in is read per menu build, so toggling it in Settings
             // takes effect on the next popup: on, the workspace-box action is
             // registered for this build; off, the entry is neither laid out
@@ -1804,6 +1821,32 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     /** One workspace-box settings action for every project row; laid out next to GitHub settings. */
+    /** EDT: the "Add Remote Repository…" dialog, then the tree rebuilds from the shared list's change. */
+    private AnAction addRemoteRepositoryAction() {
+        return new DumbAwareAction("Add Remote Repository\u2026",
+                "Register a repository that lives on another machine, reached over SSH",
+                AllIcons.Vcs.Fetch) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskActions.present(e, true);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Project host = e.getProject() == null ? project : e.getProject();
+                if (new RemoteRepositoryDialog(host,
+                        DrydockPluginService.getInstance().sharedProjects()).showAndGet()) {
+                    requestRebuild(false);
+                }
+            }
+        };
+    }
+
     private AnAction workspaceBoxSettingsAction(Predicate<TaskNode> applies) {
         return new DumbAwareAction("Workspace Box…",
                 "Configure the workspace box this Drydock project's agent sessions run on",
