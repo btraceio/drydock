@@ -22,10 +22,12 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The Jira ticket writer against a real loopback {@link HttpServer}: requests, outcomes, redaction. */
@@ -149,6 +151,204 @@ class JiraIssueWriterTest {
         assertTrue(JiraIssueWriter.projectKeyRefusal("2PROJ").isPresent());
         assertTrue(JiraIssueWriter.projectKeyRefusal("").isPresent());
         assertTrue(JiraIssueWriter.projectKeyRefusal(null).isPresent());
+    }
+
+    private void answerAll(int status, String body) {
+        server.createContext("/", exchange -> {
+            requests.add(new Captured(exchange.getRequestMethod(), exchange.getRequestURI().getPath()
+                    + (exchange.getRequestURI().getRawQuery() == null ? "" : "?" + exchange.getRequestURI().getRawQuery()),
+                    exchange.getRequestHeaders().getFirst("Authorization"),
+                    new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+            respond(exchange, status, body);
+        });
+    }
+
+    private static String links(String... entries) {
+        return "{\"fields\":{\"issuelinks\":[" + String.join(",", entries) + "]}}";
+    }
+
+    private static String entry(String type, String direction, String key) {
+        return "{\"type\":{\"name\":\"" + type + "\"},\"" + direction + "\":{\"key\":\"" + key + "\"}}";
+    }
+
+    private JiraIssueWriter.LinkLookup lookup(String key) {
+        return writer.lookupLinks(dataCenter(), SECRET, key);
+    }
+
+    @Test
+    void lookupReadsTheLinksOfTheEncodedKeyWithItsOwnCredentials() {
+        answerAll(200, links(entry("Blocks", "outwardIssue", "B-2"), entry("Relates", "inwardIssue", "C-3")));
+
+        JiraIssueWriter.Links found = assertInstanceOf(JiraIssueWriter.Links.class, lookup("A-1"));
+
+        assertEquals(List.of(
+                new JiraIssueWriter.LinkEntry("Blocks", Optional.empty(), Optional.of("B-2")),
+                new JiraIssueWriter.LinkEntry("Relates", Optional.of("C-3"), Optional.empty())), found.entries());
+        assertEquals(1, requests.size());
+        assertEquals("GET", requests.get(0).method());
+        assertEquals("/rest/api/2/issue/A-1?fields=issuelinks", requests.get(0).path());
+        assertEquals("Bearer " + SECRET, requests.get(0).authorization());
+    }
+
+    @Test
+    void anEmptyArrayIsConfirmedAbsence() {
+        answerAll(200, links());
+
+        assertEquals(new JiraIssueWriter.Links(List.of()), lookup("A-1"));
+    }
+
+    @Test
+    void missingOrIllTypedLinksAndEntriesAreFailuresNotAbsence() {
+        for (String body : List.of("{}", "{\"fields\":{}}", "{\"fields\":{\"issuelinks\":{}}}",
+                "{\"fields\":{\"issuelinks\":null}}", "not json", "[]",
+                links("5"),
+                links("{\"outwardIssue\":{\"key\":\"B-2\"}}"),
+                links("{\"type\":{},\"outwardIssue\":{\"key\":\"B-2\"}}"),
+                links("{\"type\":{\"name\":\"Blocks\"}}"),
+                links("{\"type\":{\"name\":\"Blocks\"},\"outwardIssue\":{\"key\":\"B-2\"},"
+                        + "\"inwardIssue\":{\"key\":\"C-3\"}}"),
+                links("{\"type\":{\"name\":\"Blocks\"},\"outwardIssue\":{}}"))) {
+            assertInstanceOf(JiraIssueWriter.LookupFailed.class, JiraIssueWriter.parseLinks(body, "A-1"), body);
+        }
+    }
+
+    @Test
+    void aForbiddenReadIsAnExplicitFailure() {
+        answerAll(403, "{}");
+
+        JiraIssueWriter.LookupFailed failed = assertInstanceOf(JiraIssueWriter.LookupFailed.class, lookup("A-1"));
+
+        assertTrue(failed.message().contains("403"), failed.message());
+    }
+
+    @Test
+    void aSlowReadIsAFailureNotAbsence() {
+        server.createContext("/", exchange -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+
+        assertInstanceOf(JiraIssueWriter.LookupFailed.class, lookup("A-1"));
+    }
+
+    @Test
+    void presenceFollowsTheTypeAndTheDirectionOfTheQueriedEnd() {
+        var blocksOut = List.of(new JiraIssueWriter.LinkEntry("Blocks", Optional.empty(), Optional.of("D-2")));
+        var blocksIn = List.of(new JiraIssueWriter.LinkEntry("Blocks", Optional.of("P-1"), Optional.empty()));
+        var relatesOut = List.of(new JiraIssueWriter.LinkEntry("Relates", Optional.empty(), Optional.of("D-2")));
+
+        assertTrue(JiraIssueWriter.blocksPresent(blocksOut, JiraIssueWriter.Queried.PREREQUISITE, "P-1", "D-2"));
+        assertTrue(JiraIssueWriter.blocksPresent(blocksIn, JiraIssueWriter.Queried.DEPENDENT, "P-1", "D-2"));
+        assertFalse(JiraIssueWriter.blocksPresent(blocksIn, JiraIssueWriter.Queried.PREREQUISITE, "P-1", "D-2"));
+        assertFalse(JiraIssueWriter.blocksPresent(blocksOut, JiraIssueWriter.Queried.DEPENDENT, "P-1", "D-2"));
+        assertFalse(JiraIssueWriter.blocksPresent(relatesOut, JiraIssueWriter.Queried.PREREQUISITE, "P-1", "D-2"));
+        assertFalse(JiraIssueWriter.blocksPresent(blocksOut, JiraIssueWriter.Queried.PREREQUISITE, "P-1", "D-9"));
+        assertFalse(JiraIssueWriter.blocksPresent(List.of(), JiraIssueWriter.Queried.PREREQUISITE, "P-1", "D-2"));
+    }
+
+    @Test
+    void theBlocksLinkIsPostedWithPrerequisiteInwardAndDependentOutward() {
+        answerAll(201, "");
+
+        assertEquals(new JiraIssueWriter.Linked(), writer.createBlocksLink(dataCenter(), SECRET, "P-1", "D-2"));
+
+        Captured post = requests.get(0);
+        assertEquals("POST", post.method());
+        assertEquals("/rest/api/2/issueLink", post.path());
+        assertEquals("Bearer " + SECRET, post.authorization());
+        JsonObject body = (JsonObject) JsonParser.parse(post.body());
+        assertEquals(new JsonString("Blocks"), ((JsonObject) body.get("type")).get("name"));
+        assertEquals(new JsonString("P-1"), ((JsonObject) body.get("inwardIssue")).get("key"));
+        assertEquals(new JsonString("D-2"), ((JsonObject) body.get("outwardIssue")).get("key"));
+    }
+
+    @Test
+    void linkRefusalsAreConfirmedFailuresAndATimeoutIsUncertain() {
+        answerAll(404, "{}");
+        assertInstanceOf(JiraIssueWriter.LinkFailed.class, writer.createBlocksLink(dataCenter(), SECRET, "P-1", "D-2"));
+        server.removeContext("/");
+        answerAll(400, "{\"errorMessages\":[\"No issue link type with name 'Blocks' found.\"]}");
+        JiraIssueWriter.LinkFailed missing = assertInstanceOf(JiraIssueWriter.LinkFailed.class,
+                writer.createBlocksLink(dataCenter(), SECRET, "P-1", "D-2"));
+        assertTrue(missing.message().contains("Blocks"), missing.message());
+        server.removeContext("/");
+        answerAll(403, "{}");
+        JiraIssueWriter.LinkFailed forbidden = assertInstanceOf(JiraIssueWriter.LinkFailed.class,
+                writer.createBlocksLink(dataCenter(), SECRET, "P-1", "D-2"));
+        assertTrue(forbidden.message().contains("403"), forbidden.message());
+        server.removeContext("/");
+        server.createContext("/", exchange -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        assertInstanceOf(JiraIssueWriter.LinkUncertain.class,
+                writer.createBlocksLink(dataCenter(), SECRET, "P-1", "D-2"));
+    }
+
+    @Test
+    void aTimedOutOrKeylessCreateIsUncertainNotFailed() {
+        answer(201, "{\"id\":\"1\"}", 200);
+        assertInstanceOf(JiraIssueWriter.Uncertain.class, writer.createChecked(
+                dataCenter(), SECRET, "PROJ", "Task", "t", "b", "drydock.task", PROPERTY));
+        server.removeContext("/");
+        server.createContext("/", exchange -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        assertInstanceOf(JiraIssueWriter.Uncertain.class, writer.createChecked(
+                dataCenter(), SECRET, "PROJ", "Task", "t", "b", "drydock.task", PROPERTY));
+    }
+
+    @Test
+    void theExistingCreateFoldsAnUncertainResultIntoAFailureWithTheSameAdvice() {
+        answer(201, "{\"id\":\"1\"}", 200);
+
+        JiraIssueWriter.Failed failed = assertInstanceOf(JiraIssueWriter.Failed.class, writer.create(
+                dataCenter(), SECRET, "PROJ", "Task", "t", "b", "drydock.task", PROPERTY));
+
+        assertTrue(failed.message().contains("before retrying"), failed.message());
+    }
+
+    @Test
+    void identicalKeysOnTwoSitesReachOnlyTheirOwnSiteWithTheirOwnToken() throws Exception {
+        HttpServer other = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        other.setExecutor(serverExecutor);
+        List<Captured> otherRequests = new CopyOnWriteArrayList<>();
+        AtomicReference<String> unused = new AtomicReference<>();
+        other.createContext("/", exchange -> {
+            otherRequests.add(new Captured(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    exchange.getRequestHeaders().getFirst("Authorization"), ""));
+            respond(exchange, 200, links());
+        });
+        other.start();
+        try {
+            answerAll(200, links());
+            JiraConnection second = new JiraConnection(JiraConnection.Deployment.DATA_CENTER,
+                    "http://127.0.0.1:" + other.getAddress().getPort(), Optional.empty(), "");
+
+            writer.lookupLinks(dataCenter(), "tok-ONE", "SAME-1");
+            writer.lookupLinks(second, "tok-TWO", "SAME-1");
+
+            assertEquals(1, requests.size());
+            assertEquals("Bearer tok-ONE", requests.get(0).authorization());
+            assertEquals(1, otherRequests.size());
+            assertEquals("Bearer tok-TWO", otherRequests.get(0).authorization());
+            assertNotNull(unused);
+        } finally {
+            other.stop(0);
+        }
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
