@@ -198,4 +198,53 @@ class TaskMirrorTest {
                 new TaskMirror.Dependency("https://x.test/a b)/issues/1", "T")));
         assertTrue(body.contains("](https://x.test/a%20b%29/issues/1) (T)"), body);
     }
+
+    private static TaskMirror.JiraAddress.Usable usable(String url) {
+        return (TaskMirror.JiraAddress.Usable) TaskMirror.jiraAddress(url);
+    }
+
+    @Test
+    void aPlainJiraAddressSplitsIntoSiteAndKey() {
+        assertEquals(new TaskMirror.JiraAddress.Usable("https://acme.atlassian.net", "ABC-12"),
+                TaskMirror.jiraAddress("https://Acme.Atlassian.NET/browse/ABC-12"));
+        assertEquals("https://acme.atlassian.net", usable("https://acme.atlassian.net:443/browse/ABC-12/").site());
+        assertEquals("http://jira.test:8080", usable("http://jira.test:8080/browse/A_1-7").site());
+    }
+
+    @Test
+    void aDataCenterContextPathIsPreservedAndCaseSignificant() {
+        assertEquals("https://h.test/jira", usable("https://h.test/jira/browse/ABC-1").site());
+        assertEquals("https://h.test/jira", usable("https://h.test/jira/browse/ABC-1/").site());
+        assertEquals("https://h.test/a/browse/b", usable("https://h.test/a/browse/b/browse/ABC-1").site());
+        assertEquals("https://h.test/Jira", usable("https://h.test/Jira/browse/ABC-1").site());
+        assertFalse(usable("https://h.test/Jira/browse/ABC-1").site().equals(usable("https://h.test/jira/browse/ABC-1").site()));
+    }
+
+    @Test
+    void identicalKeysOnDistinctSitesStayDistinct() {
+        TaskMirror.JiraAddress.Usable a = usable("https://one.test/browse/ABC-1");
+        TaskMirror.JiraAddress.Usable b = usable("https://two.test/browse/ABC-1");
+        TaskMirror.JiraAddress.Usable c = usable("https://one.test/ctx/browse/ABC-1");
+        assertEquals(a.key(), b.key());
+        assertFalse(a.site().equals(b.site()));
+        assertFalse(a.site().equals(c.site()));
+    }
+
+    @Test
+    void malformedOrUnsafeJiraAddressesAreUnusableNotUnrecognized() {
+        for (String url : List.of("ftp://h.test/browse/ABC-1", "https://u:p@h.test/browse/ABC-1",
+                "https://h.test/browse/ABC-1?x=1", "https://h.test/browse/ABC-1#f", "file:///browse/ABC-1",
+                "/browse/ABC-1", "https:///browse/ABC-1")) {
+            assertTrue(TaskMirror.jiraAddress(url) instanceof TaskMirror.JiraAddress.Unusable
+                    || TaskMirror.jiraAddress(url) instanceof TaskMirror.JiraAddress.Unrecognized, url);
+        }
+        assertTrue(TaskMirror.jiraAddress("ftp://h.test/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://u:p@h.test/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/browse/ABC-1?x=1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/browse/ABC-1#f") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("/browse/ABC-1") instanceof TaskMirror.JiraAddress.Unusable);
+        assertTrue(TaskMirror.jiraAddress("https://h.test/owner/repo/issues/1") instanceof TaskMirror.JiraAddress.Unrecognized);
+        assertTrue(TaskMirror.jiraAddress("not a url") instanceof TaskMirror.JiraAddress.Unrecognized);
+        assertTrue(TaskMirror.jiraAddress(null) instanceof TaskMirror.JiraAddress.Unrecognized);
+    }
 }

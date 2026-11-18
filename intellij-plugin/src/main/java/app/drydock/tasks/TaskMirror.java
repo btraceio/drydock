@@ -47,6 +47,7 @@ public final class TaskMirror {
     static final String COMMENT_OPEN = "<!-- drydock-task ";
 
     private static final Pattern GITHUB_ISSUE = Pattern.compile("/[^/]+/[^/]+/issues/(\\d+)/?");
+    private static final Pattern JIRA_TERMINAL_BROWSE = Pattern.compile("(.*)/browse/([A-Z][A-Z0-9_]*-\\d+)/*");
     private static final Pattern JIRA_BROWSE = Pattern.compile(".*/browse/([A-Z][A-Z0-9_]*-\\d+)/?");
 
     /** Where a mirror lives. */
@@ -308,6 +309,73 @@ public final class TaskMirror {
             }
         }
         return out.toString();
+    }
+
+    /** A Jira ticket's site identity and key, or why the address cannot be linked. */
+    public sealed interface JiraAddress {
+        /**
+         * @param site the normalized {@code scheme://host[:port]} plus the preserved context path, no trailing slash
+         * @param key  the issue key
+         */
+        record Usable(String site, String key) implements JiraAddress {
+        }
+
+        /** The address looks like a Jira browse page but cannot be a safe link endpoint. */
+        record Unusable(String reason) implements JiraAddress {
+        }
+
+        /** Not a Jira browse address at all. */
+        record Unrecognized() implements JiraAddress {
+        }
+    }
+
+    /**
+     * Splits a Jira browse address at its terminal {@code /browse/<KEY>}:
+     * the site (scheme and host lowercased, default port dropped, context
+     * path kept verbatim, case significant, trailing slashes dropped) and
+     * the key. An address with userinfo, a query, a fragment, a scheme other
+     * than http/https or no host is {@link JiraAddress.Unusable}; its
+     * recorded mirror stays valid, it just cannot be linked.
+     */
+    public static JiraAddress jiraAddress(String url) {
+        if (url == null) {
+            return new JiraAddress.Unrecognized();
+        }
+        URI uri;
+        try {
+            uri = URI.create(url.strip());
+        } catch (IllegalArgumentException e) {
+            return new JiraAddress.Unrecognized();
+        }
+        String rawPath = uri.getRawPath();
+        Matcher matcher = rawPath == null ? null : JIRA_TERMINAL_BROWSE.matcher(rawPath);
+        if (matcher == null || !matcher.matches()) {
+            return new JiraAddress.Unrecognized();
+        }
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            return new JiraAddress.Unusable("unusable for linking: scheme is not http or https");
+        }
+        if (uri.getRawUserInfo() != null) {
+            return new JiraAddress.Unusable("unusable for linking: the address carries credentials");
+        }
+        if (uri.getRawQuery() != null || uri.getRawFragment() != null) {
+            return new JiraAddress.Unusable("unusable for linking: the address has a query or fragment");
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            return new JiraAddress.Unusable("unusable for linking: the address has no host");
+        }
+        int port = uri.getPort();
+        if (port == (scheme.equals("https") ? 443 : 80)) {
+            port = -1;
+        }
+        String context = matcher.group(1);
+        while (context.endsWith("/")) {
+            context = context.substring(0, context.length() - 1);
+        }
+        String site = scheme + "://" + host.toLowerCase(Locale.ROOT) + (port < 0 ? "" : ":" + port) + context;
+        return new JiraAddress.Usable(site, matcher.group(2));
     }
 
     private static void appendBody(StringBuilder out, String body) {
