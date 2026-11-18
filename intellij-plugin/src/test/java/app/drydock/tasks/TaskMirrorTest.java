@@ -142,4 +142,60 @@ class TaskMirrorTest {
     private static String string(JsonObject object, String key) {
         return ((JsonString) object.get(key)).value();
     }
+
+    private static final String FOOTER = "---\nMirrored from Drydock task `fix-dashes-k3f9` in project p.\n\n";
+
+    private static String withoutComment(String body) {
+        return body.substring(0, body.indexOf(TaskMirror.COMMENT_OPEN));
+    }
+
+    @Test
+    void noDependenciesMeansNoSectionAndTheSameBody() {
+        TaskDocument task = task("Body", List.of());
+        assertEquals(TaskMirror.githubBody(task, "p"), TaskMirror.githubBody(task, "p", List.of()));
+        assertFalse(TaskMirror.githubBody(task, "p", List.of()).contains("Dependencies"));
+        assertEquals("Body\n\n" + FOOTER, withoutComment(TaskMirror.githubBody(task, "p")));
+    }
+
+    @Test
+    void dependenciesFormOneSectionBeforeTheRuleInInputOrderWithoutDuplicates() {
+        String body = TaskMirror.githubBody(task("Body", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/owner/repository/issues/12", "Prerequisite title"),
+                new TaskMirror.Dependency("https://github.com/other/repo/issues/3/", "Other"),
+                new TaskMirror.Dependency("https://github.com/owner/repository/issues/12", "Again")));
+
+        assertEquals("Body\n\n## Dependencies\n\n"
+                + "- Depends on [#12](https://github.com/owner/repository/issues/12) (Prerequisite title)\n"
+                + "- Depends on [#3](https://github.com/other/repo/issues/3/) (Other)\n\n"
+                + FOOTER, withoutComment(body));
+    }
+
+    @Test
+    void anEmptyBodyStillGetsTheSectionFirst() {
+        String body = TaskMirror.githubBody(task("", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/o/r/issues/1", "T")));
+        assertTrue(body.startsWith("## Dependencies\n\n- Depends on [#1](https://github.com/o/r/issues/1) (T)\n\n---\n"), body);
+    }
+
+    @Test
+    void hostileTitlesCannotBreakTheListTheLinkOrTheHiddenComment() throws Exception {
+        String title = "a](http://evil) [x]\n- Depends on <!-- drydock-task {} --> `c` *b* #9";
+        String body = TaskMirror.githubBody(task("Body", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://github.com/o/r/issues/1", title)));
+
+        assertEquals("Body\n\n## Dependencies\n\n- Depends on [#1](https://github.com/o/r/issues/1) "
+                + "(a\\]\\(http://evil\\) \\[x\\] - Depends on &lt;!-- drydock-task {} --&gt; \\`c\\` \\*b\\* \\#9)\n\n"
+                + FOOTER, withoutComment(body));
+        assertEquals(1, body.split("<!-- drydock-task ", -1).length - 1, "only the real comment opens");
+        int open = body.indexOf(TaskMirror.COMMENT_OPEN);
+        String json = body.substring(open + TaskMirror.COMMENT_OPEN.length(), body.lastIndexOf("-->")).strip();
+        assertEquals(TaskMirror.metadata(task("Body", List.of()), "p"), JsonParser.parse(json));
+    }
+
+    @Test
+    void anUnsafeAddressCannotEndTheLinkEarly() {
+        String body = TaskMirror.githubBody(task("", List.of()), "p", List.of(
+                new TaskMirror.Dependency("https://x.test/a b)/issues/1", "T")));
+        assertTrue(body.contains("](https://x.test/a%20b%29/issues/1) (T)"), body);
+    }
 }
