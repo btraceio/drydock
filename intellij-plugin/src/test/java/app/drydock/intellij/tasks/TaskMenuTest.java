@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -51,8 +52,7 @@ class TaskMenuTest {
     private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
     private static final TaskMenu.MenuFacts WORKSPACE_BOX = new TaskMenu.MenuFacts(false, false, false, true);
     /** The facts of an ALIVE-detached workspace-box row: the remote Stop. */
-    private static final TaskMenu.MenuFacts REMOTE_STOP =
-            new TaskMenu.MenuFacts(false, false, false, false, true, false, false, null, null, null);
+    private static final TaskMenu.MenuFacts REMOTE_STOP = new TaskMenu.MenuFacts(false, false, false, false, true);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -71,6 +71,23 @@ class TaskMenuTest {
                 Optional.of(new GhCliService.BranchPullRequest(9,
                         GhCliService.PrInfo.PrLifecycle.OPEN, false, "fix-allocation-profile",
                         "Fix allocation profile", url)));
+    }
+
+    /** The same row with an explicitly associated target pull request; {@code url} is its page. */
+    private static TaskRow rowWithTarget(TaskRow row, String url) {
+        return new TaskRow(row.session().toBuilder()
+                .targetPullRequest(Optional.of(PullRequestTarget.fromUrl(url))).build(),
+                row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable());
+    }
+
+    /** A row targeting one PR whose working branch carries another; both pages go into the entry. */
+    private static TaskRow rowWithBranchPr(TaskRow row, int number, String url) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(),
+                Optional.of(new GhCliService.BranchPullRequest(number,
+                        GhCliService.PrInfo.PrLifecycle.OPEN, false, "pr-" + number,
+                        "Another pull request", Optional.ofNullable(url))));
     }
 
     private static IdleWorktree worktree(boolean locked, boolean open) {
@@ -101,29 +118,46 @@ class TaskMenuTest {
         return TaskMenu.sections(lead, List.of(), NO_TRANSFER);
     }
 
-    private static final TaskMenu.MenuFacts SESSION_LINKS =
-            new TaskMenu.MenuFacts(false, false, false, true, true);
+    /** The facts of a session row whose tasks mirror one GitHub issue and one Jira ticket. */
+    private static final TaskMenu.MenuFacts SESSION_LINKS = new TaskMenu.MenuFacts(false, false, false, false,
+            false, List.of(), List.of("https://github.com/o/r/issues/12"),
+            List.of("https://acme.atlassian.net/browse/PROJ-7"));
 
     @Test
-    void aTaskRowWithAttachedLinksOffersOpenInGithubAndJira() {
-        // The link section sits with the row's management items, before the
-        // cleanup section; each entry follows its own fact.
+    void aSessionRowWithAttachedLinksOffersTheSplitEntriesBeforeCleanup() {
+        // The link section: the project's window always offered (its action
+        // hides itself when the gate fails), each link entry following its
+        // own list.
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
-                List.of(TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_GITHUB_TICKETS,
+                        TaskMenu.Item.OPEN_JIRA_TICKETS),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), SESSION_LINKS));
-        // Only GitHub known: no Jira entry, and never an empty section.
+        // Every list empty: only the project window remains, never an empty
+        // section, and the combined Open in GitHub/Jira entries stay out.
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
-                List.of(TaskMenu.Item.OPEN_IN_GITHUB),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
-                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(),
-                        new TaskMenu.MenuFacts(false, false, false, true, false)));
+                sectionsOf(task(false, new TaskPlacement.Idle(true))));
+    }
+
+    @Test
+    void aSessionRowWithPullRequestsOffersThePullRequestEntry() {
+        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, false, false, false,
+                List.of("https://github.com/o/r/pull/9"), List.of(), List.of());
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_PULL_REQUEST),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), facts));
     }
 
     @Test
@@ -132,38 +166,59 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
-                List.of(TaskMenu.Item.OPEN_IN_JIRA),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_JIRA_TICKETS),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.ThisWindow()), List.of(),
-                        new TaskMenu.MenuFacts(false, false, false, false, true)));
+                        new TaskMenu.MenuFacts(false, false, false, false, false,
+                                List.of(), List.of(), List.of("https://acme.atlassian.net/browse/PROJ-7"))));
     }
 
     @Test
-    void aSessionRowsGithubLinksAreItsPullRequestPlusItsMirrors() {
-        // Pure over the given mirrors: the PR's page first, then the GitHub
-        // mirrors in order; Jira mirrors and unknown addresses stay out.
+    void aSessionRowsLinksSplitByKind() {
+        // The pull-request list: the target PR first, then the branch PR
+        // when it is a different one; the same PR under two spellings is one
+        // entry. The GitHub and Jira lists take the mirrors of the session's
+        // tasks, each kind to its own entry.
         TaskRow row = task(false, new TaskPlacement.Idle(true));
-        assertEquals(List.of("https://github.com/o/r/pull/9", "https://github.com/o/r/issues/12"),
-                TaskMenu.githubUrlsOf(rowWithPullRequest(row, Optional.of("https://github.com/o/r/pull/9")),
-                        List.of("https://github.com/o/r/issues/12",
-                                "https://acme.atlassian.net/browse/PROJ-7")));
-        assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-7"),
-                TaskMenu.jiraUrlsOf(rowWithPullRequest(row, Optional.empty()),
-                        List.of("https://github.com/o/r/issues/12",
-                                "https://acme.atlassian.net/browse/PROJ-7")));
+        TaskRow withTarget = rowWithTarget(row, "https://github.com/o/r/pull/9");
+        assertEquals(List.of("https://github.com/o/r/pull/9"), TaskMenu.prUrlsOf(withTarget));
+        assertEquals(List.of("https://github.com/o/r/pull/9", "https://github.com/o/r/pull/11"),
+                TaskMenu.prUrlsOf(rowWithBranchPr(withTarget, 11, "https://github.com/o/r/pull/11")));
+        // The branch PR duplicating the target under a different spelling.
+        assertEquals(List.of("https://github.com/o/r/pull/9"),
+                TaskMenu.prUrlsOf(rowWithBranchPr(withTarget, 9, "https://github.com/o/r/pull/9/")));
+        // A branch PR with no page address contributes nothing.
+        assertEquals(List.of("https://github.com/o/r/pull/9"),
+                TaskMenu.prUrlsOf(rowWithBranchPr(withTarget, 12, null)));
+        // The mirrors split by kind; unclassifiable addresses stay out.
+        List<String> mirrors = List.of("https://github.com/o/r/issues/12",
+                "https://acme.atlassian.net/browse/PROJ-7", "https://example.org/whatever");
+        assertEquals(List.of("https://github.com/o/r/issues/12"), TaskMenu.githubIssuesOf(mirrors));
+        assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-7"), TaskMenu.jiraTicketsOf(mirrors));
         // No pull request, no mirrors: nothing to offer.
-        assertTrue(TaskMenu.githubUrlsOf(rowWithPullRequest(row, Optional.empty()), List.of()).isEmpty());
+        assertTrue(TaskMenu.prUrlsOf(row).isEmpty());
+        assertTrue(TaskMenu.githubIssuesOf(List.of()).isEmpty());
+        assertTrue(TaskMenu.jiraTicketsOf(List.of()).isEmpty());
+    }
+
+    @Test
+    void sessionLinkLabelsNameTheirTargets() {
+        assertEquals("PR #9", TaskMenu.pullRequestLabel("https://github.com/o/r/pull/9"));
+        assertEquals("https://github.com/o/r/pull/9/files",
+                TaskMenu.pullRequestLabel("https://github.com/o/r/pull/9/files"));
+        assertEquals("GitHub Issue #12", TaskMenu.githubIssueLabel("https://github.com/o/r/issues/12"));
+        assertEquals("Jira PROJ-7", TaskMenu.jiraTicketLabel("https://acme.atlassian.net/browse/PROJ-7"));
     }
 
     @Test
     void issueAndPullRequestRowsKeepTheirOwnUrlAsTheGithubLink() {
         assertEquals(List.of("https://github.com/o/r/issues/42"),
-                TaskMenu.githubUrlsOf(issue(Optional.of("https://github.com/o/r/issues/42")), List.of()));
+                TaskMenu.githubUrlsOf(issue(Optional.of("https://github.com/o/r/issues/42"))));
         assertEquals(List.of("https://github.com/o/r/pull/40"),
-                TaskMenu.githubUrlsOf(pullRequest(Optional.of("https://github.com/o/r/pull/40")), List.of()));
+                TaskMenu.githubUrlsOf(pullRequest(Optional.of("https://github.com/o/r/pull/40"))));
         assertEquals(List.of("https://acme.atlassian.net/browse/PROJ-123"),
-                TaskMenu.jiraUrlsOf(jiraIssue(), List.of()));
-        assertEquals(List.of(), TaskMenu.jiraUrlsOf(issue(Optional.empty()), List.of()));
+                TaskMenu.jiraUrlsOf(jiraIssue()));
+        assertEquals(List.of(), TaskMenu.jiraUrlsOf(issue(Optional.empty())));
     }
 
     @Test
@@ -172,6 +227,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES, TaskMenu.Item.TRANSFER_TO),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.OwnWindow()), List.of(), TRANSFER));
     }
@@ -182,6 +238,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.OtherWindow("profiling-rt"))));
     }
@@ -194,6 +251,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.Here())));
     }
@@ -204,6 +262,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.ThisWindow())));
     }
@@ -214,6 +273,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(true, new TaskPlacement.NotShown())));
     }
@@ -233,6 +293,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(false))));
     }
@@ -244,6 +305,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(task(false, new TaskPlacement.Idle(true))));
     }
@@ -259,6 +321,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), REMOTE_STOP));
         // This window's own worktree keeps its plain Resume line; the Stop
@@ -267,6 +330,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(false, new TaskPlacement.Idle(true)), List.of(), REMOTE_STOP));
     }
@@ -280,6 +344,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), REMOTE_STOP));
         List<TaskNode> rows = List.of(
@@ -309,6 +374,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX));
         assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX)
@@ -576,6 +642,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.SWITCH_TO_TASK),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.Here()), List.of(), NO_TRANSFER));
     }

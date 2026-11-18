@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
+import app.drydock.domain.PullRequestTarget;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskMirror;
@@ -22,14 +24,23 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 
+import com.intellij.icons.AllIcons;
+import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.project.DumbAwareAction;
+
+import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Stream;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The Drydock tree's context menu, as pure layout: which actions apply to
@@ -47,6 +58,9 @@ import java.util.stream.Stream;
  * testable without the registry.</p>
  */
 final class TaskMenu {
+
+    /** The pull-request page number in a {@code /pull/<n>} address. */
+    private static final Pattern PULL_REQUEST_PAGE = Pattern.compile("/pull/([1-9][0-9]*)/?$");
 
     /** One menu entry; the action behind it lives in the panel or {@link TaskActions}. */
     enum Item {
@@ -80,6 +94,12 @@ final class TaskMenu {
         OPEN_IN_GITHUB,
         /** Open the Jira issue's page; only a Jira row offers it. */
         OPEN_IN_JIRA,
+        /** The session's pull requests: one URL is a direct entry, several a submenu. Session rows only. */
+        OPEN_PULL_REQUEST,
+        /** The GitHub issues the session's tasks mirror: direct entry or submenu. Session rows only. */
+        OPEN_GITHUB_TICKETS,
+        /** The Jira tickets the session's tasks mirror: direct entry or submenu. Session rows only. */
+        OPEN_JIRA_TICKETS,
         /** Open the Drydock task an issue row is a mirror of; only a mirrored issue offers it. */
         OPEN_MIRRORED_TASK,
         /** Reveal and select the linked row in the tree; only when the tree shows the target. */
@@ -118,11 +138,13 @@ final class TaskMenu {
 
     /**
      * The non-pure answers of one menu build, computed once by
-     * {@link #factsFor}. The session link flags say a session row leads to
-     * GitHub or Jira pages; the three target rows are the selection's
-     * resolved cross-row links (issues, sessions, pull requests, tasks).
-     * An empty target keeps its jump item out, so the menu never offers a
-     * reveal the tree cannot perform.
+     * {@link #factsFor}. The session link lists name every page a session
+     * row leads to — its pull requests, the GitHub issues and Jira tickets
+     * its tasks mirror — each entry opening its own page, so a combined
+     * "open everything" gesture is never needed; the three target rows are
+     * the selection's resolved cross-row links (issues, sessions, pull
+     * requests, tasks). An empty target keeps its jump item out, so the
+     * menu never offers a reveal the tree cannot perform.
      *
      * <p>{@code workspaceBoxEnabled} is the workspace-box opt-in flag as of
      * this menu build: the entry it gates is laid out for project rows only,
@@ -138,8 +160,14 @@ final class TaskMenu {
      */
     record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                      boolean workspaceBoxEnabled, boolean remoteStop,
-                     boolean sessionGitHubLink, boolean sessionJiraLink,
+                     List<String> prUrls, List<String> githubUrls, List<String> jiraUrls,
                      DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
+
+        MenuFacts {
+            prUrls = List.copyOf(prUrls == null ? List.of() : prUrls);
+            githubUrls = List.copyOf(githubUrls == null ? List.of() : githubUrls);
+            jiraUrls = List.copyOf(jiraUrls == null ? List.of() : jiraUrls);
+        }
 
         /** The facts before any cross-row link existed: nothing resolved. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled) {
@@ -154,23 +182,29 @@ final class TaskMenu {
         /** The facts with the workspace-box opt-in stated by the caller (tests). */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                   boolean workspaceBoxEnabled) {
-            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, false,
-                    false, false, null, null, null);
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, false);
         }
 
-        /** The facts before any cross-row link existed: nothing resolved. */
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
-                  boolean sessionGitHubLink, boolean sessionJiraLink,
+                  boolean workspaceBoxEnabled, boolean remoteStop) {
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, remoteStop,
+                    List.of(), List.of(), List.of(), null, null, null);
+        }
+
+        /** The facts with the session rows' link lists stated by the caller (tests). */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean workspaceBoxEnabled, boolean remoteStop,
+                  List<String> prUrls, List<String> githubUrls, List<String> jiraUrls) {
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, remoteStop,
+                    prUrls, githubUrls, jiraUrls, null, null, null);
+        }
+
+        /** The facts with the cross-row jump targets resolved; no session links. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean workspaceBoxEnabled, boolean remoteStop,
                   DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
-            this(transferAvailable, jiraEnabled, mirroredTask, false, false, sessionGitHubLink,
-                    sessionJiraLink, showTask, showPullRequest, showSession);
-        }
-
-        /** The facts before session rows carried attached links: no session link. */
-        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
-                  boolean sessionGitHubLink, boolean sessionJiraLink) {
-            this(transferAvailable, jiraEnabled, mirroredTask, false, false, sessionGitHubLink,
-                    sessionJiraLink, null, null, null);
+            this(transferAvailable, jiraEnabled, mirroredTask, workspaceBoxEnabled, remoteStop,
+                    List.of(), List.of(), List.of(), showTask, showPullRequest, showSession);
         }
     }
 
@@ -245,6 +279,19 @@ final class TaskMenu {
         };
     }
 
+    /**
+     * The session links section's items: the project's main-checkout window
+     * (its action hides itself when the project is remote or its folder is
+     * gone), then the session's pull requests, GitHub issues and Jira
+     * tickets, each present only when the facts name at least one page.
+     */
+    private static List<Item> sessionLinks(MenuFacts facts) {
+        return section(Item.OPEN_MAIN_CHECKOUT,
+                facts.prUrls().isEmpty() ? null : Item.OPEN_PULL_REQUEST,
+                facts.githubUrls().isEmpty() ? null : Item.OPEN_GITHUB_TICKETS,
+                facts.jiraUrls().isEmpty() ? null : Item.OPEN_JIRA_TICKETS);
+    }
+
     /** A running task: its tree links, then switch or pull it here, work on it, manage it, clean up last. */
     private static List<List<Item>> running(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
@@ -255,8 +302,7 @@ final class TaskMenu {
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
                 List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
-                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
-                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
+                sessionLinks(facts),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
     }
@@ -276,8 +322,7 @@ final class TaskMenu {
                 section(facts.remoteStop() ? Item.DEACTIVATE : null,
                         Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
                 List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
-                section(facts.sessionGitHubLink() ? Item.OPEN_IN_GITHUB : null,
-                        facts.sessionJiraLink() ? Item.OPEN_IN_JIRA : null),
+                sessionLinks(facts),
                 List.of(Item.DONE_WITH_TASK)));
     }
 
@@ -395,13 +440,16 @@ final class TaskMenu {
             }
         }
         TaskRow taskRow = lead instanceof TaskRow row ? row : null;
+        List<String> sessionMirrors = taskRow == null ? List.of()
+                : TaskMirroring.mirrorsOfSession(taskRow.session().id().toString());
         return new MenuFacts(taskRow != null
                 && SessionTransfer.available(taskRow.session(), taskRow.activity()), jiraEnabled,
                 issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent(),
                 workspaceBoxEnabled,
                 taskRow != null && TaskActions.remoteStopOffered(taskRow),
-                taskRow != null && !githubUrlsOf(taskRow).isEmpty(),
-                taskRow != null && !jiraUrlsOf(taskRow).isEmpty(),
+                taskRow == null ? List.of() : prUrlsOf(taskRow),
+                taskRow == null ? List.of() : githubIssuesOf(sessionMirrors),
+                taskRow == null ? List.of() : jiraTicketsOf(sessionMirrors),
                 showTask, showPullRequest, showSession);
     }
 
@@ -413,42 +461,69 @@ final class TaskMenu {
     }
 
     /**
-     * Any thread: the GitHub pages the selected row leads to — an issue's or
-     * pull request's own page, or a session row's pull request plus every
-     * GitHub issue its tasks mirror. The Open in GitHub action opens all of
-     * them, the way Open Mirrors does.
+     * Any thread: the GitHub page the selected issue or pull request row
+     * leads to, its own address. Session rows no longer offer the combined
+     * entry; their links are split per kind (see {@link #prUrlsOf}).
      */
     static List<String> githubUrlsOf(TaskNode node) {
-        return githubUrlsOf(node, node instanceof TaskRow row
-                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
-    }
-
-    /** Pure over the given session mirrors: {@link #githubUrlsOf(TaskNode)} without the snapshot read. */
-    static List<String> githubUrlsOf(TaskNode node, List<String> sessionMirrors) {
         return switch (node) {
             case IssueRow issue -> issue.issue().url().stream().toList();
             case PullRequestRow pullRequest -> pullRequest.pullRequest().url().stream().toList();
-            case TaskRow task -> Stream.concat(
-                    TaskTreeRenderer.pullRequestUrl(task).stream(),
-                    sessionMirrors.stream().filter(TaskMenu::isGitHub)).toList();
             case null, default -> List.of();
         };
     }
 
-    /** Any thread: the Jira pages the selected row leads to, as {@link #githubUrlsOf(TaskNode)} for Jira. */
+    /** Any thread: the Jira page the selected Jira issue row leads to, its own address. */
     static List<String> jiraUrlsOf(TaskNode node) {
-        return jiraUrlsOf(node, node instanceof TaskRow row
-                ? TaskMirroring.mirrorsOfSession(row.session().id().toString()) : List.of());
-    }
-
-    /** Pure over the given session mirrors: {@link #jiraUrlsOf(TaskNode)} without the snapshot read. */
-    static List<String> jiraUrlsOf(TaskNode node, List<String> sessionMirrors) {
         return switch (node) {
             case JiraIssueRow jira -> List.of(jira.issue().url());
-            case TaskRow task -> sessionMirrors.stream().filter(url ->
-                    TaskMirror.kindOf(url).filter(TaskMirror.Kind.JIRA::equals).isPresent()).toList();
             case null, default -> List.of();
         };
+    }
+
+    /**
+     * The session's pull-request pages, target first, then the working
+     * branch's own PR when it is a different one — GitHub allows several
+     * open pull requests from one head branch, and an explicitly associated
+     * target need not be the branch's discovered PR. Deduplicated by pull
+     * request number, so the same PR under two spellings is one entry.
+     */
+    static List<String> prUrlsOf(TaskRow task) {
+        List<String> urls = new ArrayList<>();
+        Set<Integer> numbers = new HashSet<>();
+        task.session().targetPullRequest().map(PullRequestTarget::url)
+                .ifPresent(url -> addPullRequest(urls, numbers, url));
+        task.branchPullRequest().flatMap(BranchPullRequest::url)
+                .ifPresent(url -> addPullRequest(urls, numbers, url));
+        return List.copyOf(urls);
+    }
+
+    private static void addPullRequest(List<String> urls, Set<Integer> numbers, String url) {
+        Integer number = pullRequestNumber(url).orElse(null);
+        if (number != null ? !numbers.add(number) : urls.contains(url)) {
+            return;
+        }
+        urls.add(url);
+    }
+
+    /** The pull request number in a {@code /pull/<n>} page address, empty for anything else. */
+    static Optional<Integer> pullRequestNumber(String url) {
+        if (url == null) {
+            return Optional.empty();
+        }
+        Matcher number = PULL_REQUEST_PAGE.matcher(url);
+        return number.find() ? Optional.of(Integer.parseInt(number.group(1))) : Optional.empty();
+    }
+
+    /** The GitHub issue pages of the session's task mirrors, in mirror order. */
+    static List<String> githubIssuesOf(List<String> sessionMirrors) {
+        return sessionMirrors.stream().filter(TaskMenu::isGitHub).toList();
+    }
+
+    /** The Jira ticket pages of the session's task mirrors, in mirror order. */
+    static List<String> jiraTicketsOf(List<String> sessionMirrors) {
+        return sessionMirrors.stream().filter(url ->
+                TaskMirror.kindOf(url).filter(TaskMirror.Kind.JIRA::equals).isPresent()).toList();
     }
 
     private static boolean isGitHub(String url) {
@@ -473,13 +548,13 @@ final class TaskMenu {
                                     boolean jiraEnabled, List<TaskNode> displayed,
                                     TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched,
                                     boolean workspaceBoxEnabled) {
+        MenuFacts facts = factsFor(lead, jiraEnabled, displayed, tasks, watched, workspaceBoxEnabled);
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
-        for (List<Item> section : sections(lead, selection,
-                factsFor(lead, jiraEnabled, displayed, tasks, watched, workspaceBoxEnabled))) {
+        for (List<Item> section : sections(lead, selection, facts)) {
             List<AnAction> present = new ArrayList<>();
             for (Item item : section) {
-                AnAction action = actions.get(item);
+                AnAction action = entryFor(item, actions, facts);
                 if (action != null) {
                     present.add(action);
                 }
@@ -494,6 +569,66 @@ final class TaskMenu {
             separated = true;
         }
         return menu;
+    }
+
+    /**
+     * One menu entry: the panel's action for most items, but a submenu
+     * built from the facts for a session-link item naming several pages —
+     * one child per page, each opening its own, where a single combined
+     * action would open a tab per link at once. One page keeps the direct
+     * entry, whose own update names it (PR #9, GitHub Issue #12, Jira
+     * PROJ-123). Pure over the given facts; the children are throwaway
+     * actions a popup's lifetime owns.
+     */
+    private static AnAction entryFor(Item item, Map<Item, AnAction> actions, MenuFacts facts) {
+        AnAction action = actions.get(item);
+        if (action == null) {
+            return null;
+        }
+        return switch (item) {
+            case OPEN_PULL_REQUEST -> submenu(facts.prUrls(), "Pull Requests",
+                    TaskMenu::pullRequestLabel, AllIcons.Vcs.Vendors.Github, action);
+            case OPEN_GITHUB_TICKETS -> submenu(facts.githubUrls(), "GitHub Issues",
+                    TaskMenu::githubIssueLabel, AllIcons.Vcs.Vendors.Github, action);
+            case OPEN_JIRA_TICKETS -> submenu(facts.jiraUrls(), "Jira Tickets",
+                    TaskMenu::jiraTicketLabel, TaskTreeRenderer.JIRA_ICON, action);
+            default -> action;
+        };
+    }
+
+    /** The submenu for a multi-page item; {@code null} falls back to the single-page direct entry. */
+    private static AnAction submenu(List<String> urls, String title,
+                                    java.util.function.UnaryOperator<String> label,
+                                    javax.swing.Icon icon, AnAction single) {
+        if (urls.size() < 2) {
+            return single;
+        }
+        DefaultActionGroup group = new DefaultActionGroup(title, true);
+        for (String url : urls) {
+            String address = url;
+            group.add(new DumbAwareAction(label.apply(address), address, icon) {
+                @Override
+                public void actionPerformed(@NotNull AnActionEvent e) {
+                    BrowserUtil.browse(address);
+                }
+            });
+        }
+        return group;
+    }
+
+    /** {@code PR #9} for a pull-request page address; the address itself when it parses no number. */
+    static String pullRequestLabel(String url) {
+        return pullRequestNumber(url).map(number -> "PR #" + number).orElse(url);
+    }
+
+    /** {@code GitHub Issue #12} for an issue page address; the address itself when it parses no number. */
+    static String githubIssueLabel(String url) {
+        return "GitHub Issue " + TaskMirror.label(url);
+    }
+
+    /** {@code Jira PROJ-123} for a ticket's browse address; the address itself when it parses no key. */
+    static String jiraTicketLabel(String url) {
+        return "Jira " + TaskMirror.label(url);
     }
 
     /** The page of a GitHub or Jira issue row, the address a task mirror records. Pure. */

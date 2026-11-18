@@ -218,8 +218,12 @@ class TaskActionsTest {
         // Jira enabled and the issue rows mirrored, so the group items and
         // Open Mirrored Task a menu can offer are all reachable.
         // Jira enabled, mirrored, and every jump target resolved, so the
-        // SHOW_* items a menu can offer are all reachable too.
+        // SHOW_* items a menu can offer are all reachable too. The session
+        // link lists carry one page per kind, so the split link entries are
+        // reachable as well.
         TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, false, false,
+                List.of("https://github.com/o/r/pull/7"), List.of("https://github.com/o/r/issues/9"),
+                List.of("https://acme.atlassian.net/browse/PROJ-9"),
                 new app.drydock.tasks.TaskNode.DelayedTaskRow(
                         new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
                                 app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
