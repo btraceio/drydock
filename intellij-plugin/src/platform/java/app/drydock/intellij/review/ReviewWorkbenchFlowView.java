@@ -75,7 +75,9 @@ import java.util.function.Consumer;
  * around the hunk, and its viewers are decorated like a section card's
  * ({@link Actions#decorator}). Below the diff are the comment composer and
  * the footer: Next (J), Comment (C), Flag (F), Back (K). After the last
- * hunk the centre shows the finish screen. EDT.
+ * hunk the centre shows the finish screen: its counts, Approve (an
+ * approved verdict for every seen hunk not approved yet), and in a pull
+ * request review Review &amp; Post…. EDT.
  */
 final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
 
@@ -97,6 +99,9 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     static final String CANCEL = "Cancel";
     static final String SAVING = "Saving…";
     static final String FINISH_TITLE = "Finish the review";
+    static final String APPROVE = "Approve";
+    static final String APPROVING = "Approving…";
+    static final String NOTHING_TO_APPROVE = "Every seen hunk is approved.";
     static final String REVIEW_AND_POST = "Review & Post…";
     static final String CHECKING = "Checking GitHub…";
     static final String BACK_TO_DIFF = "Back to Diff";
@@ -126,6 +131,12 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
 
         /** Sends the session lane to the bound session; completes with the message to show. */
         CompletableFuture<Optional<String>> sendToSession();
+
+        /**
+         * Records the reviewer's approval of the hunks with {@code digests};
+         * completes with the refusal to show, empty when the verdicts are written.
+         */
+        CompletableFuture<Optional<String>> approve(List<String> digests);
     }
 
     private final Project project;
@@ -152,6 +163,7 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     private final JBLabel flaggedStat = new JBLabel();
     private final JPanel unseenRow = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0));
     private final JBLabel unseenText = new JBLabel();
+    final JButton approve = new JButton(APPROVE);
     final JButton reviewAndPost = new JButton(REVIEW_AND_POST);
     final JButton sendToSession = new JButton();
     final JBLabel finishNotice = new JBLabel();
@@ -163,6 +175,7 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     private boolean saving;
     private boolean posting;
     private boolean sending;
+    private boolean approving;
 
     ReviewWorkbenchFlowView(Project project, ReviewWorkbenchFlow flow, Actions actions) {
         super(new BorderLayout());
@@ -275,13 +288,15 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
         unseenRow.setOpaque(false);
         unseenRow.add(unseenText);
         unseenRow.add(new ActionLink(GO_TO_FIRST, (ActionListener) e -> flow.backToDiff()));
-        reviewAndPost.putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true);
+        approve.putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true);
+        approve.addActionListener(e -> approveSeen());
         reviewAndPost.addActionListener(e -> post());
         sendToSession.addActionListener(e -> send());
         JButton backToDiff = new JButton(BACK_TO_DIFF);
         backToDiff.addActionListener(e -> flow.back());
         JPanel buttons = new JPanel(new HorizontalLayout(JBUI.scale(8)));
         buttons.setOpaque(false);
+        buttons.add(approve);
         buttons.add(reviewAndPost);
         buttons.add(sendToSession);
         buttons.add(backToDiff);
@@ -405,6 +420,11 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
         int unseen = total - seen;
         unseenText.setText(unseen + (unseen == 1 ? " hunk" : " hunks") + " not seen yet.");
         unseenRow.setVisible(unseen > 0);
+        int toApprove = queue.toApprove(flow.seen()).size();
+        approve.setText(approving ? APPROVING : approveLabel(toApprove));
+        approve.setEnabled(!approving && toApprove > 0);
+        approve.setToolTipText(toApprove == 0 ? NOTHING_TO_APPROVE
+                : "Record your approval of the hunks you have seen; posts nothing to GitHub");
         reviewAndPost.setVisible(outbox.prMode());
         reviewAndPost.setText(posting ? CHECKING : REVIEW_AND_POST);
         reviewAndPost.setEnabled(!posting);
@@ -512,6 +532,35 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
                 closeComposer();
                 flow.next();
             }
+        }));
+    }
+
+    /** Approve's label (pure): "Approve 3 Seen Hunks", "Approve 1 Seen Hunk", or "Approve" with none to approve. */
+    static String approveLabel(int count) {
+        return count == 0 ? APPROVE : APPROVE + " " + count + (count == 1 ? " Seen Hunk" : " Seen Hunks");
+    }
+
+    /**
+     * Records the approval of every seen hunk no approved verdict covers yet.
+     * The written verdicts reach the queue with the next state, which counts
+     * them as reviewed; a refusal (a blocking finding on one of the hunks,
+     * code that changed since) shows in the notice line.
+     */
+    private void approveSeen() {
+        List<String> digests = flow.queue().toApprove(flow.seen());
+        if (approving || digests.isEmpty()) {
+            return;
+        }
+        approving = true;
+        finishNotice.setText("");
+        renderFinish();
+        actions.approve(digests).whenComplete((refusal, error) -> onEdt(() -> {
+            approving = false;
+            finishNotice.setText(error != null ? "Approving failed: " + ReviewTabProvider.rootMessage(error)
+                    : refusal == null || refusal.isEmpty()
+                            ? "Approved " + digests.size() + (digests.size() == 1 ? " hunk." : " hunks.")
+                            : refusal.get());
+            renderFinish();
         }));
     }
 

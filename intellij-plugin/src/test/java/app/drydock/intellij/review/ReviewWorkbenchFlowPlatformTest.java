@@ -8,9 +8,12 @@ import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.HunkIds;
+import com.intellij.diff.FrameDiffTool;
 import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.ide.util.PropertiesComponent;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
 import java.util.ArrayList;
@@ -18,7 +21,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * The flow review in a booted IDE: the controller's implicit seen marks and
@@ -237,6 +242,94 @@ public class ReviewWorkbenchFlowPlatformTest extends BasePlatformTestCase {
             assertTrue(flow.finishing());
         } finally {
             Disposer.dispose(view);
+        }
+    }
+
+    public void testApproveOnTheFinishScreenRecordsTheSeenHunksAndShowsTheOutcome() {
+        ReviewWorkbenchFlow flow = flow();
+        flow.render(state());
+        List<List<String>> asked = new ArrayList<>();
+        CompletableFuture<Optional<String>> written = new CompletableFuture<>();
+        ReviewWorkbenchFlowView view = new ReviewWorkbenchFlowView(getProject(), flow,
+                new ReviewWorkbenchFlowViewActions(asked, written));
+        try {
+            flow.next(); // A_0 seen
+            flow.finish();
+            assertEquals("Approve 1 Seen Hunk", view.approve.getText());
+            assertTrue(view.approve.isEnabled());
+
+            view.approve.doClick();
+            assertEquals(List.of(List.of(HunkDigest.of("src/A.java", A0))), asked);
+            assertEquals(ReviewWorkbenchFlowView.APPROVING, view.approve.getText());
+            assertFalse(view.approve.isEnabled());
+            view.approve.doClick();
+            assertEquals("a running approval is not started twice", 1, asked.size());
+
+            written.complete(Optional.empty());
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals("Approved 1 hunk.", view.finishNotice.getText());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    public void testApproveIsOffWithNothingSeenAndNamesTheCount() {
+        assertEquals("Approve", ReviewWorkbenchFlowView.approveLabel(0));
+        assertEquals("Approve 3 Seen Hunks", ReviewWorkbenchFlowView.approveLabel(3));
+        ReviewWorkbenchFlow flow = flow();
+        flow.render(state());
+        ReviewWorkbenchFlowView view = new ReviewWorkbenchFlowView(getProject(), flow,
+                ReviewWorkbenchEditorPlatformTest.NO_ACTIONS);
+        try {
+            flow.finish();
+            assertFalse(view.approve.isEnabled());
+            assertEquals(ReviewWorkbenchFlowView.NOTHING_TO_APPROVE, view.approve.getToolTipText());
+        } finally {
+            Disposer.dispose(view);
+        }
+    }
+
+    /** Flow centre actions that record approvals and complete them with {@code written}. */
+    private static final class ReviewWorkbenchFlowViewActions implements ReviewWorkbenchFlowView.Actions {
+        private final List<List<String>> asked;
+        private final CompletableFuture<Optional<String>> written;
+
+        ReviewWorkbenchFlowViewActions(List<List<String>> asked, CompletableFuture<Optional<String>> written) {
+            this.asked = asked;
+            this.written = written;
+        }
+
+        @Override
+        public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path, int hunkIndex,
+                                                                                        String scrollKey) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
+            return viewer -> {
+            };
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> comment(FlowModel.Hunk hunk, String text) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> submitReview() {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> sendToSession() {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        @Override
+        public CompletableFuture<Optional<String>> approve(List<String> digests) {
+            asked.add(digests);
+            return written;
         }
     }
 

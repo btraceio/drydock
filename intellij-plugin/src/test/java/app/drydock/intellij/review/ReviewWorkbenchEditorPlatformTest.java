@@ -393,6 +393,11 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         public CompletableFuture<Optional<String>> sendToSession() {
             return CompletableFuture.completedFuture(Optional.empty());
         }
+
+        @Override
+        public CompletableFuture<Optional<String>> approve(List<String> digests) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
     };
 
     private static FlowModel.Hunk hunk(String key, String digest, int added, int removed) {

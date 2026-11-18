@@ -92,6 +92,11 @@ public class ReviewSymbolNavigationPlatformTest extends BasePlatformTestCase {
                     }
 
                     @Override
+                    public CompletableFuture<Optional<String>> approve(List<String> digests) {
+                        return CompletableFuture.completedFuture(Optional.empty());
+                    }
+
+                    @Override
                     public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex,
                                                                         Disposable lifetime) {
                         return viewer -> {

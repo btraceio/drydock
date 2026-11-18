@@ -114,7 +114,8 @@ import java.util.function.UnaryOperator;
  * {@link ReviewContents}, built into a request by {@link
  * ReviewDiffRequests} with fragments from {@link ReviewFragments}; the
  * finding cards' write side is {@link ReviewTriageActions} (T4), wired
- * through {@link TriageCards} below. The annotation store and the diff
+ * through {@link TriageCards} below; the human verdicts' writer is {@link
+ * ReviewVerdictCommands}, behind the finish screen's Approve. The annotation store and the diff
  * service are the backend's own instances (one writer, and digests
  * measured by the same diff an agent sees).</p>
  *
@@ -195,6 +196,8 @@ final class ReviewTabProvider {
     private WorktreeService worktrees;
     private GitStatusService git;
     private ReviewContents contents;
+    /** The human verdicts' writer: the finish screen's Approve. Volatile: the flow reads it on the EDT. */
+    private volatile ReviewVerdictCommands commands;
     private ReviewTabScopes scopes;
     /** The backend's pending questions and the selection questions it mints (Ask About Selection). */
     private volatile PendingQuestions pendingQuestions;
@@ -390,6 +393,7 @@ final class ReviewTabProvider {
         worktrees = null;
         git = null;
         contents = null;
+        commands = null;
         scopes = null;
         refresher = null;
         store = null;
@@ -484,6 +488,7 @@ final class ReviewTabProvider {
         worktrees = new WorktreeService();
         git = new GitStatusService();
         contents = new ReviewContents(new GitExecutableLocator(), git);
+        commands = new ReviewVerdictCommands(backend.diffService(), git, annotations, plugin.executor());
         // The finding cards' write side (T4): every store mutation and the
         // prompt submission run on the plugin's executor; the submitter seam
         // is the P1 registry path injected at construction.
@@ -1921,6 +1926,25 @@ final class ReviewTabProvider {
         public CompletableFuture<Optional<String>> sendToSession() {
             return ReviewTabProvider.this.sendToSession().thenApply(
                     message -> Optional.of(message.map(TriageCards.Surfaced::text).orElse(SEND_DELIVERED)));
+        }
+
+        /**
+         * One approved verdict per digest, dated against a fresh diff
+         * ({@link ReviewVerdictCommands#markHunks}) and settled in no tour
+         * step: the flow walks the whole queue, not one section. Completes
+         * with the command's refusal, empty when written.
+         */
+        @Override
+        public CompletableFuture<Optional<String>> approve(List<String> digests) {
+            ReviewScope current = scope;
+            ReviewVerdictCommands verdicts = commands;
+            if (current == null || verdicts == null) {
+                return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
+            }
+            return verdicts.markHunks(current, digests, Optional.empty())
+                    .thenApply(result -> result instanceof ReviewVerdictCommands.Result.Refused refused
+                            ? Optional.of(refused.reason())
+                            : Optional.<String>empty());
         }
 
         /**

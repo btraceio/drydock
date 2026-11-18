@@ -202,6 +202,19 @@ public final class FlowModel {
             return (int) order.stream().filter(hunk -> hunk.seenIn(seen)).count();
         }
 
+        /**
+         * What Approve on the finish screen records (pure): the distinct
+         * digests of the hunks seen under {@code seen} that no approved
+         * verdict covers yet, in queue order.
+         */
+        public List<String> toApprove(Set<String> seen) {
+            return order.stream()
+                    .filter(hunk -> !hunk.reviewed() && seen.contains(hunk.digest()))
+                    .map(Hunk::digest)
+                    .distinct()
+                    .toList();
+        }
+
         /** How many of the hunks are flagged under {@code flagged}. */
         public int flaggedCount(Set<String> flagged) {
             return (int) order.stream().filter(hunk -> flagged.contains(hunk.digest())).count();

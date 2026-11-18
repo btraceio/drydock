@@ -156,6 +156,19 @@ class FlowModelTest {
     }
 
     @Test
+    void approveCoversTheSeenHunksNoApprovedVerdictCoversYet() {
+        String aDigest = HunkDigest.of("src/A.java", A0);
+        String bDigest = HunkDigest.of("src/B.java", B0);
+        ReviewVerdict approved = new ReviewVerdict(SCOPE, bDigest, ReviewVerdict.Decision.APPROVED, Optional.empty(),
+                Instant.parse("2026-11-04T00:00:00Z"), BASE, "head", Optional.empty());
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of(approved))));
+
+        assertEquals(List.of(aDigest), queue.toApprove(Set.of(aDigest, bDigest)),
+                "B is approved already; A's removal is not seen");
+        assertEquals(List.of(), queue.toApprove(Set.of()), "nothing seen, nothing to approve");
+    }
+
+    @Test
     void hideSeenLeavesOutSeenHunksButTheCurrentOneAndEmptyHeaders() {
         FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY));
         Set<String> seen = Set.of(HunkDigest.of("src/A.java", A0), HunkDigest.of("src/A.java", A1),
