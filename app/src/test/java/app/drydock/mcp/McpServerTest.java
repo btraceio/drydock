@@ -152,10 +152,15 @@ class McpServerTest {
     /** The text the full router sent before instructions depended on the served tools. */
     private static final String GOLDEN_INSTRUCTIONS = """
             Drydock hosts this session in a tab a human is watching. As soon as you know what \
-            the work actually is, call session_rename with a short title naming the work -- not \
-            the branch. Re-title it if the work turns out to be something else. Two refusals are \
-            normal and both explain themselves: if the human has named the session, leave it \
-            alone; if another session here already has that title, pick one that tells them apart.
+            the work actually is, call session_rename with a short title naming the session's \
+            MAIN work -- not the branch, and not a generic label ('Fix bug', 'Investigate') or \
+            the title of a narrow sub-task or follow-up: a title vague enough to fit any session \
+            hides what this one is about, so make it specific enough to tell this session apart \
+            from every other one here. Re-title it only if the main work itself turns out to be \
+            something else -- never to track whichever sub-task you are on at the moment. Two \
+            refusals are normal and both explain themselves: if the human has named the session, \
+            leave it alone; if another session here already has that title, pick one that tells \
+            them apart.
 
             Keep session_handoff current as you work. This session may be handed to a different \
             agent at any moment, and that brief is all your successor gets -- write it for them, \
