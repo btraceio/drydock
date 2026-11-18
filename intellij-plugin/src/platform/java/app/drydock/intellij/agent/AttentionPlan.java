@@ -42,12 +42,12 @@ public final class AttentionPlan {
     }
 
     /**
-     * The balloon's two actions: a session some window shows is raised there
+     * The balloon's two actions: a session some window shows is shown there
      * or snoozed; one no window shows can be shown in the window the user is
      * in, or moved into its own (cross-project tabs, frame F5).
      */
     public static List<String> actions(boolean shown) {
-        return shown ? List.of("Raise window", "Snooze") : List.of("Show here", "Open project window");
+        return shown ? List.of("Show session", "Snooze") : List.of("Show here", "Open project window");
     }
 
     private static String line(Ask ask) {
