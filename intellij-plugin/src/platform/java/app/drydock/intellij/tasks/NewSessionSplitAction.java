@@ -58,9 +58,6 @@ final class NewSessionSplitAction extends SplitButtonAction {
     static final String LOADING = "Loading registered projects…";
     static final String EMPTY = "No registered projects";
     static final String FAILED = "Could not list registered projects";
-    static final String REMOTE_REASON = "Remote projects open only in the Drydock app";
-    static final String REMOTE_SUFFIX = " (remote — opens only in the Drydock app)";
-
     /** Bounded like the launcher's own wait on the plugin's initialization. */
     private static final long INITIALIZATION_TIMEOUT_SECONDS = 30;
 
@@ -116,9 +113,11 @@ final class NewSessionSplitAction extends SplitButtonAction {
     /**
      * Pure: one entry per registered project, in the registry's order, by
      * display name — duplicates stay separate entries bound to their own
-     * record. A remote project is listed disabled with the reason; a local
-     * one is enabled even if its folder is gone (the launcher refuses it
-     * visibly). No projects: one disabled {@link #EMPTY} entry.
+     * record. A remote (SSH) project is enabled like a local one: its task
+     * dialog runs in the repository itself, over ssh, and the launcher
+     * refuses it visibly when something else refuses (a local entry stays
+     * enabled even if its folder is gone for the same reason). No projects:
+     * one disabled {@link #EMPTY} entry.
      */
     static List<Entry> projectEntries(List<SharedProject> projects) {
         if (projects.isEmpty()) {
@@ -126,9 +125,7 @@ final class NewSessionSplitAction extends SplitButtonAction {
         }
         List<Entry> entries = new ArrayList<>(projects.size());
         for (SharedProject project : projects) {
-            entries.add(project.isRemote()
-                    ? new Entry(project.displayName() + REMOTE_SUFFIX, Optional.of(project), Optional.of(REMOTE_REASON))
-                    : new Entry(project.displayName(), Optional.of(project), Optional.empty()));
+            entries.add(new Entry(project.displayName(), Optional.of(project), Optional.empty()));
         }
         return List.copyOf(entries);
     }

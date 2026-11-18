@@ -6,6 +6,7 @@ import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.WorkspaceBoxBinding;
@@ -1183,6 +1184,15 @@ public final class TaskLauncher {
                 report(from, "This window has no project folder, so a task cannot start here.");
                 return Optional.empty();
             }
+            // A registered remote (SSH) project needs no git scan of its own:
+            // the scans would run on this machine against a placeholder that
+            // is not a local checkout. The dialog gets the remote project as
+            // it is registered, no branch picker data, and the session runs
+            // in the repository itself over ssh (the degraded remote contract).
+            SharedProject registered = plugin.sharedProjects().byRoot(base.get()).orElse(null);
+            if (registered != null && registered.isRemote()) {
+                return Optional.of(remoteInputs(from, plugin, registered, fixed));
+            }
             Optional<Path> main = SharedProjectsSeed.mainCheckoutVia(worktrees).apply(base.get())
                     .map(RepositoryCatalog::canonicalize);
             if (main.isEmpty()) {
@@ -1244,6 +1254,36 @@ public final class TaskLauncher {
             report(from, "Drydock could not prepare a new task: " + WorktreeErrors.visibleMessage(e));
             return Optional.empty();
         }
+    }
+
+    /**
+     * The New task dialog's inputs for a registered remote (SSH) project: no
+n     * git scans (the placeholder root is not a local checkout, and every
+     * scan against it would fail or lie), no branch picker data, no worktree
+     * base choices — the dialog pins Work in to the repository itself. The
+     * per-install repository is resolved first, so the registration carries
+     * the project's {@link SshRemote} (the launch paths derive a row's
+     * remote-ness from it) and its last-used agent and model seed the dialog.
+     */
+    private static NewTaskPlan.Inputs remoteInputs(Project from, DrydockPluginService plugin,
+                                                    SharedProject project, Optional<FixedWorktree> fixed)
+            throws ExecutionException, InterruptedException, TimeoutException {
+        Repository local = DrydockStartupActivity.repositories(from).repositoryFor(project.root())
+                .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        Function<AgentKind, Optional<String>> lastUsedModel = kind -> local == null ? Optional.empty()
+                : local.settings().lastUsedModel(kind);
+        Function<AgentKind, ModelTiers> lastUsedTiers = kind -> local == null ? ModelTiers.EMPTY
+                : local.settings().lastUsedTiers(kind).orElse(ModelTiers.EMPTY);
+        AgentRegistry registry = plugin.registry();
+        AgentKind preselected = SessionDialogs.defaultAgent(registry,
+                local == null ? Optional.empty() : local.settings().lastUsedAgent()).orElse(null);
+        Path worktreeBase = DrydockConfigurable.effectiveBase(UserConfig.load().worktreesDirectory(),
+                Path.of(System.getProperty("user.home")));
+        boolean writerActive = DrydockStartupActivity.sessions(from).hasActiveWriterIn(project.root());
+        return new NewTaskPlan.Inputs(project, project.displayName(), fixed, registry.agents(),
+                preselected, "", List.of(), List.of(), Set.of(), worktreeBase, "", writerActive,
+                lastUsedModel, registry::modelSuggestions, lastUsedTiers, registry::supportsSubagents,
+                registry::evalAvailable);
     }
 
     /**
@@ -1404,6 +1444,13 @@ public final class TaskLauncher {
             // launch chain with a binding. The local half below runs
             // byte-identically for every local choice (INV-1).
             return startRemote(from, inputs, choice, preparedSession, bindings);
+        }
+        if (inputs.project().isRemote()) {
+            // The ssh-remote arm: no local chain runs at all — no worktree
+            // creation, no project window on the placeholder root. The
+            // console is an ssh client of the remote host, shown as a tab
+            // in the window the launch came from, like the box arm's.
+            return startOnSshRemote(from, inputs, choice, preparedSession);
         }
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Path mainRoot = inputs.project().root();
@@ -1573,6 +1620,69 @@ public final class TaskLauncher {
                 } catch (ExecutionException | TimeoutException | RuntimeException e) {
                     LOG.log(Level.WARNING, "Could not start task " + choice.name() + " on a workspace box", e);
                     report(from, "Could not start \"" + choice.name() + "\" on a workspace box: "
+                            + WorktreeErrors.visibleMessage(e));
+                    tracked.failed(e);
+                }
+            }
+        });
+        return tracked.future();
+    }
+
+    /**
+     * The ssh-remote arm of one {@link #start}: register the remote project
+     * if it is not registered yet (a split-button entry on a project the
+     * tree has never touched), then launch straight into the window the
+     * launch came from — the placeholder root is never opened as a project
+     * window, and no local git step runs (there is no local checkout to
+     * fork or scan). The session service's ssh-remote branch takes it from
+     * there: the launch context carries the project's {@link SshRemote},
+     * the console is an ssh client, and its working directory on this
+     * machine is the user home.
+     *
+     * <p>This is the ONLY path that starts a task on an SSH remote; Resume
+     * attaches to an existing row's conversation. Eval is passed through:
+     * the dialog hides the offer on a remote target, and the service
+     * refuses it by name if a caller bypasses the dialog (the launch is
+     * then failed visibly, persisting nothing).</p>
+     */
+    private static CompletableFuture<ManagedAgentSession> startOnSshRemote(Project from, NewTaskPlan.Inputs inputs,
+            Choice choice, SessionDialogs.PreparedSessionCallback preparedSession) {
+        TrackedLaunch tracked = new TrackedLaunch();
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        // The placeholder root every context carries and every repository
+        // registration keys on: the remote project's row root.
+        Path mainRoot = inputs.project().root();
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting " + choice.name() + "…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                try {
+                    if (plugin.sharedProjects().byRoot(mainRoot).isEmpty()) {
+                        indicator.setText("Adding " + inputs.repoName() + " to Drydock…");
+                        plugin.sharedProjects()
+                                .registerRemote(inputs.project().remote().orElseThrow())
+                                .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        try {
+                            tracked.launched(SessionDialogs.launchNewSession(from, mainRoot, mainRoot,
+                                    choice.agent(), choice.name(), choice.mode(),
+                                    NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(),
+                                    false, preparedSession, List.of(), Optional.empty(),
+                                    choice.targetPullRequest(), choice.eval()));
+                        } catch (RuntimeException e) {
+                            LOG.log(Level.WARNING, "Could not start task " + choice.name(), e);
+                            report(from, "Could not start \"" + choice.name() + "\": "
+                                    + WorktreeErrors.visibleMessage(e));
+                            tracked.failed(e);
+                        }
+                    }, ModalityState.nonModal());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    tracked.cancelled();
+                } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                    LOG.log(Level.WARNING, "Could not start task " + choice.name() + " on "
+                            + inputs.project().remote().map(SshRemote::host).orElse("the remote host"), e);
+                    report(from, "Could not start \"" + choice.name() + "\": "
                             + WorktreeErrors.visibleMessage(e));
                     tracked.failed(e);
                 }

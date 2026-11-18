@@ -30,6 +30,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -483,10 +484,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
         ManagedAgentSession source = requireSession(sessionId);
         // A remote row's conversation lives on its box; a transfer would
         // summarize it into a local agent that cannot see the box's files.
+        // The ssh-remote arm is the same shape: the conversation lives on
+        // the SSH host, invisible to a local agent.
         if (source.workspaceBox().isPresent()) {
             throw new IllegalStateException("Session '" + source.displayName()
                     + "' runs on workspace box '" + source.workspaceBox().orElseThrow().boxName()
                     + "'; its conversation lives there and cannot be transferred to a local agent");
+        }
+        Optional<SshRemote> sshRemote = remoteFor(source);
+        if (sshRemote.isPresent()) {
+            throw new IllegalStateException("Session '" + source.displayName()
+                    + "' runs on " + sshRemote.get().host()
+                    + "; its conversation lives there and cannot be transferred to a local agent");
         }
         if (source.agentKind() == AgentKind.TERMINAL || targetKind == AgentKind.TERMINAL) {
             throw new IllegalStateException("Terminal sessions cannot be transferred");
@@ -809,6 +818,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (box.isPresent()) {
             return startRemoteLaunch(prepared, box.get(), provider, initialPrompt, model, tiers, rowMustExist);
         }
+        Optional<SshRemote> sshRemote = repositoryRemoteOf(stateStore.get().state(), prepared);
+        if (sshRemote.isPresent()) {
+            return startSshRemoteLaunch(prepared, sshRemote.get(), provider, initialPrompt, model, tiers,
+                    rowMustExist);
+        }
         if (rowMustExist) {
             // A fresh start read the row before it claimed the session; a
             // delete that finished in between removed it, and an upsert here
@@ -972,6 +986,86 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 .map(Repository::root)
                 .filter(Files::isDirectory)
                 .orElseGet(() -> Path.of(System.getProperty("user.home", "/")));
+    }
+
+    /**
+     * The SSH remote of {@code session}'s repository — the ssh-remote arm's
+     * source of remote truth, the way the app's {@code SessionManager} derives
+     * it. A row bound to a workspace box has its own, binding-derived remote
+     * and reads nothing here (its repository is the local checkout); a local
+     * row's repository carries no remote. Pure memory read.
+     */
+    static Optional<SshRemote> repositoryRemoteOf(ApplicationState state, ManagedAgentSession session) {
+        return state.repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst()
+                .flatMap(repository -> Optional.ofNullable(repository.remote()));
+    }
+
+    private Optional<SshRemote> remoteFor(ManagedAgentSession session) {
+        return repositoryRemoteOf(stateStore.get().state(), session);
+    }
+
+    /**
+     * The SSH-remote create (spec: SSH remote repositories — the degraded
+     * remote contract): {@code claude} runs on the remote host inside this
+     * IDE's ssh client, launched through the provider's remote branch.
+     *
+     * <p>Every refusal happens before the row persists or anything is minted
+     * (INV-16, the box arm's ordering): a non-remote-capable provider, and an
+     * eval session — the eval routing is a local-loopback side channel a
+     * remote {@code claude} cannot reach, so the honest answer is a refusal
+     * naming why, never a row that claims eval while running unmarked. No MCP
+     * access is minted (the remote session cannot reach this machine's
+     * loopback MCP server), no launch resources resolve (a host path is
+     * invisible across the ssh hop — the provider refuses them anyway, but an
+     * empty request never asks). The console's cwd is a real local directory
+     * ({@link #consoleCwdFor}), never the placeholder the row stores. The
+     * provider's remote branch carries no {@code --session-id}, so the row
+     * persists without a bound id and its resume opens the provider's own
+     * picker — the app's shipped contract for plain SSH remotes.</p>
+     */
+    private StartedLaunch startSshRemoteLaunch(ManagedAgentSession prepared, SshRemote remote,
+                                               AgentProvider provider, Optional<String> initialPrompt,
+                                               Optional<String> model, Optional<ModelTiers> tiers,
+                                               boolean rowMustExist) {
+        if (!provider.supportsRemote()) {
+            throw new RemoteLaunchRefusal(kindName(provider.kind())
+                    + " cannot run on a remote host; only remote-capable agents can");
+        }
+        if (prepared.evalMode()) {
+            throw new RemoteLaunchRefusal("eval sessions cannot run on a remote host; the eval routing is a "
+                    + "local-loopback side channel " + remote.host() + "'s claude cannot reach");
+        }
+        String generatedId = provider.idStrategy() == SessionIdStrategy.PRESET
+                ? UUID.randomUUID().toString()
+                : "";
+        CreateContext ctx = new CreateContext(prepared.displayName(), generatedId,
+                prepared.workingDirectory(), Optional.of(remote), Optional.empty(), model,
+                false, prepared.readOnly(), initialPrompt, List.of());
+        LaunchPlan plan = provider.buildCreateCommand(ctx);
+        if (!plan.supported()) {
+            throw new RemoteLaunchRefusal(kindName(provider.kind())
+                    + " cannot launch this session (unsupported context)");
+        }
+        boolean sessionIdUsed = !generatedId.isEmpty()
+                && plan.sessionIdUsed() && plan.command().contains(generatedId);
+        if (rowMustExist) {
+            if (!replaceExistingSession(prepared)) {
+                throw new IllegalStateException("Session " + prepared.id() + " was forgotten before it started");
+            }
+        } else {
+            persistSession(prepared);
+        }
+        Instant launchedAt = Instant.now();
+        ends.lastLaunchedAt().put(prepared.id(), launchedAt);
+        // A new client is about to exist: any requested-client-end mark still
+        // pending for the id belongs to an earlier client's end and must not
+        // steer this launch's.
+        clientEnds.clear(prepared.id());
+        CompletableFuture<Void> open = consoles.startConsole(prepared.id(), consoleCwdFor(prepared), plan);
+        return new StartedLaunch(prepared, Optional.empty(), null, launchedAt, generatedId, sessionIdUsed,
+                model, tiers, open);
     }
 
     private ManagedAgentSession finalizeCreate(StartedLaunch started, Throwable failure) {
@@ -1189,8 +1283,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     // never had. The local-only probes below -- the late bind
                     // and the transcript check -- must not decide anything
                     // for it (INV-14), and a fresh create would strand the
-                    // box-side conversation the row names.
-                    if (stored.workspaceBox().isPresent()) {
+                    // box-side conversation the row names. The ssh-remote arm
+                    // is the same shape: the conversation lives on the SSH
+                    // host.
+                    if (stored.workspaceBox().isPresent() || remoteFor(stored).isPresent()) {
                         return stored;
                     }
                     return stored.agentSessionId().isPresent()
@@ -1198,7 +1294,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                             : Optional.ofNullable(ends.lateBindAgentSessionId(sessionId)).orElse(stored);
                 }, executor)
                 .thenComposeAsync(session -> {
-                    if (session.workspaceBox().isPresent()) {
+                    if (session.workspaceBox().isPresent() || remoteFor(session).isPresent()) {
                         return resumePrepared(session);
                     }
                     return session.agentSessionId().isPresent() && !nothingRecordedUnder(session)
@@ -1244,10 +1340,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     // A remote row never starts fresh: its conversation lives
                     // in the box's tmux session, and a fresh local conversation
                     // would strand it. It always resumes (AC-11's other side).
+                    // The ssh-remote arm is the same shape: the conversation
+                    // lives on the SSH host.
                     if (stored.workspaceBox().isPresent()) {
                         throw new IllegalStateException("Session '" + stored.displayName()
                                 + "' runs on workspace box '" + stored.workspaceBox().orElseThrow().boxName()
                                 + "'; it can only be resumed there, never started fresh here");
+                    }
+                    Optional<SshRemote> sshRemote = remoteFor(stored);
+                    if (sshRemote.isPresent()) {
+                        throw new IllegalStateException("Session '" + stored.displayName()
+                                + "' runs on " + sshRemote.get().host()
+                                + "; it can only be resumed there, never started fresh here");
                     }
                     return prepareFreshOnExistingRow(stored);
                 }, executor)
@@ -1312,6 +1416,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // MCP mint -- never runs for it.
         if (prepared.workspaceBox().isPresent()) {
             return resumeRemotePrepared(prepared);
+        }
+        // The ssh-remote arm's resume: the conversation lives on the remote
+        // host, so the same local-only probes are skipped; the provider's
+        // remote branch re-attaches -- an exact id resumes by id, no id
+        // opens the provider's own picker (the app's degraded contract).
+        Optional<SshRemote> sshRemote = remoteFor(prepared);
+        if (sshRemote.isPresent()) {
+            return resumeSshRemotePrepared(prepared, sshRemote.get());
         }
         // Claimed before the late bind, the persist and the mint: a refused
         // resume must not touch the row, the token or the credential file of
@@ -1430,6 +1542,82 @@ public final class DrydockSessionService implements AgentExecutionListener {
             throw e;
         }
         return resumed.whenComplete((ignored, ex) -> endClaim(prepared.id()));
+    }
+
+    /** The ssh-remote resume's claim wrapper: the same claim lifetime as
+      * {@link #resumeRemotePrepared}, with no settings gate — the ssh-remote
+      * arm is not behind the workspace-box flag. */
+    private CompletableFuture<ManagedAgentSession> resumeSshRemotePrepared(ManagedAgentSession prepared,
+                                                                            SshRemote remote) {
+        if (!claims.tryClaim(prepared.id())) {
+            throw launchRefused(prepared.id());
+        }
+        CompletableFuture<ManagedAgentSession> resumed;
+        try {
+            resumed = resumeSshRemoteClaimed(prepared, remote);
+        } catch (RuntimeException | Error e) {
+            endClaim(prepared.id());
+            throw e;
+        }
+        return resumed.whenComplete((ignored, ex) -> endClaim(prepared.id()));
+    }
+
+    /**
+     * The SSH-remote resume: run {@code claude --resume} on the remote host
+     * through this IDE's ssh client.
+     *
+     * <p>The row was read before the claim; a Forget that finished in between
+     * must not resurrect it (the box resume's deletion-gap guard). None of
+     * the local-only probes runs — no {@code Files.notExists} on the
+     * placeholder working directory, no transcript look-up, no late bind, no
+     * MCP mint, no launch resources, no stdio servers. A vanished remote
+     * conversation surfaces as the provider's own "No conversation found"
+     * inside the terminal; that is the accepted recovery UX. RUNNING persists
+     * only because this IDE owns the live ssh execution.</p>
+     */
+    private CompletableFuture<ManagedAgentSession> resumeSshRemoteClaimed(ManagedAgentSession session,
+                                                                           SshRemote remote) {
+        if (findIn(stateStore.get().state(), session.id()) == null) {
+            throw new IllegalStateException("Session " + session.id() + " was forgotten before it resumed");
+        }
+        AgentProvider provider = registry.get().provider(session.agentKind())
+                .orElseThrow(() -> new IllegalStateException("No " + session.agentKind() + " ("
+                        + session.agentKind().persistedName() + ") provider is registered; cannot resume session"));
+        if (!provider.supportsRemote()) {
+            persistFailedBestEffort(session);
+            throw new IllegalStateException(kindName(provider.kind()) + " cannot resume this session on "
+                    + remote.host());
+        }
+        LaunchPlan plan;
+        try {
+            ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
+                    session.workingDirectory(), Optional.of(remote), Optional.empty(), false,
+                    session.readOnly(), List.of(),
+                    session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty());
+            plan = provider.buildResumeCommand(ctx);
+        } catch (RuntimeException failure) {
+            persistFailedBestEffort(session);
+            throw failure;
+        }
+        if (!plan.supported()) {
+            // AC11: name the agent, open nothing.
+            persistFailedBestEffort(session);
+            throw new IllegalStateException(
+                    kindName(provider.kind()) + " cannot resume this session (unsupported context)");
+        }
+        CompletableFuture<Void> open;
+        try {
+            // A new client is about to exist: any requested-client-end mark
+            // still pending for the id belongs to an earlier client's end
+            // and must not steer this attach's.
+            clientEnds.clear(session.id());
+            open = consoles.startConsole(session.id(), consoleCwdFor(session), plan);
+        } catch (RuntimeException failure) {
+            persistFailedBestEffort(session);
+            throw failure;
+        }
+        return open
+                .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
     }
 
     /**
@@ -2202,12 +2390,20 @@ public final class DrydockSessionService implements AgentExecutionListener {
     public Optional<String> doneFlowRefusal(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
         ManagedAgentSession row = findIn(stateStore.get().state(), sessionId);
-        if (row == null || row.workspaceBox().isEmpty()) {
+        if (row == null) {
             return Optional.empty();
         }
-        return Optional.of("Session '" + row.displayName() + "' runs on workspace box '"
-                + row.workspaceBox().orElseThrow().boxName() + "'; the Done flow is local-only — "
-                + "use Stop or Forget instead");
+        if (row.workspaceBox().isPresent()) {
+            return Optional.of("Session '" + row.displayName() + "' runs on workspace box '"
+                    + row.workspaceBox().orElseThrow().boxName() + "'; the Done flow is local-only — "
+                    + "use Stop or Forget instead");
+        }
+        Optional<SshRemote> sshRemote = remoteFor(row);
+        if (sshRemote.isPresent()) {
+            return Optional.of("Session '" + row.displayName() + "' runs on " + sshRemote.get().host()
+                    + "; the Done flow is local-only — use Stop or Forget instead");
+        }
+        return Optional.empty();
     }
 
     /**

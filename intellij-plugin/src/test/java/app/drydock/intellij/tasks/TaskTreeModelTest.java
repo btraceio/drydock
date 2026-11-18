@@ -296,12 +296,22 @@ class TaskTreeModelTest {
     }
 
     @Test
-    void remoteProjectsAreHidden() {
+    void remoteProjectsShowLikeLocalOnesWithTheirSessions() {
         In in = new In().project(ALPHA);
         SshRemote remote = new SshRemote("box", "/srv/r");
         in.projects.add(new SharedProject(RepositoryId.newId(), remote.placeholderRoot(), "r", T, Optional.of(remote)));
+        // A session in the remote repository: its working directory is the
+        // same placeholder root the project row stores.
+        SharedProject registered = in.projects.get(1);
+        in.sessions.add(session("Remote session", registered.root()));
 
-        assertEquals(List.of(ALPHA), projectRoots(TaskTreeModel.build(in.build())));
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+
+        // Both rows show; the remote one is not a missing folder and its
+        // session places under it (the placeholder is the session's own
+        // working directory, so no local git knowledge is needed).
+        assertEquals(Set.of(ALPHA, registered.root()),
+                Set.copyOf(projectRoots(nodes)));
     }
 
     @Test
