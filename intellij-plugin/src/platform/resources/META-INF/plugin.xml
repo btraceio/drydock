@@ -56,6 +56,25 @@
         <projectService
                 serviceImplementation="app.drydock.intellij.tasks.InboxViewState"/>
 
+        <!-- The session host's remembered selection: the last intentionally
+             shown session id only, in the workspace file. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.agent.SessionHostState"/>
+
+        <!-- The window's session host: pane bookkeeping, the intentional
+             selection (the one remembered id goes through SessionHostState)
+             and the presentation epoch that fences delayed focus. Declarative
+             because its only constructor argument is the project; the
+             platform disposing it on project close ends every pending focus. -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.agent.SessionHostController"/>
+
+        <!-- Converts restored per-session tabs to the one canonical Sessions
+             document, passively: opens it without selecting or focusing it
+             (SessionHostMigration; its listener is declared below). -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.agent.SessionHostMigration"/>
+
         <!-- The agent console tab. The protocol exists so the IDE can restore
              a pinned console tab from the project's workspace file by URL; a
              LightVirtualFile has none, and drydock reopening tabs itself was
@@ -101,6 +120,9 @@
 
         <!-- "Claude needs you": the balloon raised when an agent starts
              waiting for the user (AttentionNotifier). -->
+        <!-- "Drydock Sessions could not open": the passive legacy conversion
+             failed and the restored tabs stay as placeholders. -->
+        <notificationGroup id="Drydock migration" displayType="BALLOON"/>
         <notificationGroup id="Drydock attention" displayType="BALLOON"/>
         <!-- "<task> moved": a hosted agent's console went to its own window. -->
         <notificationGroup id="Drydock moves" displayType="BALLOON"/>
@@ -160,6 +182,12 @@
                     factoryClass="app.drydock.intellij.review.ReviewToolWindowFactory"/>
 
     </extensions>
+    <projectListeners>
+        <!-- A restored legacy session tab opening asks the migration for the
+             canonical document; the public listener, no internal API. -->
+        <listener class="app.drydock.intellij.agent.SessionHostMigration$Listener"
+                  topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
     <applicationListeners>
         <!-- projectClosing, not the service's dispose: a disposing project's
              message bus no longer delivers the process-terminated event that
@@ -347,5 +375,27 @@
                popup="false">
             <add-to-group group-id="EditorTabPopupMenu" anchor="first"/>
         </group>
+        <!-- The session host editor's toolbar: declared empty here, filled by
+             later tasks; the editor builds its toolbar from this group. -->
+        <group id="Drydock.SessionHost.Toolbar"/>
+        <!-- Host toolbar commands and Find Action entries; no default shortcut. -->
+        <action id="Drydock.SessionHost.Hold" class="app.drydock.intellij.agent.SessionHostActions$Hold"
+                text="Hold Current Session">
+            <add-to-group group-id="Drydock.SessionHost.Toolbar"/>
+        </action>
+        <action id="Drydock.SessionHost.CloseHeld" class="app.drydock.intellij.agent.SessionHostActions$CloseHeld"
+                text="Close Held Session View">
+            <add-to-group group-id="Drydock.SessionHost.Toolbar"/>
+        </action>
+        <action id="Drydock.SessionHost.Previous" class="app.drydock.intellij.agent.SessionHostActions$Previous"
+                text="Previous Session">
+            <add-to-group group-id="Drydock.SessionHost.Toolbar"/>
+        </action>
+        <!-- All Sessions…: the whole-catalog picker; host toolbar, tool window title (set by
+             DrydockToolWindowFactory) and Find Action. No default shortcut. -->
+        <action id="Drydock.AllSessions" class="app.drydock.intellij.tasks.AllSessionsAction"
+                text="All Sessions…">
+            <add-to-group group-id="Drydock.SessionHost.Toolbar"/>
+        </action>
     </actions>
 </idea-plugin>

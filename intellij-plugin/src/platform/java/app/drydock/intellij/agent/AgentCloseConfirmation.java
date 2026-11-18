@@ -140,11 +140,10 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
 
     /** The close question's rows: dot, title, {@code <repo> · this window|hosted[ · needs you]}. */
     private static List<CloseWindowDialog.Row> rows(Project project, List<Working> working) {
-        AgentConsoleFileSystem files = AgentConsoleFileSystem.getInstance();
         List<CloseWindowDialog.Row> rows = new ArrayList<>();
         for (Working agent : working) {
             ManagedSessionId id = agent.session().id();
-            Optional<SessionPlace> hosted = HostedTab.placeIn(files.fileFor(id), project);
+            Optional<SessionPlace> hosted = HostedTab.placeIn(project, id);
             String repository = hosted.map(SessionPlace::repository)
                     .or(() -> AgentExecutionRegistry.getInstance().execution(id)
                             .map(execution -> execution.place().repository()))

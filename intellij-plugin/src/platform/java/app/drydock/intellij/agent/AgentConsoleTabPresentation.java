@@ -1,6 +1,7 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
@@ -15,6 +16,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 
 import javax.swing.Icon;
 
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -45,15 +47,33 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
 
     @Override
     public String getEditorTabTitle(Project project, VirtualFile file) {
+        if (file instanceof SessionHostFile) {
+            // The host tab names what the host is showing: the current
+            // session's own tab title. Nothing shown — the platform falls
+            // back to the document's presentable name ("Drydock Sessions").
+            return hostSession(project).map(AgentConsoleTabPresentation::tabTitle).orElse(null);
+        }
         ManagedAgentSession session = sessionOf(file);
         if (session == null) {
             return null;   // not ours, or not loaded yet: platform default
         }
-        String title = tabTitle(session);
-        // A hosted tab carries the agent's repo before its title (F2).
-        return HostedTab.placeIn((AgentConsoleFile) file, project)
-                .map(place -> HostedTab.title(place.repository(), title))
-                .orElse(title);
+        return tabTitle(session);
+    }
+
+    /**
+     * The host document's session: the window controller's current session
+     * (the last one intentionally activated), resolved against the catalog
+     * snapshot. The file itself names no session — this is a view of host
+     * state re-read at paint, never stored on the file. Memory-only reads on
+     * the EDT: the cached layout and the bounded catalog index, no waits.
+     */
+    private static Optional<ManagedAgentSession> hostSession(Project project) {
+        if (project == null || project.isDisposed()) {
+            return Optional.empty();
+        }
+        return SessionHostController.getInstance(project).layout().current()
+                .map(AgentConsoleTabPresentation::sessionById)
+                .flatMap(session -> Optional.ofNullable(session));
     }
 
     /**
@@ -89,8 +109,32 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
                 .flatMap(repository -> Optional.ofNullable(repository.remote()));
     }
 
+    /** The host hint's row-data lines: {@code <Kind> agent · <status>},
+      * the box or SSH host the agent runs on when it is remote, and the
+      * working directory. No git reads, no transcript scans, no probes. */
+    private static String hostTooltip(ManagedAgentSession session) {
+        String kind = session.agentKind().persistedName();
+        kind = Character.toUpperCase(kind.charAt(0)) + kind.substring(1);
+        StringBuilder hint = new StringBuilder(kind).append(" agent · ")
+                .append(session.status().name().toLowerCase(Locale.ROOT).replace('_', ' '));
+        if (session.workspaceBox().isPresent()) {
+            hint.append("\nOn ").append(session.workspaceBox().orElseThrow().boxName());
+        } else {
+            sshRemoteHostOf(session).ifPresent(remote -> hint.append("\nOn ").append(remote.host()));
+        }
+        hint.append("\n").append(session.workingDirectory());
+        return hint.toString();
+    }
+
     @Override
     public String getEditorTabTooltipText(Project project, VirtualFile file) {
+        if (file instanceof SessionHostFile) {
+            // The host tab's hint describes the same session the title names,
+            // from row data only: agent kind, persisted status, where the
+            // agent runs, the working directory. No reads beyond the catalog
+            // snapshot the title already touched.
+            return hostSession(project).map(AgentConsoleTabPresentation::hostTooltip).orElse(null);
+        }
         if (!(file instanceof AgentConsoleFile console)) {
             return null;
         }
@@ -117,7 +161,7 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
                         remote.orElseThrow().host());
             }
         }
-        return HostedTab.placeIn(console, project).map(HostedTab::tooltip).orElse(null);
+        return null;
     }
 
     @Override
@@ -236,9 +280,15 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
      * this runs on the EDT during a paint.
      */
     static ManagedAgentSession sessionOf(VirtualFile file) {
-        if (!(file instanceof AgentConsoleFile console)) {
-            return null;
-        }
+        return file instanceof AgentConsoleFile console ? sessionById(console.sessionId()) : null;
+    }
+
+    /**
+     * The catalog row for {@code id} from the one shared index, or null when
+     * the catalog is not loaded (or failed to) or holds no such row. Memory
+     * only: never waits, fabricates a session or mints a console file.
+     */
+    static ManagedAgentSession sessionById(ManagedSessionId id) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         if (plugin == null
                 || !plugin.initialization().isDone()
@@ -249,6 +299,6 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
         }
         // The catalog list instance only changes when the state does, so
         // this is an O(1) lookup against the index's current snapshot.
-        return INDEX.find(plugin.stateStore().state().sessions(), console.sessionId());
+        return INDEX.find(plugin.stateStore().state().sessions(), id);
     }
 }

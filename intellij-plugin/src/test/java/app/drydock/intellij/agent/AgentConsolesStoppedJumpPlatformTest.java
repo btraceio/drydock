@@ -16,7 +16,8 @@ import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.TestDialogManager;
-import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.testFramework.HeavyPlatformTestCase;
 
 import java.nio.file.Path;
 
@@ -54,10 +55,11 @@ import static junit.framework.TestCase.fail;
  * returns null for a {@code VirtualFileWithoutContent}). The test hands it
  * our provider the way a real editor manager would find it.</p>
  */
-public class AgentConsolesStoppedJumpPlatformTest extends BasePlatformTestCase {
+public class AgentConsolesStoppedJumpPlatformTest extends HeavyPlatformTestCase {
 
     private ManagedSessionId sessionId;
-    private AgentConsoleFile file;
+    private SessionHostFile file;
+    private FileEditorProvider previousProvider;
 
     @Override
     protected void setUp() throws Exception {
@@ -65,27 +67,32 @@ public class AgentConsolesStoppedJumpPlatformTest extends BasePlatformTestCase {
         // barest, before any window opens.
         sessionId = ManagedSessionId.newId();
         super.setUp();
-        file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-        // How the test editor manager finds the console's provider; without
-        // it, it would open the file as a text editor with no document.
+        file = AgentConsoleFileSystem.getInstance().sessionHostFile();
+        // How the test editor manager finds the host's provider; without it,
+        // it would open the file as a text editor with no document. The file
+        // is application-wide, so the previous value is restored.
+        previousProvider = file.getUserData(FileEditorProvider.KEY);
         file.putUserData(FileEditorProvider.KEY, new AgentConsoleEditorProvider());
     }
 
     @Override
     protected void tearDown() throws Exception {
-        Project project = getProject();
-        FileEditorManager files = FileEditorManager.getInstance(project);
-        // The test editor manager's closeFile does not dispose a custom
-        // provider's editor (its default disposeEditor is empty), so the
-        // tab's own dispose runs here — its age ticker must not outlive the
-        // test.
-        for (FileEditor editor : files.getAllEditors(file)) {
-            if (editor instanceof AgentConsoleEditor console) {
-                console.dispose();
+        try {
+            Project project = getProject();
+            FileEditorManager files = FileEditorManager.getInstance(project);
+            // The test editor manager's closeFile does not dispose a custom
+            // provider's editor (its default disposeEditor is empty), so the
+            // editor's own dispose runs here — it releases the host's lease.
+            for (FileEditor editor : files.getAllEditors(file)) {
+                if (editor instanceof SessionHostEditor host) {
+                    Disposer.dispose(host);
+                }
             }
+            files.closeFile(file);
+        } finally {
+            file.putUserData(FileEditorProvider.KEY, previousProvider);
+            super.tearDown();
         }
-        files.closeFile(file);
-        super.tearDown();
     }
 
     public void testShowStoppedOpensTheTabAndStartsNothing() {
@@ -98,10 +105,12 @@ public class AgentConsolesStoppedJumpPlatformTest extends BasePlatformTestCase {
         // The test editor manager's isFileOpen only knows text editors (its
         // internal map is populated solely by doOpenTextEditor), so "the file
         // is open" here is the tab the splitter holds: our provider's editor
-        // for this console file.
+        // for the host document.
         FileEditor[] open = FileEditorManager.getInstance(getProject()).getAllEditors(file);
         assertEquals("the stopped session's tab is open in the target window", 1, open.length);
-        assertTrue(open[0] instanceof AgentConsoleEditor);
+        assertTrue(open[0] instanceof SessionHostEditor);
+        assertEquals("the session is shown in the host's primary slot",
+                Optional.of(sessionId), SessionHostController.getInstance(getProject()).layout().primary());
         // show(target, id) is a show, never a start: nothing was launched, so
         // the guard layer's starting flag was never set and stays clear.
         assertTrue(registry.execution(sessionId).isEmpty());
@@ -171,7 +180,7 @@ public class AgentConsolesStoppedJumpPlatformTest extends BasePlatformTestCase {
         assertTrue("no execution was created", registry.execution(sessionId).isEmpty());
         assertFalse(registry.isRunning(sessionId));
         assertFalse("nothing was marked starting", registry.isStarting(sessionId));
-        assertEquals("no console tab was opened for a start",
+        assertEquals("no host tab was opened for a start",
                 0, FileEditorManager.getInstance(getProject()).getAllEditors(file).length);
     }
 

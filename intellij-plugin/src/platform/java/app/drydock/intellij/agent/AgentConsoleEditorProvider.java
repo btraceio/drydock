@@ -9,7 +9,13 @@ import com.intellij.openapi.vfs.VirtualFile;
 import org.jetbrains.annotations.NotNull;
 
 /**
- * Registers the agent console as an editor for {@link AgentConsoleFile}s.
+ * Registers the agent console as an editor for the canonical
+ * {@link SessionHostFile} and for restored {@link AgentConsoleFile}s.
+ *
+ * <p>The canonical file opens the {@link SessionHostEditor} over the project's
+ * {@link SessionHostController}; a legacy {@link AgentConsoleFile} opens the
+ * inert {@link LegacySessionEditor} placeholder, never a live console. Both
+ * share one editor type ID, so persisted tabs keep resolving.</p>
  *
  * <p>{@link DumbAware}, and that is a requirement rather than an
  * optimisation: a new worktree window starts its agent immediately, without
@@ -32,7 +38,7 @@ public final class AgentConsoleEditorProvider implements FileEditorProvider, Dum
 
     @Override
     public boolean accept(@NotNull Project project, @NotNull VirtualFile file) {
-        return file instanceof AgentConsoleFile;
+        return file instanceof AgentConsoleFile || file instanceof SessionHostFile;
     }
 
     @Override
@@ -43,7 +49,10 @@ public final class AgentConsoleEditorProvider implements FileEditorProvider, Dum
 
     @Override
     public @NotNull FileEditor createEditor(@NotNull Project project, @NotNull VirtualFile file) {
-        return new AgentConsoleEditor(project, (AgentConsoleFile) file);
+        if (file instanceof SessionHostFile) {
+            return new SessionHostEditor(project, SessionHostController.getInstance(project));
+        }
+        return new LegacySessionEditor(file);
     }
 
     @Override

@@ -17,8 +17,7 @@ import app.drydock.intellij.projects.RemoteRepositoryDialog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.actions.SessionDialogs;
-import app.drydock.intellij.agent.AgentConsoleFile;
-import app.drydock.intellij.agent.AgentConsoles;
+import app.drydock.intellij.agent.SessionHostListener;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.agent.SessionCommands;
@@ -64,8 +63,6 @@ import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAware;
-import com.intellij.openapi.fileEditor.FileEditorManagerEvent;
-import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -1062,14 +1059,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // guard.
         tree.addTreeExpansionListener(expansions);
 
-        // The agent tab the user selects in the editor area selects its row.
-        project.getMessageBus().connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER,
-                new FileEditorManagerListener() {
+        // The session this window's host shows selects its row.
+        project.getMessageBus().connect(this).subscribe(SessionHostListener.TOPIC,
+                new SessionHostListener() {
                     @Override
-                    public void selectionChanged(@NotNull FileEditorManagerEvent event) {
-                        if (event.getNewFile() instanceof AgentConsoleFile console) {
-                            consoleSelected(console.sessionId());
-                        }
+                    public void sessionSelected(ManagedSessionId sessionId) {
+                        consoleSelected(sessionId);
                     }
                 });
 
@@ -2824,7 +2819,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         requestRebuild(false);
     }
 
-    /** EDT: the agent tab of {@code sessionId} was selected in the editor area; its row is selected. */
+    /** EDT: the host now shows {@code sessionId}; its materialized row, if any, is selected. */
     private void consoleSelected(ManagedSessionId sessionId) {
         selectSessionRow(sessionId);
     }
@@ -2847,10 +2842,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     }
 
     private void activate(TaskRow task) {
-        switch (TaskActions.defaultActivation(task)) {
-            case SWITCH_TO_RUNNING -> TaskNavigator.switchTo(task.session());
-            case RESUME_HERE -> AgentConsoles.resumeOrStart(project, task.session());
-        }
+        SessionActivation.production().activate(project, task.session().id(), task.running()
+                ? SessionActivation.Intent.SHOW : SessionActivation.Intent.START_OR_RESUME);
     }
 
     private void register(AddCurrentProject add) {

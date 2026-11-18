@@ -202,13 +202,25 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
                 frame.dispose();
                 frame = null;
             }
-            fileA.putUserData(HostedTab.KEY, null);
             AgentExecutionRegistry.getInstance().markStarting(sessionA.id(), false);
             AgentExecutionRegistry.getInstance().markStarting(sessionB.id(), false);
             IsolatedCatalog.remove(sessionA.id(), sessionB.id());
         } finally {
             super.tearDown();
         }
+    }
+
+    /**
+     * Seeds the window controller's resolved facts for {@code id}, as the
+     * loader would deliver them: a retained pane, then a KNOWN answer whose
+     * generation outranks any real load racing in.
+     */
+    private void seedFacts(ManagedSessionId id, boolean resumable, Optional<SessionPlace> hostedFrom) {
+        SessionHostController controller = SessionHostController.getInstance(getProject());
+        controller.paneFor(id);
+        controller.apply(new SessionFactsLoader.Result(id, Long.MAX_VALUE / 2,
+                new SessionPaneFacts(SessionPaneFacts.State.KNOWN, "", Optional.empty(), resumable,
+                        hostedFrom, false, false)));
     }
 
     /** A stopped session the way the existing test factories build them, with the given conversation id. */
@@ -336,9 +348,8 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
         // The header carries the session-naming sentence as its text (the SDK
         // button reads its tooltip from the text); the popup keeps the short
         // command label. OwnProject is paintable only with hosted facts (A8).
-        fileA.putUserData(HostedTab.KEY, new HostedTab.Facts(getProject().getLocationHash(),
-                new SessionPlace("hosted-repo", Optional.empty())));
-        try {
+        seedFacts(sessionA.id(), true, Optional.of(new SessionPlace("hosted-repo", Optional.empty())));
+        {
             Presentation ownHeader = new Presentation();
             new AgentTabActions.OwnProject().update(headerEvent(tabA, ownHeader));
             assertTrue(ownHeader.isVisible());
@@ -357,8 +368,6 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
             new AgentTabActions.Done().update(popupEvent(fileA, donePopup));
             assertEquals("Done…", donePopup.getText());
             assertEquals("Done with A…", donePopup.getDescription());
-        } finally {
-            fileA.putUserData(HostedTab.KEY, null);
         }
     }
 
@@ -381,9 +390,8 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
                 buttonFor(tabA, tabs, "Project window"));
         assertNull("OwnProject must be absent on B without hosted facts",
                 buttonFor(tabB, tabs, "Project window"));
-        try {
-            fileA.putUserData(HostedTab.KEY, new HostedTab.Facts(getProject().getLocationHash(),
-                    new SessionPlace("hosted-repo", Optional.empty())));
+        {
+            seedFacts(sessionA.id(), true, Optional.of(new SessionPlace("hosted-repo", Optional.empty())));
             tabs.updateTabActions(true);
             // The header button's tooltip is the session-naming text (A7: the
             // SDK reads it from Presentation.text), not the short label.
@@ -394,8 +402,6 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
                     ownProject.isVisible());
             assertNull("B is still this window's own session, so it keeps no shortcut",
                     buttonFor(tabB, tabs, "Project window"));
-        } finally {
-            fileA.putUserData(HostedTab.KEY, null);
         }
     }
 
@@ -574,6 +580,69 @@ public class AgentTabActionsPlatformTest extends BasePlatformTestCase {
             registry.forget(sessionA.id());
             waitFor(() -> !registry.isRunning(sessionA.id()));
         }
+    }
+
+    public void testAStalePaintRejectsEveryHeaderCommandClickEvenAfterTheSelectionMoves() {
+        // Capture target + selection generation on the painted component:
+        // the lifecycle AND a non-lifecycle command refuse a click whose
+        // paint is older than the host selection or belongs to another
+        // project, and act again once repainted.
+        RecordingLifecycle lifecycleAction = new RecordingLifecycle();
+        Recorder done = new Recorder();
+        DefaultActionGroup group = new DefaultActionGroup(lifecycleAction, new AgentTabActions.Done(done));
+        TabInfo b = tabInfo(fileB, "B", group);
+        JBEditorTabs strip = mountTabs(group, b);
+        InplaceButton start = buttonFor(b, strip, "Start B");
+        InplaceButton doneButton = buttonFor(b, strip, "Done with B");
+        assertNotNull(start);
+        assertNotNull(doneButton);
+
+        doneButton.doClick();
+        start.doClick();
+        assertNotNull("a fresh paint lets Done act", done.target);
+        assertNotNull("a fresh paint lets the lifecycle act", lifecycleAction.target);
+
+        SessionHostController controller = SessionHostController.getInstance(getProject());
+        controller.show(sessionA.id());
+        assertEquals("precondition: the selection moved",
+                Optional.of(sessionA.id()), controller.layout().current());
+        done.target = null;
+        lifecycleAction.target = null;
+        doneButton.doClick();
+        start.doClick();
+        assertNull("a paint from an older selection must not drive Done", done.target);
+        assertNull("a paint from an older selection must not drive the lifecycle", lifecycleAction.target);
+
+        strip.updateTabActions(true);
+        doneButton.doClick();
+        start.doClick();
+        assertNotNull("the repaint of the new generation acts again", done.target);
+        assertNotNull(lifecycleAction.target);
+
+        // A foreign project's paint, on this very button, is not this window's.
+        AgentTabActions.Painted own = (AgentTabActions.Painted)
+                doneButton.getClientProperty(AgentTabActions.PAINTED_INTENT);
+        AgentTabActions.Painted foreign = new AgentTabActions.Painted("foreign-project",
+                own.session(), own.state(), own.selection());
+        done.target = null;
+        doneButton.putClientProperty(AgentTabActions.PAINTED_INTENT, foreign);
+        doneButton.doClick();
+        assertNull("a paint for another project must not drive Done", done.target);
+        doneButton.putClientProperty(AgentTabActions.PAINTED_INTENT, null);
+        doneButton.doClick();
+        assertNull("a header click with no paint at all must do nothing", done.target);
+    }
+
+    public void testAPopupClickWithAnotherTabsPresentationActsOnNothing() {
+        Recorder done = new Recorder();
+        AgentTabActions.Done action = new AgentTabActions.Done(done);
+        Presentation presentation = new Presentation();
+        action.update(popupEvent(fileA, presentation));
+        action.actionPerformed(popupEvent(fileB, presentation));
+        assertNull("the item painted for A must not act on B", done.target);
+        action.actionPerformed(popupEvent(fileA, presentation));
+        assertNotNull(done.target);
+        assertEquals(sessionA.id(), done.target.session().id());
     }
 
     // ---- the guard (its positive run is setUp's; these prove it fails closed) ----

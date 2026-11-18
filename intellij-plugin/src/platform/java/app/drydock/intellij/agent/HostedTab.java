@@ -1,11 +1,13 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.domain.ManagedSessionId;
+
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.util.Key;
 
 import java.nio.file.Path;
-import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * A console tab showing an agent from another project or worktree than its
@@ -16,30 +18,6 @@ import java.util.Optional;
  * line of text and an icon, nothing else.</p>
  */
 public final class HostedTab {
-
-    /**
-     * Set on a console file by the editor showing it, once it has worked out
-     * (off the EDT) that the tab is hosted, so the tab's title and tooltip can
-     * be painted without touching the disk.
-     */
-    static final Key<Facts> KEY = Key.create("drydock.hostedTab");
-
-    /**
-     * That the window with location hash {@code windowHash} shows the agent
-     * hosted, and where the agent is from. The window is named by its hash,
-     * not held: these live on an application-lifetime file, and a Project
-     * reference would keep a closed window alive.
-     */
-    record Facts(String windowHash, SessionPlace place) {
-        Facts {
-            Objects.requireNonNull(windowHash, "windowHash");
-            Objects.requireNonNull(place, "place");
-        }
-
-        boolean isFor(String hash) {
-            return windowHash.equals(hash);
-        }
-    }
 
     private HostedTab() {
     }
@@ -63,10 +41,19 @@ public final class HostedTab {
         return place.label() + " · hosted";
     }
 
-    /** The facts for {@code file} in {@code window}, if that window hosts it. EDT-safe. */
-    static Optional<SessionPlace> placeIn(AgentConsoleFile file, Project window) {
-        return Optional.ofNullable(file.getUserData(KEY))
-                .filter(facts -> facts.isFor(window.getLocationHash()))
-                .map(Facts::place);
+    /**
+     * Where the agent {@code id} is from, if this window shows it hosted: the
+     * window controller's resolved facts decide (a KNOWN answer with no
+     * {@code hostedFrom} means "not hosted"); an unresolved answer yields
+     * the {@code legacy} fallback. EDT-safe, memory-only.
+     */
+    static Optional<SessionPlace> placeIn(Project window, ManagedSessionId id) {
+        return placeIn(AgentTabCommands.controllerFacts(window), id, Optional::empty);
+    }
+
+    static Optional<SessionPlace> placeIn(Function<ManagedSessionId, Optional<SessionPaneFacts>> facts,
+                                          ManagedSessionId id, Supplier<Optional<SessionPlace>> legacy) {
+        Optional<SessionPaneFacts> known = AgentTabCommands.resolvedFacts(facts, id);
+        return known.isPresent() ? known.get().hostedFrom() : legacy.get();
     }
 }

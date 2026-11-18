@@ -74,12 +74,12 @@ public final class AgentTabPopupGroup extends ActionGroup implements DumbAware {
             return AnAction.EMPTY_ARRAY;
         }
         AgentTabCommands.Target tab = target.get();
-        boolean hosted = HostedTab.placeIn(tab.file(), tab.project()).isPresent();
+        boolean hosted = HostedTab.placeIn(tab.project(), tab.sessionId()).isPresent();
         // The same window-scoped state the header's update computes (A6):
         // the right-clicked tab's own window decides shown-here, so a
         // session that runs elsewhere offers Show agent here too — one
         // shared derivation, no second global snapshot.
-        SessionCommands.State state = AgentTabCommands.stateOf(tab);
+        SessionCommands.State state = AgentTabActions.stateOf(tab);
 
         ActionManager actions = ActionManager.getInstance();
         List<AnAction> children = new ArrayList<>();
@@ -127,7 +127,7 @@ public final class AgentTabPopupGroup extends ActionGroup implements DumbAware {
         return switch (id) {
             case OWN_PROJECT -> AgentTabCommands.ownProject(hosted, state, name, true);
             case CHANGES -> AgentTabCommands.changes(
-                    AgentTabCommands.knownCheckoutGone(tab.project(), tab.file()),
+                    AgentTabCommands.knownCheckoutGone(tab.project(), tab.sessionId()),
                     hosted, state, name, true);
             case LIFECYCLE -> AgentTabCommands.lifecycle(state, name, true);
             case TRANSFER -> AgentTabCommands.transfer(transferAvailable(tab), state, name, true);

@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.agent.SessionHostModel.Outcome;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.session.DrydockSessionService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
@@ -15,8 +16,8 @@ import com.intellij.notification.NotificationGroupManager;
 import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
-import com.intellij.openapi.fileEditor.FileEditorManagerKeys;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx;
 import com.intellij.openapi.fileEditor.impl.EditorWindow;
@@ -28,18 +29,15 @@ import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
-import com.intellij.openapi.wm.WindowManager;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
-
-import javax.swing.JFrame;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -75,15 +73,38 @@ public final class AgentConsoles {
     public static void show(Project project, ManagedSessionId sessionId) {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(sessionId, "sessionId");
-        AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-        // A preview tab is replaced by the next file the user clicks; a live
-        // agent must not be evictable that way.
-        file.putUserData(FileEditorManagerKeys.FORBID_PREVIEW_TAB, Boolean.TRUE);
+        if (project.isDisposed()) {
+            return;
+        }
+        // The controller decides whether the request is intentional and
+        // issues the focus permission; a refused one (the session is gone)
+        // opens nothing. Never a launch: this is presentation only.
+        if (SessionHostController.getInstance(project).show(sessionId) == Outcome.UNAVAILABLE) {
+            return;
+        }
+        openHost(project);
+    }
+
+    /**
+     * Opens, or reuses, the window's one canonical "Drydock Sessions"
+     * document, pins it and re-mounts any open host editor from the
+     * controller's layout (a focus change of an already-open host publishes
+     * no selection event). The document is one for every session, so there is
+     * no per-session file to create. EDT only.
+     */
+    private static void openHost(Project project) {
+        SessionHostFile file = AgentConsoleFileSystem.getInstance().sessionHostFile();
         // 2026.3 deprecates every openFile overload this build can compile
         // against in favour of one taking FileEditorOpenOptions, which the
         // 2025.3 target does not have; the explicit focus argument is kept
         // because focusing is the intent, not a side effect.
-        FileEditorManager.getInstance(project).openFile(file, true);
+        FileEditorManager files = FileEditorManager.getInstance(project);
+        files.openFile(file, true);
+        for (FileEditor editor : files.getEditors(file)) {
+            if (editor instanceof SessionHostEditor host) {
+                host.refreshLayout();
+            }
+        }
         pin(project, file);
     }
 
@@ -96,7 +117,7 @@ public final class AgentConsoles {
      * unpinned, because the current window at that moment was not the one
      * the file opened in.</p>
      */
-    private static void pin(Project project, AgentConsoleFile file) {
+    private static void pin(Project project, VirtualFile file) {
         for (EditorWindow window : FileEditorManagerEx.getInstanceEx(project).getWindows()) {
             if (window.isFileOpen(file) && !window.isFilePinned(file)) {
                 window.setFilePinned(file, true);
@@ -124,9 +145,12 @@ public final class AgentConsoles {
         }
         AgentExecutionService.getInstance(project).execution(sessionId).flatMap(AgentExecution::console)
                 .ifPresent(console -> {
-                    AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-                    FileEditorManager.getInstance(project).openFile(file, true);
-                    pin(project, file);
+                    // An intentional focus of a session that is on screen; one
+                    // that is in neither slot is no target.
+                    if (SessionHostController.getInstance(project).focus(sessionId) == Outcome.UNAVAILABLE) {
+                        return;
+                    }
+                    openHost(project);
                     IdeFocusManager.getInstance(project).requestFocus(console.getPreferredFocusableComponent(), true);
                 });
     }
@@ -227,12 +251,16 @@ public final class AgentConsoles {
         registry.markStarting(sessionId, true);
         try {
             showStep.show(project, sessionId);
+            long issued = project.isDisposed() ? -1 : SessionHostController.getInstance(project).epoch();
             ProgressManager.getInstance().run(new Task.Backgroundable(project, progressTitle, true) {
                 @Override
                 public void run(@NotNull ProgressIndicator indicator) {
                     try {
                         launch.apply(DrydockStartupActivity.sessions(project)).join();
-                        focusConsoleLater(project, sessionId);
+                        // The token of the show this launch committed to: a
+                        // hide, departure or newer request since then voids
+                        // it. The progress cleanup below runs regardless.
+                        focusConsoleLater(project, sessionId, issued);
                     } catch (RuntimeException e) {
                         LOG.log(Level.WARNING, () -> "Could not " + verb + " session " + sessionId + ": " + e);
                         ApplicationManager.getApplication().invokeLater(
@@ -386,7 +414,7 @@ public final class AgentConsoles {
         Path directory = execution.map(AgentExecution::workingDirectory)
                 .or(() -> session.map(ManagedAgentSession::workingDirectory)).orElseThrow();
         SessionPlace place = execution.map(AgentExecution::place)
-                .orElseGet(() -> HostedTab.placeIn(AgentConsoleFileSystem.getInstance().fileFor(sessionId), host)
+                .orElseGet(() -> HostedTab.placeIn(host, sessionId)
                         .orElseGet(() -> new SessionPlace(directory.getFileName().toString(), Optional.empty())));
         registry.markMoving(sessionId, true);
         runOrUndo(DrydockPluginService.getInstance().executor(), () -> {
@@ -439,14 +467,18 @@ public final class AgentConsoles {
      * closes the hosting tab. Starts nothing — {@link #show} only — so a
      * stopped agent stays stopped, its transcript dimmed, exactly as a
      * reopened hosted tab. {@code host == target} (one window, or already
-     * there) keeps the tab: there is nowhere to move it from. The window
-     * was already raised by the caller. EDT.
+     * there) keeps the tab: there is nowhere to move it from. The host
+     * window's one document serves many sessions, so it is closed only when
+     * it shows nothing but this session. The window was already raised by the
+     * caller. EDT.
      */
     static void showStopped(Project host, Project target, ManagedSessionId sessionId) {
         show(target, sessionId);
         if (JumpPlan.closesHostTab(host == target) && !host.isDisposed()) {
-            FileEditorManager.getInstance(host)
-                    .closeFile(AgentConsoleFileSystem.getInstance().fileFor(sessionId));
+            SessionHostController.Layout layout = SessionHostController.getInstance(host).layout();
+            if (layout.primary().equals(Optional.of(sessionId)) && layout.held().isEmpty()) {
+                FileEditorManager.getInstance(host).closeFile(AgentConsoleFileSystem.getInstance().sessionHostFile());
+            }
         }
         focusConsole(target, sessionId);
     }
@@ -490,20 +522,12 @@ public final class AgentConsoles {
 
     /**
      * Whether the user is looking at {@code sessionId} right now: its tab is
-     * selected in {@code project}, and {@code project}'s window is the active
-     * window. A tab selected in a window behind another app is not being
-     * looked at. EDT only.
+     * shown in its host's primary or held slot, with its console showing in an
+     * active window — {@link SessionHostVisibility#isViewed}, the one answer.
+     * A tab behind another app is not being looked at. EDT only.
      */
     public static boolean isBeingViewed(Project project, ManagedSessionId sessionId) {
-        if (project.isDisposed()) {
-            return false;
-        }
-        JFrame frame = WindowManager.getInstance().getFrame(project);
-        if (frame == null || !frame.isActive()) {
-            return false;
-        }
-        AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(sessionId);
-        return Arrays.asList(FileEditorManager.getInstance(project).getSelectedFiles()).contains(file);
+        return !project.isDisposed() && SessionHostController.getInstance(project).visibility.isViewed(sessionId);
     }
 
     /** How long after a window opens its README-on-first-open is still expected. */
@@ -542,7 +566,8 @@ public final class AgentConsoles {
                 // Later, not now: the opener selects and focuses the README
                 // after this notification, and would win again.
                 ApplicationManager.getApplication().invokeLater(
-                        () -> focusConsole(project, sessionId), ModalityState.nonModal(), project.getDisposed());
+                        () -> focusIfPermitted(project, sessionId, OptionalLong.empty()),
+                        ModalityState.nonModal(), project.getDisposed());
             }
         });
     }
@@ -553,8 +578,33 @@ public final class AgentConsoles {
      * so the console is already in the tab when focus is asked for it.
      */
     public static void focusConsoleLater(Project project, ManagedSessionId sessionId) {
+        // Read at the call, so a request that is already stale is fenced too.
+        // Fail-closed from a background thread: a stale read can only refuse.
+        long issued = project.isDisposed() ? -1 : SessionHostController.getInstance(project).epoch();
+        focusConsoleLater(project, sessionId, issued);
+    }
+
+    /** As {@link #focusConsoleLater(Project, ManagedSessionId)}, under the epoch the request was issued with. */
+    static void focusConsoleLater(Project project, ManagedSessionId sessionId, long issued) {
         ApplicationManager.getApplication().invokeLater(
-                () -> focusConsole(project, sessionId), ModalityState.nonModal(), project.getDisposed());
+                () -> focusIfPermitted(project, sessionId, OptionalLong.of(issued)),
+                ModalityState.nonModal(), project.getDisposed());
+    }
+
+    /**
+     * The delayed focus step: only while the controller still permits it, so a
+     * stale launch, transfer or review completion neither reopens a hidden
+     * host nor takes focus. Without a token, the permission current now (the
+     * README grace, whose show may follow the listener's registration).
+     */
+    private static void focusIfPermitted(Project project, ManagedSessionId sessionId, OptionalLong issued) {
+        if (project.isDisposed()) {
+            return;
+        }
+        SessionHostController controller = SessionHostController.getInstance(project);
+        if (controller.focusPermitted(issued.orElseGet(controller::epoch))) {
+            focusConsole(project, sessionId);
+        }
     }
 
     private static String rootMessage(Throwable failure) {

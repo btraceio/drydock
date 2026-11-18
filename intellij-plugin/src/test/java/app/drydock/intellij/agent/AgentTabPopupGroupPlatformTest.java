@@ -152,6 +152,20 @@ public class AgentTabPopupGroupPlatformTest extends BasePlatformTestCase {
         }
     }
 
+    public void testControllerHostedFactsOfTheSessionOfferOwnProjectInThePopup() {
+        SessionHostController controller = SessionHostController.getInstance(getProject());
+        controller.paneFor(sessionA.id());
+        controller.apply(new SessionFactsLoader.Result(sessionA.id(), Long.MAX_VALUE / 2,
+                new SessionPaneFacts(SessionPaneFacts.State.KNOWN, "", Optional.empty(), true,
+                        Optional.of(new SessionPlace("hosted-repo", Optional.empty())), false, false)));
+        AnAction[] children = popupGroup().getChildren(popupEvent(fileA, getProject()));
+        assertSame("hosted by the controller's facts, with no file-keyed seeding: OwnProject leads",
+                registered("OwnProject"), children[0]);
+        assertEquals("OwnProject, Lifecycle, Rename and Done, each section separated", 8, children.length);
+        assertEquals("B has no hosted facts, so no OwnProject",
+                6, popupGroup().getChildren(popupEvent(fileB, getProject())).length);
+    }
+
     public void testEachChildsRealUpdateGivesVisiblePopupText() {
         AnActionEvent e = popupEvent(fileA, getProject());
         Map<Class<?>, String> expected = Map.of(

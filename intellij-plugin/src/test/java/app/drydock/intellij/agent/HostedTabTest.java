@@ -1,10 +1,12 @@
 package app.drydock.intellij.agent;
 
-import com.intellij.openapi.project.Project;
+import app.drydock.domain.ManagedSessionId;
+
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,16 +48,37 @@ class HostedTabTest {
         assertEquals("from dd-jmc", new SessionPlace("dd-jmc", Optional.empty()).provenance());
     }
 
-    @Test
-    void factsNameTheirWindowByLocationNotByReference() {
-        // Kept on an application-lifetime file: a Project reference would
-        // keep a closed window alive.
-        HostedTab.Facts facts = new HostedTab.Facts("abc123", DD_JMC);
+    private static final ManagedSessionId ID = ManagedSessionId.newId();
+    private static final SessionPlace LEGACY = new SessionPlace("legacy", Optional.empty());
 
-        assertTrue(facts.isFor("abc123"));
-        assertFalse(facts.isFor("def456"));
-        for (var component : HostedTab.Facts.class.getRecordComponents()) {
-            assertFalse(Project.class.isAssignableFrom(component.getType()), component.getName());
-        }
+    private static Function<ManagedSessionId, Optional<SessionPaneFacts>> answering(
+            SessionPaneFacts.State state, Optional<SessionPlace> hostedFrom) {
+        boolean known = state == SessionPaneFacts.State.KNOWN;
+        return id -> Optional.of(new SessionPaneFacts(state, "", Optional.empty(), false,
+                known ? hostedFrom : Optional.empty(), false, false));
+    }
+
+    @Test
+    void anIdFactPlaceWinsOverTheLegacyFallback() {
+        assertEquals(Optional.of(DD_JMC), HostedTab.placeIn(
+                answering(SessionPaneFacts.State.KNOWN, Optional.of(DD_JMC)), ID, () -> Optional.of(LEGACY)));
+    }
+
+    @Test
+    void aResolvedIdFactThatIsNotHostedIsNotHostedWhateverTheLegacyFactSays() {
+        assertEquals(Optional.empty(), HostedTab.placeIn(
+                answering(SessionPaneFacts.State.KNOWN, Optional.empty()), ID, () -> Optional.of(LEGACY)));
+    }
+
+    @Test
+    void withoutAResolvedIdFactTheLegacyFallbackAppliesWhileItExists() {
+        assertEquals(Optional.of(LEGACY), HostedTab.placeIn(id -> Optional.empty(), ID, () -> Optional.of(LEGACY)));
+        assertEquals(Optional.of(LEGACY), HostedTab.placeIn(
+                answering(SessionPaneFacts.State.LOADING, Optional.empty()), ID, () -> Optional.of(LEGACY)));
+    }
+
+    @Test
+    void withNeitherSourceThereIsNoPlace() {
+        assertEquals(Optional.empty(), HostedTab.placeIn(id -> Optional.empty(), ID, Optional::empty));
     }
 }
