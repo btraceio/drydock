@@ -7,6 +7,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -140,6 +141,29 @@ public final class ApplicationStateStore {
             repository.save(toSave);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Failed to persist application state", e);
+        }
+    }
+
+    /**
+     * Blocks until every queued save of every live store is written. For
+     * tests: a test that ends without {@link #flush} leaves the daemon
+     * writer free to write into its temp directory after the test returns,
+     * racing JUnit's cleanup ("Failed to close extension context", a temp
+     * directory that no longer deletes). Called after each test by the
+     * {@code app.drydock.testing} extension; never on the FX thread.
+     */
+    public static void flushAll() {
+        List<ApplicationStateStore> live;
+        synchronized (STORES) {
+            live = List.copyOf(STORES.values());
+        }
+        for (ApplicationStateStore store : live) {
+            // Nothing queued and nothing running: flushing would only wake
+            // the idle-timed-out writer thread to do nothing.
+            if (store.saveQueued.get() || store.writer.getActiveCount() > 0
+                    || !store.writer.getQueue().isEmpty()) {
+                store.flush();
+            }
         }
     }
 
