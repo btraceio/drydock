@@ -386,12 +386,15 @@ public final class McpToolRouter {
                         "worktree_path"),
                 descriptor("session_rename",
                         "Renames this session's own tab, which the human is watching. Call it as soon as "
-                                + "you know what the work actually is -- a short title naming the work, not "
-                                + "the branch -- and again if the work turns out to be something else. "
+                                + "you know what the work actually is -- a short title naming the session's MAIN "
+                                + "work, not the branch and not a generic label or a sub-task's title; make it "
+                                + "specific enough to tell this session apart from every other one here. Re-title "
+                                + "only if the main work itself changes, never to track the current sub-task. "
                                 + "Refused if the human named this session, or if another session in this "
                                 + "repository already has that title.",
                         JsonObject.empty()
-                                .put("title", schemaString("Short title naming the work; at most 60 "
+                                .put("title", schemaString("Short title naming the session's main work, "
+                                        + "specific enough to tell sessions apart; at most 60 "
                                         + "characters, one line.")),
                         "title"),
                 descriptor("session_handoff",
