@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.delayedtasks.TaskWorktreeUse;
+import app.drydock.domain.SshRemote;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -440,7 +441,8 @@ final class TaskActions {
                 Project project = e.getProject();
                 int running = row.running();
                 if (running > 0 && Messages.showOkCancelDialog(project,
-                        removeQuestion(row.project().displayName(), running), "Drydock", "Remove", "Cancel",
+                        removeQuestion(row.project().displayName(), running, row.project().remote()),
+                        "Drydock", "Remove", "Cancel",
                         null) != Messages.OK) {
                     return;
                 }
@@ -457,10 +459,18 @@ final class TaskActions {
         };
     }
 
-    /** {@code Remove <repo> from Drydock? <n> agents keep running.} */
-    static String removeQuestion(String repo, int running) {
-        return "Remove " + repo + " from Drydock? " + running + (running == 1 ? " agent keeps" : " agents keep")
-                + " running.";
+    /**
+     * {@code Remove <repo> from Drydock? <n> agents keep running.} A remote
+     * (SSH) repository appends the {@code host:path} the files actually live
+     * at — never the placeholder root, which names nothing on any machine —
+     * the app's remove-confirm wording (spec: SSH remote repositories).
+     */
+    static String removeQuestion(String repo, int running, Optional<SshRemote> remote) {
+        String question = "Remove " + repo + " from Drydock? "
+                + running + (running == 1 ? " agent keeps" : " agents keep") + " running.";
+        return remote.map(r -> question + " The repository lives at " + r.host() + ":" + r.remotePath()
+                        + " and is not touched.")
+                .orElse(question);
     }
 
     /** Removes one idle row, a stale group, or every inactive worktree under a project. */
