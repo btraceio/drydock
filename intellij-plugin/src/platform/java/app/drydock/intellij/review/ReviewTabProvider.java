@@ -89,6 +89,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -236,6 +237,8 @@ final class ReviewTabProvider {
     private final MismatchMemo mismatchMemo = new MismatchMemo();
     /** The last refresh state rendered (EDT only): a catalog change re-runs a load stranded in NO_SESSION. */
     private ReviewTabStatus lastState = ReviewTabStatus.LOADING;
+    /** The workbench Refreshes waiting for the load's terminal state ({@link #refresh}); EDT only. */
+    private final List<Runnable> refreshesDone = new ArrayList<>();
 
     private final AtomicBoolean disposed = new AtomicBoolean();
 
@@ -408,6 +411,7 @@ final class ReviewTabProvider {
         workbenchState = null;
         mismatchMemo.reset();
         wired.set(false);
+        onEdt(this::finishRefreshes); // no load is left to end them
     }
 
     // ---- the load path ------------------------------------------------------
@@ -690,10 +694,26 @@ final class ReviewTabProvider {
         renderStatus(state, ReviewTabStatus.placeholderText(state, text, changedSince));
     }
 
-    /** Renders a state's text; READY clears the placeholder outright (AC22). EDT only. */
+    /**
+     * Renders a state's text; READY clears the placeholder outright (AC22).
+     * Any state but LOADING ends the load, so it also ends the workbench
+     * Refreshes waiting for it. EDT only.
+     */
     private void renderStatus(ReviewTabStatus state, String text) {
         lastState = state;
         renderStatusText(state == ReviewTabStatus.READY ? null : text);
+        if (state != ReviewTabStatus.LOADING) {
+            finishRefreshes();
+        }
+    }
+
+    /** Runs and forgets every waiting workbench Refresh's {@code done}. EDT only. */
+    private void finishRefreshes() {
+        List<Runnable> done = List.copyOf(refreshesDone);
+        refreshesDone.clear();
+        for (Runnable run : done) {
+            run.run();
+        }
     }
 
     /** Renders placeholder text; {@code null} hides it (READY, or no message to show). EDT only. */
@@ -1566,9 +1586,9 @@ final class ReviewTabProvider {
 
     /**
      * Rebuilds the workbench state from the latest snapshot and the
-     * workbench's own choices, then pushes it to the attached views on the
-     * EDT. Off the EDT: it runs on the snapshot's thread or the plugin's
-     * executor, never on the EDT itself.
+     * workbench's own choices, the flow's queue included, then pushes it to
+     * the attached views on the EDT. Off the EDT: it runs on the snapshot's
+     * thread or the plugin's executor, never on the EDT itself.
      */
     private void rebuildWorkbenchState() {
         ReviewTabModel.Snapshot current = this.snapshot;
@@ -1579,10 +1599,12 @@ final class ReviewTabProvider {
         AnnotationStore annotations = this.store;
         List<ReviewAnnotation> findings = annotations == null ? List.of() : annotations.forScope(scope.id());
         List<ReviewVerdict> verdicts = annotations == null ? List.of() : annotations.verdictsFor(scope.id());
+        Optional<String> base = this.reviewBase;
         WorkbenchState state = WorkbenchState.of(subjectOf(scope), modeOf(scope), current,
                 WorkbenchState.Filter.ALL, Optional.ofNullable(shownFile), WorkbenchState.View.CHANGES_ONLY,
                 findings, inboxChoice,
-                sectionsOf(scope, current, verdicts, findings), sectionsChoice)
+                sectionsOf(scope, current, verdicts, findings), sectionsChoice,
+                SectionsModel.approvedDigests(verdicts, base == null ? Optional.empty() : base))
                 .withOutbox(OutboxModel.snapshot(findings, scope.sessionId().isPresent(), scope.pr().isPresent())
                         .withStackedSubPr(stackedSubPr(scope)))
                 .withPrDescription(prDescriptionOf(scope));
@@ -1825,11 +1847,15 @@ final class ReviewTabProvider {
      * follows the hunk shown. The finish screen keeps the last file.
      */
     private void flowMoved(ReviewWorkbenchFlow flow) {
-        String file = flow.current().map(FlowModel.Hunk::file).orElse(null);
-        if (file != null && !file.equals(shownFile)) {
+        followedFile(flow.current(), shownFile).ifPresent(file -> {
             shownFile = file;
             submitWorkbenchState();
-        }
+        });
+    }
+
+    /** The file the inbox's This File scope moves to (pure): {@code current}'s, when it is not {@code shown}. */
+    static Optional<String> followedFile(Optional<FlowModel.Hunk> current, String shown) {
+        return current.map(FlowModel.Hunk::file).filter(file -> !file.equals(shown));
     }
 
     /**
@@ -1844,12 +1870,24 @@ final class ReviewTabProvider {
         if (reloads == null) {
             return;
         }
-        // The flag before the reload: the reload's synchronous LOADING report
-        // must not erase the notice; only the fresh result's terminal state does.
-        changedSincePending = true;
-        onEdt(() -> renderStatus(ReviewTabStatus.LOADING, ReviewTabStatus.CHANGED_SINCE_MESSAGE));
-        if (mismatchMemo.schedulesReload(path, left, right)) {
-            reloads.reload(current);
+        changedSince(mismatchMemo, path, left, right, () -> {
+            // The flag before the reload: the reload's synchronous LOADING report
+            // must not erase the notice; only the fresh result's terminal state does.
+            changedSincePending = true;
+            onEdt(() -> renderStatus(ReviewTabStatus.LOADING, ReviewTabStatus.CHANGED_SINCE_MESSAGE));
+        }, () -> reloads.reload(current));
+    }
+
+    /**
+     * {@link #hunkChangedSince}'s order (pure over its arguments): the
+     * notice first, then {@code reload} only when {@code memo} schedules one
+     * for this mismatch.
+     */
+    static void changedSince(MismatchMemo memo, String path, String left, String right, Runnable notice,
+                             Runnable reload) {
+        notice.run();
+        if (memo.schedulesReload(path, left, right)) {
+            reload.run();
         }
     }
 
@@ -1950,7 +1988,8 @@ final class ReviewTabProvider {
         /**
          * A hunk's own decoration layer and gutter "+", as the file view's:
          * the file's finding cards, gutter marks and ranges, read off the EDT
-         * now and on every store change, until {@code lifetime} ends.
+         * now and on every store change, until {@code lifetime} ends. Of
+         * reads that overlap, only the one started last is applied.
          */
         @Override
         public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
@@ -1961,11 +2000,14 @@ final class ReviewTabProvider {
                     target -> resolve(target).isPresent(),
                     target -> compose(project, Optional.of(target), ReviewWorkbenchInbox.Composer.Mode.COMMENT));
             AtomicBoolean ended = new AtomicBoolean();
+            // Refreshes can finish out of order on the executor: only the latest one started applies.
+            AtomicLong latest = new AtomicLong();
             Disposer.register(lifetime, () -> {
                 ended.set(true);
                 layer.dispose();
             });
             Runnable refresh = () -> {
+                long generation = latest.incrementAndGet();
                 try {
                     plugin.executor().execute(() -> {
                         ReviewScope current = scope;
@@ -1978,7 +2020,7 @@ final class ReviewTabProvider {
                             ReviewDiffInlays.Decorations decorations = hunkDecorations(row, hunkIndex,
                                     annotations.forScope(current.id()));
                             onEdt(() -> {
-                                if (!ended.get()) {
+                                if (!ended.get() && latest.get() == generation) {
                                     layer.setDecorations(decorations);
                                 }
                             });
@@ -2063,9 +2105,8 @@ final class ReviewTabProvider {
     }
 
     /**
-     * Stores the reviewer's comment as a human finding at the range: confirmed
-     * and, in a local review, not posted to a PR — it is an instruction for
-     * the session. Off the EDT, on the plugin's executor.
+     * Stores the reviewer's comment as a human finding at the range
+     * ({@link #humanComment}). Off the EDT, on the plugin's executor.
      */
     private CompletableFuture<Optional<String>> addComment(DiffSelection.Range range, String text, Severity severity) {
         AnnotationStore annotations = store;
@@ -2074,10 +2115,21 @@ final class ReviewTabProvider {
             return CompletableFuture.completedFuture(Optional.of(STILL_LOADING));
         }
         return CompletableFuture.supplyAsync(() -> {
-            annotations.upsert(ReviewAnnotation.human(current.id(), range.file(), range.startKey(), range.endKey(),
-                    new ReviewAnnotation.Message("You", Instant.now(), text), severity).withPostToPr(false));
+            annotations.upsert(humanComment(current, range, text, severity, Instant.now()));
             return Optional.of(COMMENT_ADDED);
         }, plugin.executor());
+    }
+
+    /**
+     * The reviewer's comment at {@code range} as a human finding (pure):
+     * confirmed, and posted to the PR exactly in a pull request review, so
+     * it waits in the outbox's PR lane there; in a local review it is an
+     * instruction for the session.
+     */
+    static ReviewAnnotation humanComment(ReviewScope scope, DiffSelection.Range range, String text,
+                                         Severity severity, Instant at) {
+        return ReviewAnnotation.human(scope.id(), range.file(), range.startKey(), range.endKey(),
+                new ReviewAnnotation.Message("You", at, text), severity).withPostToPr(scope.pr().isPresent());
     }
 
     /** What the inbox says once a comment is stored. */
@@ -2262,13 +2314,16 @@ final class ReviewTabProvider {
      * are saved first (Q9). Before a scope is resolved (still loading, or
      * the first load never completed) the whole load path re-runs, showing
      * its own placeholder and terminal state; nothing happens without a live
-     * Review content.
+     * Review content. {@code done} runs on the EDT once the load reaches a
+     * state other than LOADING, or at once when no load runs.
      */
-    static void refresh(Project project) {
+    static void refresh(Project project, Runnable done) {
         ReviewTabProvider provider = project.getUserData(LIVE_PROVIDER);
         if (provider == null || provider.disposed.get()) {
+            done.run();
             return;
         }
+        provider.refreshesDone.add(done);
         if (provider.scope == null || provider.refresher == null) {
             ReviewDocumentSaves.saveOpenDocuments();
             provider.renderStatus(ReviewTabStatus.LOADING, ReviewTabStatus.LOADING.message());
@@ -2281,12 +2336,14 @@ final class ReviewTabProvider {
     /** A user-triggered re-run (workbench Refresh, Changes link): save first (Q9, EDT), then reload. */
     private void userReload() {
         if (disposed.get()) {
+            finishRefreshes();
             return;
         }
         ReviewDocumentSaves.saveOpenDocuments();
         ReviewScope scope = this.scope;
         ReviewTabRefresher refresher = this.refresher;
         if (scope == null || refresher == null) {
+            finishRefreshes();
             return;
         }
         mismatchMemo.reset(); // manual Refresh always reloads, and a mismatch after it may again mean a change

@@ -25,8 +25,8 @@ import java.util.stream.Collectors;
  * groups by file in path order.
  *
  * <p>The seen and flagged hunks are the caller's sets of digests. A hunk
- * whose digest has an approved, current verdict ({@link SectionsModel.Hunk#reviewed})
- * also counts as seen.</p>
+ * whose digest has an approved, current verdict
+ * ({@link SectionsModel#approvedDigests}) also counts as seen.</p>
  */
 public final class FlowModel {
 
@@ -260,17 +260,14 @@ public final class FlowModel {
 
     /**
      * The queue of {@code state}: grouped by section when the navigator
-     * shows Sections and there are sections, else by file.
+     * shows Sections and there are sections, else by file. A hunk is
+     * {@link Hunk#reviewed} when {@code approved}, a set of digests
+     * ({@link SectionsModel#approvedDigests}), has its digest.
      */
-    public static Queue of(WorkbenchState state) {
+    public static Queue of(WorkbenchState state, Set<String> approved) {
         Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(approved, "approved");
         List<ReviewTabModel.FileRow> files = state.review().files();
-        Map<String, Boolean> reviewed = new HashMap<>();
-        for (SectionsModel.Section section : state.sections().sections()) {
-            for (SectionsModel.Hunk hunk : section.hunks()) {
-                reviewed.merge(hunk.hunkId(), hunk.reviewed(), Boolean::logicalOr);
-            }
-        }
         Map<String, List<String>> findingKeys = new HashMap<>();
         for (ReviewTabModel.FileRow row : files) {
             findingKeys.put(row.path(), row.findings().stream().map(ReviewTabModel.FindingRow::startKey).toList());
@@ -282,7 +279,7 @@ public final class FlowModel {
                     .count();
             hunks.put(source.hunkId(), new Hunk(source.hunkId(), source.file(), source.index(), source.digest(),
                     source.lines(), source.scrollKey(), source.removed(), source.added(), source.rowKeys(), open,
-                    reviewed.getOrDefault(source.hunkId(), false)));
+                    approved.contains(source.digest())));
         }
         int fileCount = (int) hunks.values().stream().map(Hunk::file).distinct().count();
         boolean bySection = state.navigator() == WorkbenchState.Navigator.SECTIONS
@@ -295,8 +292,8 @@ public final class FlowModel {
 
     /**
      * Every hunk of {@code files} in file and hunk order. The digests are
-     * the rows' own, so a state built on the EDT hashes nothing; a row whose
-     * digest list does not match its hunks hashes them instead.
+     * the rows' own, so the queue hashes nothing; a row whose digest list
+     * does not match its hunks hashes them instead.
      */
     private static List<SectionsModel.HunkSource> sources(List<ReviewTabModel.FileRow> files) {
         List<SectionsModel.HunkSource> sources = new ArrayList<>();

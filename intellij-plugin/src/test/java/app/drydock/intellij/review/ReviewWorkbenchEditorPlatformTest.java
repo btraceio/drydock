@@ -152,8 +152,9 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
         }
     }
 
-    public void testTheHeadersRefreshAsksTheHostToRerunTheDiff() {
+    public void testTheHeadersRefreshAsksTheHostToRerunTheDiffAndShowsItUntilTheReloadEnds() {
         List<Project> refreshed = new ArrayList<>();
+        List<Runnable> done = new ArrayList<>();
         ReviewWorkbenchEditor.Host host = new ReviewWorkbenchEditor.Host() {
             @Override
             public Optional<ReviewWorkbenchEditor.HostedFlow> hostFlow(Project project, Disposable parent) {
@@ -161,16 +162,30 @@ public class ReviewWorkbenchEditorPlatformTest extends BasePlatformTestCase {
             }
 
             @Override
-            public void refresh(Project project) {
+            public void refresh(Project project, Runnable ended) {
                 refreshed.add(project);
+                done.add(ended);
             }
         };
         ReviewWorkbenchEditor editor = new ReviewWorkbenchEditor(getProject(), ReviewWorkbenchFile.of(getProject()),
                 host);
         try {
             assertEquals(ReviewWorkbenchEditor.REFRESH, editor.refreshAction.getTemplatePresentation().getText());
+            assertFalse(editor.refreshing.isVisible());
             editor.refreshAction.actionPerformed(TestActionEvent.createTestEvent(editor.refreshAction));
             assertEquals(List.of(getProject()), refreshed);
+            assertTrue("the click shows the refresh at once", editor.refreshing.isVisible());
+            AnActionEvent running = TestActionEvent.createTestEvent(editor.refreshAction);
+            editor.refreshAction.update(running);
+            assertFalse("Refresh is off while one runs", running.getPresentation().isEnabled());
+            editor.refreshAction.actionPerformed(TestActionEvent.createTestEvent(editor.refreshAction));
+            assertEquals("a second click while one runs asks nothing", 1, refreshed.size());
+
+            done.getFirst().run();
+            assertFalse(editor.refreshing.isVisible());
+            AnActionEvent ended = TestActionEvent.createTestEvent(editor.refreshAction);
+            editor.refreshAction.update(ended);
+            assertTrue(ended.getPresentation().isEnabled());
         } finally {
             Disposer.dispose(editor);
         }

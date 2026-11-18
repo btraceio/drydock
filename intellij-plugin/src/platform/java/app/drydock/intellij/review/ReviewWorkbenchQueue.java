@@ -38,7 +38,6 @@ import java.awt.EventQueue;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -77,6 +76,8 @@ final class ReviewWorkbenchQueue extends JPanel {
     private final JTextArea prText;
     private final JTextArea note;
     private final DefaultListModel<FlowModel.Row> model = new DefaultListModel<>();
+    /** The rows {@link #model} holds, as last rendered. */
+    private List<FlowModel.Row> shownRows = List.of();
     final JBList<FlowModel.Row> list = new JBList<>(model);
     /** True while the list is filled or its selection follows the flow, so the selection is not a pick. */
     private boolean syncing;
@@ -185,9 +186,10 @@ final class ReviewWorkbenchQueue extends JPanel {
         intentBox.setVisible(queue.sections() && (queue.intent().isPresent() || description.isPresent() || computed));
         syncing = true;
         try {
-            if (!rows.equals(Collections.list(model.elements()))) {
+            if (!rows.equals(shownRows)) {
                 model.clear();
                 model.addAll(rows);
+                shownRows = rows;
             }
             int selected = -1;
             for (int i = 0; i < rows.size(); i++) {

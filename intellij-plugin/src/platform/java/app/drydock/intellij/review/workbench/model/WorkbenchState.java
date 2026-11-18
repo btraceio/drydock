@@ -6,6 +6,7 @@ import app.drydock.review.ReviewAnnotation;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * What the review workbench shows (spec §3): one immutable snapshot the
@@ -26,12 +27,14 @@ import java.util.Optional;
  * @param section  the selected section's key, when it is one of {@code sections}
  * @param outbox   the outbox's session lane
  * @param prDescription the pull request's description, in a pull request review that has one
+ * @param flow     the flow review's queue over {@code review}, {@code navigator} and {@code sections},
+ *                 built with the state
  */
 public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot review,
                              ReviewTabModel.Snapshot files, Filter filter, Optional<String> selected,
                              View view, InboxModel.Snapshot inbox, Navigator navigator,
                              SectionsModel.Snapshot sections, Optional<String> section,
-                             OutboxModel.Snapshot outbox, Optional<String> prDescription) {
+                             OutboxModel.Snapshot outbox, Optional<String> prDescription, FlowModel.Queue flow) {
 
     /** What is being reviewed: a scope that carries a pull request is reviewed as the pull request. */
     public enum Mode {
@@ -72,18 +75,24 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Objects.requireNonNull(section, "section");
         Objects.requireNonNull(outbox, "outbox");
         Objects.requireNonNull(prDescription, "prDescription");
+        Objects.requireNonNull(flow, "flow");
     }
 
     /** This state with the pull request's description. */
     public WorkbenchState withPrDescription(Optional<String> description) {
         return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
-                section, outbox, description);
+                section, outbox, description, flow);
     }
 
     /** This state with {@code next} as the outbox's session lane. */
     public WorkbenchState withOutbox(OutboxModel.Snapshot next) {
         return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
-                section, next, prDescription);
+                section, next, prDescription, flow);
+    }
+
+    private WorkbenchState withFlow(FlowModel.Queue queue) {
+        return new WorkbenchState(subject, mode, review, files, filter, selected, view, inbox, navigator, sections,
+                section, outbox, prDescription, queue);
     }
 
     /** The inbox choices a state is built with: which tab, under which scope. */
@@ -117,18 +126,28 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
                 SectionsChoice.DEFAULT);
     }
 
+    /** As the full {@link #of}, with no approved digests. */
+    public static WorkbenchState of(String subject, Mode mode, ReviewTabModel.Snapshot review, Filter filter,
+                                    Optional<String> selected, View view, List<ReviewAnnotation> findings,
+                                    InboxChoice inbox, SectionsModel.Snapshot sections, SectionsChoice choice) {
+        return of(subject, mode, review, filter, selected, view, findings, inbox, sections, choice, Set.of());
+    }
+
     /**
      * Builds the state: the navigator's files are the review's under
      * {@code filter}, keeping the selected file; the inbox lists
      * {@code findings} under {@code inbox}'s tab and scope, the file scope
      * following the selected file. The navigator shows the user's tab, else
      * Sections when the agent's tour gives them, else Files; a selected
-     * section that {@code sections} no longer has is dropped. The outbox
-     * starts empty; {@link #withOutbox} sets it.
+     * section that {@code sections} no longer has is dropped. The flow's
+     * queue is built here ({@link FlowModel#of}), {@code approved} being the
+     * digests an approved, current verdict covers. The outbox starts empty;
+     * {@link #withOutbox} sets it.
      */
     public static WorkbenchState of(String subject, Mode mode, ReviewTabModel.Snapshot review, Filter filter,
                                     Optional<String> selected, View view, List<ReviewAnnotation> findings,
-                                    InboxChoice inbox, SectionsModel.Snapshot sections, SectionsChoice choice) {
+                                    InboxChoice inbox, SectionsModel.Snapshot sections, SectionsChoice choice,
+                                    Set<String> approved) {
         Objects.requireNonNull(review, "review");
         Objects.requireNonNull(filter, "filter");
         Objects.requireNonNull(inbox, "inbox");
@@ -138,9 +157,10 @@ public record WorkbenchState(String subject, Mode mode, ReviewTabModel.Snapshot 
         Navigator navigator = choice.navigator().orElse(
                 sections.source() == SectionsModel.Source.TOUR ? Navigator.SECTIONS : Navigator.FILES);
         Optional<String> section = choice.section().filter(key -> sections.section(key).isPresent());
-        return new WorkbenchState(subject, mode, review, files, filter, selected, view,
+        WorkbenchState state = new WorkbenchState(subject, mode, review, files, filter, selected, view,
                 InboxModel.snapshot(findings, inbox.tab(), inbox.scope(), selected), navigator, sections, section,
-                OutboxModel.Snapshot.EMPTY, Optional.empty());
+                OutboxModel.Snapshot.EMPTY, Optional.empty(), FlowModel.Queue.EMPTY);
+        return state.withFlow(FlowModel.of(state, approved));
     }
 
     /** The selected section, when the Sections tab shows and one is selected. */

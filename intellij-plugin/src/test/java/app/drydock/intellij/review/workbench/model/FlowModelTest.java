@@ -105,7 +105,7 @@ class FlowModelTest {
 
     @Test
     void theFilesTabWalksEveryHunkInPathAndHunkOrder() {
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY), Set.of());
 
         assertFalse(queue.sections());
         assertEquals(List.of(A_0, A_1, B_0), queue.order().stream().map(FlowModel.Hunk::key).toList());
@@ -123,7 +123,7 @@ class FlowModelTest {
 
     @Test
     void theSectionsTabWalksSectionOrderAndListsAHunkUnderItsFirstSectionOnly() {
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of())));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of())), Set.of());
 
         assertTrue(queue.sections());
         assertEquals(Optional.of("Make widgets."), queue.intent());
@@ -142,7 +142,8 @@ class FlowModelTest {
         String bDigest = HunkDigest.of("src/B.java", B0);
         ReviewVerdict approved = new ReviewVerdict(SCOPE, bDigest, ReviewVerdict.Decision.APPROVED, Optional.empty(),
                 Instant.parse("2026-11-04T00:00:00Z"), BASE, "head", Optional.empty());
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of(approved))));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of(approved))),
+                approved(approved));
 
         assertEquals(1, queue.seenCount(Set.of()));
         assertEquals(Optional.of(A_1), queue.firstUnseen(Set.of()).map(FlowModel.Hunk::key));
@@ -161,7 +162,8 @@ class FlowModelTest {
         String bDigest = HunkDigest.of("src/B.java", B0);
         ReviewVerdict approved = new ReviewVerdict(SCOPE, bDigest, ReviewVerdict.Decision.APPROVED, Optional.empty(),
                 Instant.parse("2026-11-04T00:00:00Z"), BASE, "head", Optional.empty());
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of(approved))));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.SECTIONS, tour(List.of(approved))),
+                approved(approved));
 
         assertEquals(List.of(aDigest), queue.toApprove(Set.of(aDigest, bDigest)),
                 "B is approved already; A's removal is not seen");
@@ -169,8 +171,46 @@ class FlowModelTest {
     }
 
     @Test
+    void anApprovedVerdictCountsWithoutSectionsAndOnlyWhileCurrent() {
+        String bDigest = HunkDigest.of("src/B.java", B0);
+        ReviewVerdict approved = new ReviewVerdict(SCOPE, bDigest, ReviewVerdict.Decision.APPROVED, Optional.empty(),
+                Instant.parse("2026-11-04T00:00:00Z"), BASE, "head", Optional.empty());
+        WorkbenchState files = state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY);
+
+        FlowModel.Queue queue = FlowModel.of(files, approved(approved));
+        assertTrue(queue.hunk(B_0).orElseThrow().reviewed(), "no section lists B, its verdict still counts");
+        assertEquals(List.of(), queue.toApprove(Set.of(bDigest)), "Approve does not offer B again");
+
+        assertEquals(Set.of(), SectionsModel.approvedDigests(List.of(approved), Optional.of("base-2")),
+                "a verdict stale against the current base vouches for nothing");
+        assertEquals(Set.of(), SectionsModel.approvedDigests(List.of(approved), Optional.empty()),
+                "a missing base vouches for none");
+        ReviewVerdict rejected = new ReviewVerdict(SCOPE, bDigest, ReviewVerdict.Decision.CHANGES,
+                Optional.empty(), Instant.parse("2026-11-05T00:00:00Z"), BASE, "head", Optional.empty());
+        assertEquals(Set.of(), SectionsModel.approvedDigests(List.of(rejected, approved), Optional.of(BASE)),
+                "the digest's first verdict is the one it is judged by");
+    }
+
+    @Test
+    void theStateCarriesTheQueueBuiltWithIt() {
+        String bDigest = HunkDigest.of("src/B.java", B0);
+        WorkbenchState state = WorkbenchState.of("drydock", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(ROWS, 2, 0), WorkbenchState.Filter.ALL, Optional.empty(),
+                WorkbenchState.View.CHANGES_ONLY, List.of(), WorkbenchState.InboxChoice.DEFAULT,
+                SectionsModel.Snapshot.EMPTY, WorkbenchState.SectionsChoice.DEFAULT, Set.of(bDigest));
+
+        assertEquals(FlowModel.of(state, Set.of(bDigest)), state.flow());
+        assertEquals(state.flow(), state.withOutbox(OutboxModel.Snapshot.EMPTY).withPrDescription(Optional.of("d"))
+                .flow());
+    }
+
+    private static Set<String> approved(ReviewVerdict... verdicts) {
+        return SectionsModel.approvedDigests(List.of(verdicts), Optional.of(BASE));
+    }
+
+    @Test
     void hideSeenLeavesOutSeenHunksButTheCurrentOneAndEmptyHeaders() {
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY), Set.of());
         Set<String> seen = Set.of(HunkDigest.of("src/A.java", A0), HunkDigest.of("src/A.java", A1),
                 HunkDigest.of("src/B.java", B0));
 
@@ -184,7 +224,7 @@ class FlowModelTest {
 
     @Test
     void stepsFindsAndLooksUpHunks() {
-        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY));
+        FlowModel.Queue queue = FlowModel.of(state(WorkbenchState.Navigator.FILES, SectionsModel.Snapshot.EMPTY), Set.of());
 
         assertEquals(Optional.of(A_1), queue.after(A_0).map(FlowModel.Hunk::key));
         assertEquals(Optional.empty(), queue.after(B_0), "nothing after the last hunk");

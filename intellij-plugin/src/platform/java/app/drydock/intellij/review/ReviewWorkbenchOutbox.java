@@ -129,6 +129,9 @@ final class ReviewWorkbenchOutbox extends JPanel {
     private final ActionToolbar tabs;
     private boolean checking;
     private OutboxModel.Snapshot shown = OutboxModel.Snapshot.EMPTY;
+    /** The lane and tab the item rows were last built for; null before the first build. */
+    private OutboxModel.Snapshot rowsLane;
+    private boolean rowsPrTab;
     private boolean sending;
     /** Whether the Pull request tab shows; only in a pull request review. EDT. */
     private boolean prTab;
@@ -261,7 +264,13 @@ final class ReviewWorkbenchOutbox extends JPanel {
         tabs.updateActionsAsync();
     }
 
+    /** Rebuilds the item rows, unless they already show {@link #shown}'s lane on the current tab. */
     private void renderRows() {
+        if (shown.equals(rowsLane) && prTab == rowsPrTab) {
+            return;
+        }
+        rowsLane = shown;
+        rowsPrTab = prTab;
         rows.removeAll();
         List<OutboxModel.Item> items = prTab ? shown.forPr() : shown.toFix();
         if (items.isEmpty()) {

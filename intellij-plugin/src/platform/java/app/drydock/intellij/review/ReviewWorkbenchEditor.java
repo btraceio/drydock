@@ -49,7 +49,8 @@ import java.util.function.Supplier;
  * The review workbench (design A, "Flow"): a file editor tab with a header
  * over the queue | one hunk | findings panes, and the outbox dock under
  * them. The header names the review, its size and how many hunks are seen,
- * and offers Refresh, the agent reviews and Finish Review. The queue and the
+ * and offers Refresh (off, with "Refreshing…" beside it, until the reload
+ * ends), the agent reviews and Finish Review. The queue and the
  * findings pane collapse to strips; the two splitters keep their
  * proportions per user under {@link #NAV_KEY} and {@link #INBOX_KEY} (the
  * platform splitter stores a moved divider at once and loads the stored
@@ -68,6 +69,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     static final String FINISH_REVIEW = "Finish Review";
     static final String REFRESH = "Refresh";
     static final String REFRESH_DESCRIPTION = "Save open documents and re-run the review diff";
+    static final String REFRESHING = "Refreshing…";
     static final String REVIEW_MENU = "Agent Review";
     static final String SECTION_REVIEW = "Section Review…";
     static final String EDUCATIONAL_TOUR = "Educational Tour…";
@@ -126,8 +128,12 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         default void startReview(Project project, ReviewTabOpener.ReviewStart start) {
         }
 
-        /** Saves the open documents and re-runs the review's diff. EDT. */
-        default void refresh(Project project) {
+        /**
+         * Saves the open documents and re-runs the review's diff; runs
+         * {@code done} on the EDT once the reload ends, whatever its outcome. EDT.
+         */
+        default void refresh(Project project, Runnable done) {
+            done.run();
         }
     }
 
@@ -144,6 +150,10 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
     final DefaultActionGroup reviewActions;
     /** The header's Refresh: saves the open documents and re-runs the review's diff. */
     final AnAction refreshAction;
+    /** Shown while a Refresh runs; Refresh is off meanwhile. */
+    final JBLabel refreshing = new JBLabel(REFRESHING);
+    private boolean refreshRunning;
+    private final ActionToolbar headerToolbar;
     /** The findings pane, hidden while the review has no findings to reach and no composer is open. */
     private final JComponent inboxComponent;
     /** Whether the pane is collapsed by this view's empty-yield (not the user): only our own yield re-expands. */
@@ -194,10 +204,27 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         reviewActions.add(new StartReview(project, host, ReviewTabOpener.ReviewStart.TOUR));
         reviewActions.add(new StartReview(project, host, ReviewTabOpener.ReviewStart.SPHINX));
         showTextInToolbar(reviewActions);
-        refreshAction = DumbAwareAction.create(REFRESH, AllIcons.Actions.Refresh, e -> host.refresh(project));
-        refreshAction.getTemplatePresentation().setDescription(REFRESH_DESCRIPTION);
+        refreshAction = new DumbAwareAction(REFRESH, REFRESH_DESCRIPTION, AllIcons.Actions.Refresh) {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                refresh(project, host);
+            }
+
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                e.getPresentation().setEnabled(!refreshRunning);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+        };
         ActionToolbar reviews = ActionManager.getInstance().createActionToolbar(TOOLBAR_PLACE,
                 new DefaultActionGroup(refreshAction, reviewActions), true);
+        headerToolbar = reviews;
+        refreshing.setForeground(UIUtil.getContextHelpForeground());
+        refreshing.setVisible(false);
         JPanel west = new JPanel(new HorizontalLayout(JBUI.scale(16)));
         west.setOpaque(false);
         west.add(subject);
@@ -206,6 +233,7 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         west.add(progressText);
         JPanel east = new JPanel(new HorizontalLayout(JBUI.scale(8)));
         east.setOpaque(false);
+        east.add(refreshing);
         east.add(reviews.getComponent());
         east.add(finishReview);
         JBPanel<?> top = new JBPanel<>(new BorderLayout());
@@ -225,6 +253,25 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             renderHeader();
         });
         preferredFocus = queue.<Supplier<JComponent>>map(q -> q::focusTarget).orElse(() -> centre);
+    }
+
+    /**
+     * Refresh: shows "Refreshing…" and turns Refresh off at once, then asks
+     * the host to reload; both clear when the host reports the reload
+     * ended. A click while one runs does nothing. EDT.
+     */
+    private void refresh(Project project, Host host) {
+        if (refreshRunning) {
+            return;
+        }
+        refreshRunning = true;
+        refreshing.setVisible(true);
+        headerToolbar.updateActionsAsync();
+        host.refresh(project, () -> {
+            refreshRunning = false;
+            refreshing.setVisible(false);
+            headerToolbar.updateActionsAsync();
+        });
     }
 
     /** A text-only toggle renders as a blank button in a toolbar unless its presentation asks for the text. */
@@ -409,8 +456,8 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             }
 
             @Override
-            public void refresh(Project project) {
-                ReviewTabProvider.refresh(project);
+            public void refresh(Project project, Runnable done) {
+                ReviewTabProvider.refresh(project, done);
             }
 
             @Override

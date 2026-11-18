@@ -345,10 +345,73 @@ public class ReviewWorkbenchFlowPlatformTest extends BasePlatformTestCase {
                 Set.of("n1", "n2", "n3"), 0, false)));
         assertEquals(21, ReviewWorkbenchFlowView.firstNewLine(new FlowModel.Hunk("k", "a", 1, "d", "old 20", "o20",
                 1, 0, Set.of("o19", "n21", "o20"), 0, false)));
+        assertEquals("a malformed key is skipped, never thrown", 4, ReviewWorkbenchFlowView.firstNewLine(
+                new FlowModel.Hunk("k", "a", 0, "d", "4", "nx", 0, 1, Set.of("n+1", "n0", "n4"), 0, false)));
+        assertEquals(1, ReviewWorkbenchFlowView.firstNewLine(new FlowModel.Hunk("k", "a", 0, "d", "", "", 0, 0,
+                Set.of("x"), 0, false)));
+    }
+
+    public void testAHunkWhoseFileChangedSinceIsAskedAgainUnderANewerStateOnly() {
+        ReviewWorkbenchFlow flow = flow();
+        flow.render(state());
+        List<String> asked = new ArrayList<>();
+        ReviewWorkbenchFlowView.Actions changedSince = new ReviewWorkbenchFlowView.Actions() {
+            @Override
+            public CompletableFuture<Optional<ReviewDiffRequests.RequestContext>> hunkContext(String path,
+                                                                                            int hunkIndex,
+                                                                                            String scrollKey) {
+                asked.add(path + "#" + hunkIndex);
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+
+            @Override
+            public Consumer<FrameDiffTool.DiffViewer> decorator(String path, int hunkIndex, Disposable lifetime) {
+                return ReviewWorkbenchEditorPlatformTest.NO_ACTIONS.decorator(path, hunkIndex, lifetime);
+            }
+
+            @Override
+            public CompletableFuture<Optional<String>> comment(FlowModel.Hunk hunk, String text) {
+                return ReviewWorkbenchEditorPlatformTest.NO_ACTIONS.comment(hunk, text);
+            }
+
+            @Override
+            public CompletableFuture<Optional<String>> submitReview() {
+                return ReviewWorkbenchEditorPlatformTest.NO_ACTIONS.submitReview();
+            }
+
+            @Override
+            public CompletableFuture<Optional<String>> sendToSession() {
+                return ReviewWorkbenchEditorPlatformTest.NO_ACTIONS.sendToSession();
+            }
+
+            @Override
+            public CompletableFuture<Optional<String>> approve(List<String> digests) {
+                return ReviewWorkbenchEditorPlatformTest.NO_ACTIONS.approve(digests);
+            }
+        };
+        ReviewWorkbenchFlowView view = new ReviewWorkbenchFlowView(getProject(), flow, changedSince);
+        try {
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals(List.of("src/A.java#0"), asked);
+
+            flow.toggleFlag(); // a re-render under the same state
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals("the same state does not ask again", 1, asked.size());
+
+            flow.render(state()); // the reload's state
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals(List.of("src/A.java#0", "src/A.java#0"), asked);
+
+            flow.toggleFlag();
+            PlatformTestUtil.dispatchAllEventsInIdeEventQueue();
+            assertEquals("a repeat failure waits for the next state", 2, asked.size());
+        } finally {
+            Disposer.dispose(view);
+        }
     }
 
     public void testAHunksCommentRangeIsItsAddedLinesOrItsRemovedOnes() {
-        FlowModel.Queue queue = FlowModel.of(state());
+        FlowModel.Queue queue = FlowModel.of(state(), Set.of());
         assertEquals(Optional.of(new DiffSelection.Range("src/A.java", "n2", "n3", false)),
                 ReviewTabProvider.hunkRange(ROWS, queue.hunk(A_0).orElseThrow()));
         assertEquals(Optional.of(new DiffSelection.Range("src/A.java", "o20", "o20", false)),

@@ -15,8 +15,8 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * One workbench's flow review (design A): the queue of hunks built from
- * every {@link WorkbenchState}, the hunk the centre shows, and the
+ * One workbench's flow review (design A): the queue of hunks each
+ * {@link WorkbenchState} carries, the hunk the centre shows, and the
  * reviewer's seen and flagged marks. The queue pane, the centre and the
  * header listen to it.
  *
@@ -64,8 +64,9 @@ final class ReviewWorkbenchFlow {
     }
 
     /**
-     * Rebuilds the queue for {@code next}: the current hunk stays when the
-     * queue still has it, else the first unseen hunk shows, else the first.
+     * Adopts {@code next}'s queue, built with the state
+     * ({@link WorkbenchState#of}): the current hunk stays when the queue
+     * still has it, else the first unseen hunk shows, else the first.
      */
     void render(WorkbenchState next) {
         requireEdt();
@@ -78,7 +79,7 @@ final class ReviewWorkbenchFlow {
             current = null;
             finishing = false;
         }
-        queue = FlowModel.of(next);
+        queue = next.flow();
         if (current == null || queue.indexOf(current) < 0) {
             current = queue.firstUnseen(seen).or(() -> queue.order().stream().findFirst())
                     .map(FlowModel.Hunk::key).orElse(null);

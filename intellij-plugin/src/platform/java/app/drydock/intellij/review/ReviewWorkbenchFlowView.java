@@ -12,6 +12,7 @@ import com.intellij.diff.requests.SimpleDiffRequest;
 import com.intellij.diff.tools.fragmented.UnifiedDiffTool;
 import com.intellij.diff.tools.util.base.TextDiffSettingsHolder;
 import com.intellij.diff.util.DiffUserDataKeysEx;
+import com.intellij.diff.util.Side;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI;
 import com.intellij.ide.util.PropertiesComponent;
@@ -170,6 +171,11 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     private final ActionToolbar toolbar;
     /** The hunk the diff panel shows or loads: key and digest, so a changed hunk reloads. */
     private String shownHunk;
+    /**
+     * The flow state the shown hunk's load was asked under, when that load
+     * failed or found the file changed since; a newer state retries it.
+     */
+    private WorkbenchState failedIn;
     private Disposable lifetime;
     private ReviewDiffRequests.RequestContext loaded;
     private boolean saving;
@@ -434,33 +440,45 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
         sendToSession.setEnabled(!sending && outbox.pending());
     }
 
-    /** Builds the diff panel for {@code hunk}, unless it already shows or loads it; null shows nothing. */
+    /**
+     * Builds the diff panel for {@code hunk}, unless it already shows or
+     * loads it; null shows nothing. A load that failed, or found the file
+     * changed since, is asked again once the flow has a newer state (the
+     * review's reload brings one), never on a mere re-render.
+     */
     private void showPanel(FlowModel.Hunk hunk) {
         String identity = hunk == null ? null : hunk.key() + "|" + hunk.digest();
-        if (Objects.equals(identity, shownHunk)) {
+        WorkbenchState state = flow.state();
+        if (Objects.equals(identity, shownHunk) && (failedIn == null || failedIn == state)) {
             return;
         }
         endPanel();
         shownHunk = identity;
+        failedIn = null;
         if (hunk == null) {
             placeholder.setText("");
             return;
         }
         placeholder.setText(LOADING);
         actions.hunkContext(hunk.file(), hunk.index(), hunk.scrollKey())
-                .whenComplete((context, error) -> onEdt(() -> create(identity, hunk, context, error)));
+                .whenComplete((context, error) -> onEdt(() -> create(identity, hunk, state, context, error)));
     }
 
-    private void create(String identity, FlowModel.Hunk hunk, Optional<ReviewDiffRequests.RequestContext> context,
-                        Throwable error) {
+    private void create(String identity, FlowModel.Hunk hunk, WorkbenchState askedIn,
+                        Optional<ReviewDiffRequests.RequestContext> context, Throwable error) {
         if (!Objects.equals(identity, shownHunk) || lifetime != null) {
             return; // moved on while loading
         }
         if (error != null || context == null || context.isEmpty()) {
             placeholder.setText(error != null ? "The diff could not be read: " + ReviewTabProvider.rootMessage(error)
                     : CHANGED_SINCE);
+            failedIn = askedIn;
+            if (flow.state() != askedIn) {
+                showPanel(hunk); // a newer state arrived while loading: ask under it
+            }
             return;
         }
+        failedIn = null;
         loaded = context.get();
         lifetime = Disposer.newDisposable(this, "review flow hunk " + hunk.key());
         SimpleDiffRequest request = ReviewDiffRequests.toRequest(project, lifetime, loaded);
@@ -608,13 +626,34 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
         }
     }
 
-    /** The hunk's first line in the new file (pure): its scroll key's, else the lowest new row's, else 1. */
+    /**
+     * The hunk's first line in the new file, 1-based (pure): its scroll
+     * key's, else the lowest new row's, else 1. A key that is not a line
+     * key ({@link ReviewDiffRequests#scrollTarget}) is skipped.
+     */
     static int firstNewLine(FlowModel.Hunk hunk) {
-        if (hunk.scrollKey().startsWith("n")) {
-            return Integer.parseInt(hunk.scrollKey().substring(1));
+        int scroll = newLine(hunk.scrollKey());
+        if (scroll > 0) {
+            return scroll;
         }
-        return hunk.rowKeys().stream().filter(key -> key.startsWith("n"))
-                .mapToInt(key -> Integer.parseInt(key.substring(1))).min().orElse(1);
+        int lowest = Integer.MAX_VALUE;
+        for (String key : hunk.rowKeys()) {
+            int line = newLine(key);
+            if (line > 0 && line < lowest) {
+                lowest = line;
+            }
+        }
+        return lowest == Integer.MAX_VALUE ? 1 : lowest;
+    }
+
+    /** {@code key}'s 1-based line in the new file; 0 for an old-side key or one that is not a line key. */
+    private static int newLine(String key) {
+        try {
+            ReviewDiffRequests.ScrollTarget target = ReviewDiffRequests.scrollTarget(key);
+            return target.side() == Side.RIGHT ? target.line() + 1 : 0;
+        } catch (IllegalArgumentException e) {
+            return 0;
+        }
     }
 
     /** Back or Next on the bar. */
@@ -676,6 +715,7 @@ final class ReviewWorkbenchFlowView extends JPanel implements Disposable {
     public void dispose() {
         endPanel();
         shownHunk = null;
+        failedIn = null;
     }
 
     /**

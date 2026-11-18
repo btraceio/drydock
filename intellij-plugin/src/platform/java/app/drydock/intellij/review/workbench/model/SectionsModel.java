@@ -299,10 +299,7 @@ public final class SectionsModel {
         for (HunkTake take : takes) {
             takeByDigest.putIfAbsent(take.hunkDigest(), take);
         }
-        Map<String, ReviewVerdict> byDigest = new LinkedHashMap<>();
-        for (ReviewVerdict verdict : verdicts) {
-            byDigest.putIfAbsent(verdict.hunkDigest(), verdict);
-        }
+        Map<String, ReviewVerdict> byDigest = byDigest(verdicts);
         Map<String, Integer> numberOfStep = new HashMap<>();
         Map<Integer, String> titleOfNumber = new HashMap<>();
         Map<String, List<Integer>> sectionsOfDigest = new HashMap<>();
@@ -369,6 +366,33 @@ public final class SectionsModel {
                     reviewedDigests.size(), digests.size(), openFindings));
         }
         return sections;
+    }
+
+    /**
+     * The digests {@code verdicts} mark reviewed against {@code currentBase}
+     * (pure): the class's reviewed rule applied to each digest's first
+     * verdict, whether or not any section lists the digest. A missing base
+     * vouches for none.
+     */
+    public static Set<String> approvedDigests(List<ReviewVerdict> verdicts, Optional<String> currentBase) {
+        Objects.requireNonNull(verdicts, "verdicts");
+        Objects.requireNonNull(currentBase, "currentBase");
+        Set<String> approved = new LinkedHashSet<>();
+        byDigest(verdicts).forEach((digest, verdict) -> {
+            if (reviewed(verdict, currentBase)) {
+                approved.add(digest);
+            }
+        });
+        return approved;
+    }
+
+    /** The first verdict of each digest in {@code verdicts}: the one a hunk is judged by. */
+    private static Map<String, ReviewVerdict> byDigest(List<ReviewVerdict> verdicts) {
+        Map<String, ReviewVerdict> byDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : verdicts) {
+            byDigest.putIfAbsent(verdict.hunkDigest(), verdict);
+        }
+        return byDigest;
     }
 
     private static boolean reviewed(ReviewVerdict verdict, Optional<String> currentBase) {

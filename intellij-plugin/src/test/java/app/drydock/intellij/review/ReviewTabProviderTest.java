@@ -3,10 +3,14 @@ package app.drydock.intellij.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.intellij.agent.PromptOutcome;
+import app.drydock.intellij.review.workbench.model.FlowModel;
+import app.drydock.intellij.review.workbench.model.InboxModel;
+import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
+import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
@@ -115,6 +119,22 @@ class ReviewTabProviderTest {
 
         assertTrue(memo.schedulesReload("src/link", "target\n", "tree\n"),
                 "after a genuine change signal the same mismatch again schedules a reload");
+    }
+
+    @Test
+    void aHunkThatChangedSinceShowsTheNoticeEveryTimeAndReloadsOnceUntilTheMemoResets() {
+        ReviewTabProvider.MismatchMemo memo = new ReviewTabProvider.MismatchMemo();
+        List<String> calls = new ArrayList<>();
+        Runnable notice = () -> calls.add("notice");
+        Runnable reload = () -> calls.add("reload");
+
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        assertEquals(List.of("notice", "reload", "notice"), calls, "the repeat mismatch reloads nothing");
+
+        memo.reset();
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        assertEquals(List.of("notice", "reload", "notice", "notice", "reload"), calls);
     }
 
     // ---- the dedicated window's shape (no embedded preview) -------------------
@@ -679,5 +699,46 @@ class ReviewTabProviderTest {
         assertEquals(WorkbenchState.Mode.LOCAL, ReviewTabProvider.modeOf(local));
         assertEquals(WorkbenchState.Mode.PR, ReviewTabProvider.modeOf(pr));
         assertEquals("PR #12", ReviewTabProvider.subjectOf(pr));
+    }
+
+    @Test
+    void aHunkCommentWaitsForThePrInAPullRequestReviewAndGoesToTheSessionInALocalOne() {
+        ReviewScope local = scope(Optional.of(SESSION));
+        ReviewScope pr = new ReviewScope("rs_a", ReviewScope.Kind.WORKTREE, Path.of("/repo"),
+                Optional.of(Path.of("/repo/.wt/a")), "base0", "head0",
+                Optional.of(new ReviewScope.PullRequestRef(12, Optional.empty())), Optional.of(SESSION),
+                Optional.empty());
+        DiffSelection.Range range = new DiffSelection.Range("src/A.java", "n2", "n3", false);
+
+        ReviewAnnotation inPr = ReviewTabProvider.humanComment(pr, range, "Rename it", Severity.QUESTION, AT);
+        OutboxModel.Snapshot prLane = OutboxModel.snapshot(List.of(inPr), true, true);
+        assertEquals(List.of(inPr), prLane.forPr().stream().map(OutboxModel.Item::finding).toList());
+        assertTrue(prLane.toFix().isEmpty(), "a PR review's comment is not sent to the session");
+
+        ReviewAnnotation inLocal = ReviewTabProvider.humanComment(local, range, "Rename it", Severity.QUESTION, AT);
+        OutboxModel.Snapshot localLane = OutboxModel.snapshot(List.of(inLocal), true, false);
+        assertEquals(List.of(inLocal), localLane.toFix().stream().map(OutboxModel.Item::finding).toList());
+        assertFalse(inLocal.postToPr());
+        assertEquals(List.of(new ReviewAnnotation.Message("You", AT, "Rename it")), inLocal.thread());
+    }
+
+    @Test
+    void theInboxFileScopeFollowsTheHunkTheFlowShows() {
+        FlowModel.Hunk onB = new FlowModel.Hunk("h", "src/B.java", 0, "d", "1", "n1", 0, 1, Set.of("n1"), 0, false);
+        assertEquals(Optional.of("src/B.java"), ReviewTabProvider.followedFile(Optional.of(onB), "src/A.java"));
+        assertEquals(Optional.of("src/B.java"), ReviewTabProvider.followedFile(Optional.of(onB), null));
+        assertEquals(Optional.empty(), ReviewTabProvider.followedFile(Optional.of(onB), "src/B.java"),
+                "the same file rebuilds nothing");
+        assertEquals(Optional.empty(), ReviewTabProvider.followedFile(Optional.empty(), "src/A.java"),
+                "the finish screen keeps the last file");
+
+        ReviewAnnotation onA = finding("a", "src/A.java", "n1", Triage.PROPOSED, AnnotationStatus.OPEN);
+        ReviewAnnotation onBFinding = finding("b", "src/B.java", "n1", Triage.PROPOSED, AnnotationStatus.OPEN);
+        WorkbenchState state = WorkbenchState.of("repo", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL,
+                ReviewTabProvider.followedFile(Optional.of(onB), "src/A.java"), WorkbenchState.View.CHANGES_ONLY,
+                List.of(onA, onBFinding),
+                new WorkbenchState.InboxChoice(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.FILE));
+        assertEquals(List.of(onBFinding), state.inbox().cards().stream().map(InboxModel.Card::finding).toList());
     }
 }
