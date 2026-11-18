@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.ui.SessionDots;
 
@@ -513,6 +514,20 @@ final class AgentConsoleStrip extends JPanel {
             state.setToolTipText(detached
                     ? "The agent is running — just not in this window. Show agent opens its live console"
                     : AgentStripText.remoteStatusTooltip(ownedHere, commands.liveness(), boxName));
+        } else if (commands.sshRemote().isPresent()) {
+            // The ssh-remote arm's line: the host plus the one fact this IDE
+            // has. No activity folds in (the monitor cannot see a remote
+            // agent), no liveness probe runs — the agent does not outlive
+            // its ssh client, so the persisted status is the whole story.
+            String host = commands.sshRemote().map(SshRemote::host).orElseThrow();
+            boolean ownedHere = running || detached;
+            SessionStatus shown = detached ? SessionStatus.RUNNING : session.status();
+            state.setIcon(SessionDots.dotIcon(shown, Optional.empty()));
+            state.setText(AgentStripText.sshRemoteStatusText(ownedHere, session.status(), host)
+                    + (detached ? " · not shown here" : ""));
+            state.setToolTipText(detached
+                    ? "The agent is running — just not in this window. Show agent opens its live console"
+                    : AgentStripText.sshRemoteStatusTooltip(ownedHere, session.status(), host));
         } else {
             SessionStatus shown = detached
                     ? SessionStatus.RUNNING
