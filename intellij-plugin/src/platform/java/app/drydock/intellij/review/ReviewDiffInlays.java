@@ -1,7 +1,6 @@
 package app.drydock.intellij.review;
 
 import app.drydock.review.ReviewAnnotation;
-import app.drydock.review.tour.HunkTake;
 
 import com.intellij.collaboration.ui.codereview.editor.EditorComponentInlaysUtilKt;
 import com.intellij.diff.FrameDiffTool;
@@ -43,7 +42,7 @@ import javax.swing.JComponent;
 import kotlin.jvm.functions.Function1;
 
 /**
- * The decoration half of the reusable diff (spec "Review surface and diff
+ * The decoration layer of a hunk diff (spec "Review surface and diff
  * inlays", AC1/AC6/AC7). {@link #viewerChanged} — the processor listener's
  * dispatch point — converts the active viewer through the injected
  * {@link ViewerHosts} seam, attaches a viewer-owned after-rediff listener,
@@ -63,50 +62,24 @@ import kotlin.jvm.functions.Function1;
  * isolation so one failing release is logged and never strands the rest;
  * store-driven rebuild bursts coalesce into one pending rebuild; cards are
  * built for every unresolved finding of the decorated file, including
- * CONFIRMED/DISMISSED (Undo stays reachable). With a {@link TakeFactory},
- * the agent's take on a hunk is a component above the hunk's first changed
- * row, released like the cards. No timers; listeners are owned by the viewer
- * they watch.
+ * CONFIRMED/DISMISSED (Undo stays reachable). No timers; listeners are owned
+ * by the viewer they watch.
  */
 public final class ReviewDiffInlays {
 
-    /**
-     * One file's decorations: path, current row keys, first-hunk fallback
-     * target, findings, and the agent's takes on its hunks.
-     */
+    /** One diff's decorations: path, current row keys, first-hunk fallback target, and findings. */
     public record Decorations(
             String path,
             Set<String> rowKeys,
             ReviewDiffRequests.ScrollTarget firstHunkFallback,
-            List<ReviewAnnotation> findings,
-            List<TakeMark> takes
+            List<ReviewAnnotation> findings
     ) {
         public Decorations {
             Objects.requireNonNull(path, "path");
             Objects.requireNonNull(firstHunkFallback, "firstHunkFallback");
             rowKeys = Set.copyOf(Objects.requireNonNull(rowKeys, "rowKeys"));
             findings = List.copyOf(Objects.requireNonNull(findings, "findings"));
-            takes = List.copyOf(Objects.requireNonNull(takes, "takes"));
         }
-
-        /** A file's decorations without takes. */
-        public Decorations(String path, Set<String> rowKeys, ReviewDiffRequests.ScrollTarget firstHunkFallback,
-                           List<ReviewAnnotation> findings) {
-            this(path, rowKeys, firstHunkFallback, findings, List.of());
-        }
-    }
-
-    /** A take on one hunk, placed at the hunk's first changed row ({@code at}: side and 0-based line). */
-    public record TakeMark(ReviewDiffRequests.ScrollTarget at, HunkTake take) {
-        public TakeMark {
-            Objects.requireNonNull(at, "at");
-            Objects.requireNonNull(take, "take");
-        }
-    }
-
-    /** Builds the component a take is shown in. */
-    public interface TakeFactory {
-        JComponent take(HunkTake take);
     }
 
     /**
@@ -207,7 +180,6 @@ public final class ReviewDiffInlays {
     private final EdtQueue edt;
     private final ViewerHosts hosts;
     private final CardFactory cards;
-    private final TakeFactory takes;
 
     private ViewerHost viewer;
     private Decorations decorations;
@@ -218,27 +190,16 @@ public final class ReviewDiffInlays {
     private boolean rebuildPending;
     private boolean disposed;
 
-    /** The production layer: platform hosts and the application's EDT queue; takes are drawn with {@code takes}. */
-    public ReviewDiffInlays(EdtQueue edt, CardFactory cards, TakeFactory takes) {
-        this(edt, ReviewDiffInlays::hostFor, cards, takes);
-    }
-
-    /** As {@link #ReviewDiffInlays(EdtQueue, CardFactory, TakeFactory)} for a surface that shows no takes. */
+    /** The production layer: platform hosts and the application's EDT queue. */
     public ReviewDiffInlays(EdtQueue edt, CardFactory cards) {
-        this(edt, ReviewDiffInlays::hostFor, cards, null);
+        this(edt, ReviewDiffInlays::hostFor, cards);
     }
 
     /** The testable layer: hosts and EDT queue are injected seams. */
     ReviewDiffInlays(EdtQueue edt, ViewerHosts hosts, CardFactory cards) {
-        this(edt, hosts, cards, null);
-    }
-
-    /** The testable layer with a take factory; a null factory draws no takes. */
-    ReviewDiffInlays(EdtQueue edt, ViewerHosts hosts, CardFactory cards, TakeFactory takes) {
         this.edt = Objects.requireNonNull(edt, "edt");
         this.hosts = Objects.requireNonNull(hosts, "hosts");
         this.cards = Objects.requireNonNull(cards, "cards");
-        this.takes = takes;
     }
 
     /** The production EDT queue. */
@@ -379,19 +340,6 @@ public final class ReviewDiffInlays {
                             marks.add(editor.addFindingRange(start, end, finding));
                         }
                     });
-        }
-        if (takes == null) {
-            return;
-        }
-        for (TakeMark mark : current.takes()) {
-            int line = host.oneSideLine(mark.at().side(), mark.at().line());
-            EditorHost editor = host.editorOn(mark.at().side());
-            if (editor == null || line < 0 || line >= editor.lineCount()) {
-                continue;
-            }
-            // Only "after a line" exists: the line before the hunk's first changed row puts the
-            // take above that row; a hunk that starts at the file's first line gets it below.
-            inlays.add(editor.insertCardAfter(Math.max(line - 1, 0), takes.take(mark.take())));
         }
     }
 

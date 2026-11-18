@@ -1,7 +1,5 @@
 package app.drydock.intellij.review;
 
-import app.drydock.review.tour.HunkTake;
-import com.intellij.util.ui.UIUtil;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.JComponent;
@@ -12,9 +10,7 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.EventQueue;
 import java.lang.reflect.InvocationTargetException;
-import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -80,21 +76,6 @@ class ReviewTypographyTest {
                     "an unmarked typed component is restyled");
             assertEquals(corrupt, inside.getFont(),
                     "a marked subtree restyles itself; the walk does not enter it");
-        });
-    }
-
-    @Test void theTakePanelIsNotSelfRestylingSoRestyleStillCoversIt()
-            throws InvocationTargetException, InterruptedException {
-        onEdt(() -> {
-            HunkTakePanel take = new HunkTakePanel(id -> { });
-            take.render(Optional.of(new HunkTake("d", "does", HunkTake.Alignment.ALIGNED, "",
-                    List.of(), Instant.EPOCH)));
-            JTextArea body = (JTextArea) UIUtil.uiTraverser(take).filter(JTextArea.class).first();
-            Font corrupt = new Font(Font.DIALOG, Font.ITALIC, 7);
-            body.setFont(corrupt);
-            ReviewTypography.restyle(take);
-            assertEquals(ReviewTypography.font(ReviewTypography.Role.BODY), body.getFont(),
-                    "the take panel is not self-restyling; restyle still covers it");
         });
     }
 }

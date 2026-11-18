@@ -182,9 +182,12 @@ public final class SectionsModel {
                 tour.map(ReviewTour::kind));
     }
 
-    /** One hunk of the diff, before it is placed in a section. */
-    private record HunkSource(String file, int index, String hunkId, String digest, String lines, String scrollKey,
-                              int removed, int added, Set<String> rowKeys) {
+    /**
+     * One hunk of the diff, before it is placed in a section; {@code rowKeys}
+     * are the line keys of every row the hunk shows, context included.
+     */
+    record HunkSource(String file, int index, String hunkId, String digest, String lines, String scrollKey,
+                      int removed, int added, Set<String> rowKeys) {
     }
 
     /** A section before numbering and progress. */
@@ -205,6 +208,11 @@ public final class SectionsModel {
     }
 
     private static HunkSource source(String path, int index, String id, UnifiedDiff.Hunk hunk) {
+        return source(path, index, id, hunk, HunkDigest.of(path, hunk));
+    }
+
+    /** One hunk's source with its digest already known, as a {@code ReviewTabModel.FileRow} carries it. */
+    static HunkSource source(String path, int index, String id, UnifiedDiff.Hunk hunk, String digest) {
         int removed = 0;
         int added = 0;
         int firstNew = Integer.MAX_VALUE;
@@ -237,7 +245,7 @@ public final class SectionsModel {
         if (scrollKey == null) {
             scrollKey = hunk.lines().isEmpty() ? "n1" : hunk.lines().getFirst().lineKey();
         }
-        return new HunkSource(path, index, id, HunkDigest.of(path, hunk), lines, scrollKey, removed, added, rowKeys);
+        return new HunkSource(path, index, id, digest, lines, scrollKey, removed, added, rowKeys);
     }
 
     private static String span(int first, int last) {
@@ -291,10 +299,7 @@ public final class SectionsModel {
         for (HunkTake take : takes) {
             takeByDigest.putIfAbsent(take.hunkDigest(), take);
         }
-        Map<String, ReviewVerdict> byDigest = new LinkedHashMap<>();
-        for (ReviewVerdict verdict : verdicts) {
-            byDigest.putIfAbsent(verdict.hunkDigest(), verdict);
-        }
+        Map<String, ReviewVerdict> byDigest = byDigest(verdicts);
         Map<String, Integer> numberOfStep = new HashMap<>();
         Map<Integer, String> titleOfNumber = new HashMap<>();
         Map<String, List<Integer>> sectionsOfDigest = new HashMap<>();
@@ -361,6 +366,33 @@ public final class SectionsModel {
                     reviewedDigests.size(), digests.size(), openFindings));
         }
         return sections;
+    }
+
+    /**
+     * The digests {@code verdicts} mark reviewed against {@code currentBase}
+     * (pure): the class's reviewed rule applied to each digest's first
+     * verdict, whether or not any section lists the digest. A missing base
+     * vouches for none.
+     */
+    public static Set<String> approvedDigests(List<ReviewVerdict> verdicts, Optional<String> currentBase) {
+        Objects.requireNonNull(verdicts, "verdicts");
+        Objects.requireNonNull(currentBase, "currentBase");
+        Set<String> approved = new LinkedHashSet<>();
+        byDigest(verdicts).forEach((digest, verdict) -> {
+            if (reviewed(verdict, currentBase)) {
+                approved.add(digest);
+            }
+        });
+        return approved;
+    }
+
+    /** The first verdict of each digest in {@code verdicts}: the one a hunk is judged by. */
+    private static Map<String, ReviewVerdict> byDigest(List<ReviewVerdict> verdicts) {
+        Map<String, ReviewVerdict> byDigest = new LinkedHashMap<>();
+        for (ReviewVerdict verdict : verdicts) {
+            byDigest.putIfAbsent(verdict.hunkDigest(), verdict);
+        }
+        return byDigest;
     }
 
     private static boolean reviewed(ReviewVerdict verdict, Optional<String> currentBase) {

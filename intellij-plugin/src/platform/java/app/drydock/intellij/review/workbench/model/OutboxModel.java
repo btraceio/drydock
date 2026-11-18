@@ -35,21 +35,27 @@ public final class OutboxModel {
     /**
      * The lane: the findings to fix in review order, how many dismissed
      * findings go along as no-action, whether a session is bound to receive
-     * them, how many confirmed findings wait for the PR instead, whether
+     * them, the pending findings that wait for the PR lane instead, whether
      * the review is a pull request review, and whether its fixes land on a
      * stacked sub-PR ("Fixes land on", a pull request review's choice).
      */
-    public record Snapshot(List<Item> toFix, int dismissed, boolean sessionBound, int waitingForPr,
+    public record Snapshot(List<Item> toFix, int dismissed, boolean sessionBound, List<Item> forPr,
                            boolean prMode, boolean stackedSubPr) {
-        public static final Snapshot EMPTY = new Snapshot(List.of(), 0, false, 0, false, false);
+        public static final Snapshot EMPTY = new Snapshot(List.of(), 0, false, List.of(), false, false);
 
         public Snapshot {
             toFix = List.copyOf(toFix);
+            forPr = List.copyOf(forPr);
         }
 
         /** This lane with the fixes landing on a stacked sub-PR when {@code stacked} (a pull request review only). */
         public Snapshot withStackedSubPr(boolean stacked) {
-            return new Snapshot(toFix, dismissed, sessionBound, waitingForPr, prMode, prMode && stacked);
+            return new Snapshot(toFix, dismissed, sessionBound, forPr, prMode, prMode && stacked);
+        }
+
+        /** How many pending findings wait for the PR lane. */
+        public int waitingForPr() {
+            return forPr.size();
         }
 
         /** Whether there is anything to send. */
@@ -67,8 +73,9 @@ public final class OutboxModel {
                 String dismissedText = dismissed == 0 ? "" : dismissed + " dismissed";
                 lane = fix.isEmpty() ? dismissedText : dismissedText.isEmpty() ? fix : fix + " · " + dismissedText;
             }
-            return waitingForPr == 0 ? lane
-                    : lane + " · " + waitingForPr + (waitingForPr == 1 ? " waits" : " wait") + " for the PR";
+            int waiting = waitingForPr();
+            return waiting == 0 ? lane
+                    : lane + " · " + waiting + (waiting == 1 ? " waits" : " wait") + " for the PR";
         }
     }
 
@@ -94,11 +101,13 @@ public final class OutboxModel {
                 .filter(finding -> ReviewTriageActions.forSession(finding, prMode))
                 .filter(finding -> finding.triage() == Triage.DISMISSED)
                 .count();
-        int waitingForPr = (int) findings.stream()
+        List<Item> forPr = findings.stream()
                 .filter(ReviewTriageActions::isPendingDecision)
                 .filter(finding -> !ReviewTriageActions.forSession(finding, prMode))
-                .count();
-        return new Snapshot(toFix, dismissed, sessionBound, waitingForPr, prMode, false);
+                .sorted(InboxModel.REVIEW_ORDER)
+                .map(finding -> new Item(finding, commented(finding)))
+                .toList();
+        return new Snapshot(toFix, dismissed, sessionBound, forPr, prMode, false);
     }
 
     /** Whether the reviewer wrote to the agent on this finding: a non-blank message of theirs in the thread. */

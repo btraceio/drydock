@@ -3,24 +3,24 @@ package app.drydock.intellij.review;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.intellij.agent.PromptOutcome;
+import app.drydock.intellij.review.workbench.model.FlowModel;
+import app.drydock.intellij.review.workbench.model.InboxModel;
+import app.drydock.intellij.review.workbench.model.OutboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.review.AnnotationStatus;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
-import app.drydock.review.HunkDigest;
+import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
-import app.drydock.review.tour.HunkTake;
 import com.intellij.diff.fragments.LineFragment;
-import com.intellij.diff.util.Side;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import javax.swing.JComponent;
 import java.awt.EventQueue;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -121,6 +121,22 @@ class ReviewTabProviderTest {
                 "after a genuine change signal the same mismatch again schedules a reload");
     }
 
+    @Test
+    void aHunkThatChangedSinceShowsTheNoticeEveryTimeAndReloadsOnceUntilTheMemoResets() {
+        ReviewTabProvider.MismatchMemo memo = new ReviewTabProvider.MismatchMemo();
+        List<String> calls = new ArrayList<>();
+        Runnable notice = () -> calls.add("notice");
+        Runnable reload = () -> calls.add("reload");
+
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        assertEquals(List.of("notice", "reload", "notice"), calls, "the repeat mismatch reloads nothing");
+
+        memo.reset();
+        ReviewTabProvider.changedSince(memo, "src/A.java", "left\n", "right\n", notice, reload);
+        assertEquals(List.of("notice", "reload", "notice", "notice", "reload"), calls);
+    }
+
     // ---- the dedicated window's shape (no embedded preview) -------------------
 
     /**
@@ -141,54 +157,6 @@ class ReviewTabProviderTest {
             assertFalse(type.contains("Preview"), field.getName() + " must not be a preview field: " + type);
             assertFalse(type.contains("Splitter"), field.getName() + " must not be a splitter field: " + type);
         }
-    }
-
-    // ---- the selection pipeline's pure halves ---------------------------------
-
-    @Test
-    void theRequestContextIsTitledByTheFileAndScrollsTheFindingToItsKey() {
-        UnifiedDiff.FileDiff file = file("src/A.java",
-                hunk(ctx(1, 1, "one"), add(2, "two"), ctx(3, 3, "three"), add(4, "four")));
-        String left = "one\nthree\n";
-        String right = "one\ntwo\nthree\nfour\n";
-        List<LineFragment> fragments = ReviewFragments.fragmentsFor(file, left, right);
-
-        // A finding row keyed at a row line: its own key is the scroll target.
-        ReviewTabModel.FindingRow finding = findingRow("f1", "n4");
-        ReviewDiffRequests.RequestContext context = ReviewTabProvider.requestContextFor(
-                finding, file, left, right, fragments);
-        assertEquals("src/A.java", context.path(), "the file path titles the reusable tab");
-        assertEquals(Side.RIGHT, context.plan().scrollToSide());
-        assertEquals(3, context.plan().scrollToLine(),
-                "the finding key n4 scrolls to its own 0-based line");
-        assertEquals(fragments, context.plan().fragments(),
-                "the git-authoritative fragments ride the plan unchanged");
-
-        // A malformed persisted key is a value, not a crash: the file's own
-        // scroll target — its first added line, n2 — applies instead.
-        ReviewTabModel.FindingRow malformed = findingRow("f2", "x9");
-        ReviewDiffRequests.RequestContext fallback = ReviewTabProvider.requestContextFor(
-                malformed, file, left, right, fragments);
-        assertEquals("src/A.java", fallback.path());
-        ReviewDiffRequests.Plan filePlan = ReviewDiffRequests.plan(file, left, right, fragments);
-        assertEquals(filePlan.scrollToSide(), fallback.plan().scrollToSide());
-        assertEquals(filePlan.scrollToLine(), fallback.plan().scrollToLine(),
-                "a malformed key falls back to the file's own scroll target");
-
-        // A file row selection: the file's own scroll, the same title.
-        ReviewDiffRequests.RequestContext fileRow = ReviewTabProvider.requestContextFor(
-                file, file, left, right, fragments);
-        assertEquals("src/A.java", fileRow.path());
-        assertEquals(filePlan.scrollToLine(), fileRow.plan().scrollToLine());
-        assertEquals(filePlan.scrollToSide(), fileRow.plan().scrollToSide());
-
-        // A file selected at a line (a source editor's Back to review): scrolled to that key.
-        ReviewTabModel.FileRow row = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file), List.of(),
-                List.of(), Optional.empty())).files().getFirst();
-        ReviewDiffRequests.RequestContext at = ReviewTabProvider.requestContextFor(
-                new ReviewTabProvider.FileAt(row, "n4"), file, left, right, fragments);
-        assertEquals(Side.RIGHT, at.plan().scrollToSide());
-        assertEquals(3, at.plan().scrollToLine());
     }
 
     @Test
@@ -225,30 +193,7 @@ class ReviewTabProviderTest {
     }
 
     @Test
-    void theDecorationsPlaceEachTakeAtItsHunksFirstChangedRow() {
-        UnifiedDiff.Hunk added = hunk(ctx(1, 1, "one"), add(2, "two"), ctx(2, 3, "three"));
-        UnifiedDiff.Hunk removed = hunk(ctx(9, 10, "nine"), del(10), ctx(11, 11, "eleven"));
-        UnifiedDiff.FileDiff file = file("src/A.java", added, removed);
-        HunkTake onAdded = new HunkTake(HunkDigest.of("src/A.java", added), "Adds two.",
-                HunkTake.Alignment.ALIGNED, "", List.of(), Instant.EPOCH);
-        HunkTake onRemoved = new HunkTake(HunkDigest.of("src/A.java", removed), "Removes ten.",
-                HunkTake.Alignment.CONTEXT, "", List.of(), Instant.EPOCH);
-        HunkTake elsewhere = new HunkTake("other-digest", "Elsewhere.", HunkTake.Alignment.ALIGNED, "", List.of(),
-                Instant.EPOCH);
-        ReviewTabModel.FileRow row = ReviewTabModel.snapshot(new ReviewTabModel.Inputs(diff(file), List.of(),
-                List.of(), Optional.empty())).files().getFirst();
-
-        ReviewDiffInlays.Decorations decorations = ReviewTabProvider.decorationsFor(row, List.of(),
-                List.of(elsewhere, onRemoved, onAdded));
-
-        assertEquals(List.of(
-                new ReviewDiffInlays.TakeMark(new ReviewDiffRequests.ScrollTarget(Side.RIGHT, 1), onAdded),
-                new ReviewDiffInlays.TakeMark(new ReviewDiffRequests.ScrollTarget(Side.LEFT, 9), onRemoved)),
-                decorations.takes(), "in hunk order, on the side of the first changed row; other hunks' takes stay out");
-    }
-
-    @Test
-    void theDecorationsCarryEveryUnresolvedFindingOfTheFileWhateverItsTriage() {
+    void aHunkDiffCarriesEveryUnresolvedFindingOnItsRowsWhateverItsTriage() {
         UnifiedDiff.FileDiff file = file("src/A.java",
                 hunk(ctx(1, 1, "one"), add(2, "two"), del(3), ctx(4, 3, "last")));
         ReviewAnnotation proposed = finding("f-proposed", "src/A.java", "n2", Triage.PROPOSED,
@@ -271,7 +216,7 @@ class ReviewTabProviderTest {
         ReviewTabModel.FileRow row = snapshot.files().stream()
                 .filter(f -> f.path().equals("src/A.java")).findFirst().orElseThrow();
 
-        ReviewDiffInlays.Decorations decorations = ReviewTabProvider.decorationsFor(row,
+        ReviewDiffInlays.Decorations decorations = ReviewTabProvider.hunkDecorations(row, 0,
                 List.of(proposed, confirmed, dismissed, sentConfirmed, resolved, otherFile));
 
         assertEquals("src/A.java", decorations.path());
@@ -279,12 +224,12 @@ class ReviewTabProviderTest {
                 "the current diff's row keys, both sides");
         assertEquals(ReviewFindingPlacement.firstHunkFallback(file), decorations.firstHunkFallback());
         assertEquals(List.of(proposed, confirmed, dismissed, sentConfirmed), decorations.findings(),
-                "every unresolved finding of the file — CONFIRMED and DISMISSED keep their cards and "
+                "every unresolved finding on the hunk — CONFIRMED and DISMISSED keep their cards and "
                         + "their Undo — while resolved findings and other files' findings stay out");
     }
 
     @Test
-    void aSectionCardsFragmentsAreItsOwnHunksAtTheirAbsoluteLines() {
+    void aHunkDiffsFragmentsAreItsOwnHunksAtTheirAbsoluteLines() {
         UnifiedDiff.Hunk first = hunk(ctx(1, 1, "one"), add(2, "two"), add(3, "three"), ctx(2, 4, "four"));
         UnifiedDiff.Hunk second = hunk(ctx(9, 11, "nine"), del(10), ctx(11, 12, "eleven"));
         UnifiedDiff.FileDiff file = file("src/A.java", first, second);
@@ -296,7 +241,7 @@ class ReviewTabProviderTest {
         List<LineFragment> fragments = ReviewFragments.fragmentsFor(onlySecond,
                 "one\nfour\nl3\nl4\nl5\nl6\nl7\nl8\nnine\nten\neleven\n",
                 "one\ntwo\nthree\nfour\nl3\nl4\nl5\nl6\nl7\nl8\nnine\neleven\n");
-        assertEquals(1, fragments.size(), "the first hunk is not a change on the card");
+        assertEquals(1, fragments.size(), "the first hunk is not a change in the hunk diff");
         assertEquals(9, fragments.getFirst().getStartLine1(), "the deletion at old line 10 (0-based 9)");
         assertEquals(10, fragments.getFirst().getEndLine1());
         assertEquals(11, fragments.getFirst().getStartLine2(), "paired after the omitted hunk's two insertions");
@@ -304,7 +249,7 @@ class ReviewTabProviderTest {
     }
 
     @Test
-    void aSectionCardsDecorationsAreTheFindingsOnItsHunksRows() {
+    void aHunkDiffsDecorationsAreTheFindingsOnItsHunksRows() {
         UnifiedDiff.Hunk first = hunk(ctx(1, 1, "one"), add(2, "two"), ctx(2, 3, "three"));
         UnifiedDiff.Hunk second = hunk(ctx(9, 10, "nine"), del(10), ctx(11, 11, "eleven"));
         UnifiedDiff.FileDiff file = file("src/A.java", first, second);
@@ -318,7 +263,7 @@ class ReviewTabProviderTest {
                 List.of(onFirst, onSecond));
 
         assertEquals(Set.of("n10", "o10", "n11"), decorations.rowKeys(), "only the second hunk's rows");
-        assertEquals(List.of(onSecond), decorations.findings(), "the first hunk's finding stays off the card");
+        assertEquals(List.of(onSecond), decorations.findings(), "the first hunk's finding stays off the hunk diff");
         assertEquals(ReviewFindingPlacement.firstHunkFallback(ReviewTabProvider.onlyHunk(file, 1)),
                 decorations.firstHunkFallback());
     }
@@ -336,74 +281,6 @@ class ReviewTabProviderTest {
         assertEquals(1, selections.size(), "the target is consumed once");
         assertEquals("src/A.java", selections.get(0)[0]);
         assertEquals("f1", selections.get(0)[1]);
-    }
-
-    // ---- the decoration generation guard --------------------------------------
-
-    /**
-     * T9's fix: every asynchronous decoration producer is generation-safe,
-     * not just the selection's identity check. The tokens below model the
-     * deterministic queue of old and new completions — an older
-     * computation mints first, a newer one after it, and the applies are
-     * checked in the order the EDT would run them — and the newer
-     * file's/state's apply wins while the older one's is always dropped.
-     */
-    @Test
-    void aNewerSelectionsDecorationsWinAndTheOlderFileNeverReapplies() {
-        ReviewTabProvider.DecorationGate gate = new ReviewTabProvider.DecorationGate();
-        ReviewTabProvider.DecorationGate.Token olderFile = gate.begin("rs_a", "src/A.java");
-        // The selection moved to another file before the older file's
-        // completion landed on the EDT.
-        ReviewTabProvider.DecorationGate.Token newerFile = gate.begin("rs_a", "src/B.java");
-        assertTrue(gate.applies(newerFile, "rs_a", "src/B.java"),
-                "the newer file's decorations apply");
-        assertFalse(gate.applies(olderFile, "rs_a", "src/A.java"),
-                "a completion computed for the older file never overwrites the newer file's decorations");
-        // The other queueing order too — the older apply queued behind the
-        // newer one — still only the newer token is current.
-        assertFalse(gate.applies(olderFile, "rs_a", "src/A.java"),
-                "the older file's decorations cannot reapply after the newer file's landed");
-    }
-
-    @Test
-    void staleSamePathAnnotationsCannotReapplyOverTheFresherState() {
-        ReviewTabProvider.DecorationGate gate = new ReviewTabProvider.DecorationGate();
-        // The selection's build read the file's annotations first…
-        ReviewTabProvider.DecorationGate.Token staleRead = gate.begin("rs_a", "src/A.java");
-        // …then a store/scope/snapshot refresh re-read the same file: the
-        // same path, a fresher read, a newer generation.
-        ReviewTabProvider.DecorationGate.Token freshRead = gate.begin("rs_a", "src/A.java");
-        assertTrue(gate.applies(freshRead, "rs_a", "src/A.java"),
-                "the fresher same-path read applies");
-        assertFalse(gate.applies(staleRead, "rs_a", "src/A.java"),
-                "the stale same-path annotations cannot reapply over the fresher state's decorations");
-    }
-
-    @Test
-    void aBareSelectionChangeAScopeChangeAndAPathChangeEachDropAnInFlightApply() {
-        ReviewTabProvider.DecorationGate gate = new ReviewTabProvider.DecorationGate();
-        ReviewTabProvider.DecorationGate.Token inFlight = gate.begin("rs_a", "src/A.java");
-        // The selection changed to a row nothing is scheduled for (the
-        // file left the snapshot, say): no newer computation will come —
-        // the generation bump alone retires the in-flight one.
-        gate.invalidate();
-        assertFalse(gate.applies(inFlight, "rs_a", "src/A.java"),
-                "a selection change invalidates every in-flight decoration computation");
-
-        // A scope re-resolved: an in-flight computation for the old scope
-        // is stale even at the newest generation.
-        ReviewTabProvider.DecorationGate.Token oldScope = gate.begin("rs_a", "src/A.java");
-        assertFalse(gate.applies(oldScope, "rs_b", "src/A.java"),
-                "decorations computed for an older scope never apply to the current one");
-        assertTrue(gate.applies(oldScope, "rs_a", "src/A.java"),
-                "the scope it was computed for is still current: it applies");
-
-        // The selected file changed without a new generation: the path
-        // check alone retires the in-flight computation.
-        ReviewTabProvider.DecorationGate.Token otherPath = gate.begin("rs_b", "src/B.java");
-        assertFalse(gate.applies(otherPath, "rs_b", "src/A.java"),
-                "decorations computed for the previously selected path never apply");
-        assertTrue(gate.applies(otherPath, "rs_b", "src/B.java"));
     }
 
     // ---- the batched decisions hand-off (pure pieces) ---------------------------
@@ -822,5 +699,46 @@ class ReviewTabProviderTest {
         assertEquals(WorkbenchState.Mode.LOCAL, ReviewTabProvider.modeOf(local));
         assertEquals(WorkbenchState.Mode.PR, ReviewTabProvider.modeOf(pr));
         assertEquals("PR #12", ReviewTabProvider.subjectOf(pr));
+    }
+
+    @Test
+    void aHunkCommentWaitsForThePrInAPullRequestReviewAndGoesToTheSessionInALocalOne() {
+        ReviewScope local = scope(Optional.of(SESSION));
+        ReviewScope pr = new ReviewScope("rs_a", ReviewScope.Kind.WORKTREE, Path.of("/repo"),
+                Optional.of(Path.of("/repo/.wt/a")), "base0", "head0",
+                Optional.of(new ReviewScope.PullRequestRef(12, Optional.empty())), Optional.of(SESSION),
+                Optional.empty());
+        DiffSelection.Range range = new DiffSelection.Range("src/A.java", "n2", "n3", false);
+
+        ReviewAnnotation inPr = ReviewTabProvider.humanComment(pr, range, "Rename it", Severity.QUESTION, AT);
+        OutboxModel.Snapshot prLane = OutboxModel.snapshot(List.of(inPr), true, true);
+        assertEquals(List.of(inPr), prLane.forPr().stream().map(OutboxModel.Item::finding).toList());
+        assertTrue(prLane.toFix().isEmpty(), "a PR review's comment is not sent to the session");
+
+        ReviewAnnotation inLocal = ReviewTabProvider.humanComment(local, range, "Rename it", Severity.QUESTION, AT);
+        OutboxModel.Snapshot localLane = OutboxModel.snapshot(List.of(inLocal), true, false);
+        assertEquals(List.of(inLocal), localLane.toFix().stream().map(OutboxModel.Item::finding).toList());
+        assertFalse(inLocal.postToPr());
+        assertEquals(List.of(new ReviewAnnotation.Message("You", AT, "Rename it")), inLocal.thread());
+    }
+
+    @Test
+    void theInboxFileScopeFollowsTheHunkTheFlowShows() {
+        FlowModel.Hunk onB = new FlowModel.Hunk("h", "src/B.java", 0, "d", "1", "n1", 0, 1, Set.of("n1"), 0, false);
+        assertEquals(Optional.of("src/B.java"), ReviewTabProvider.followedFile(Optional.of(onB), "src/A.java"));
+        assertEquals(Optional.of("src/B.java"), ReviewTabProvider.followedFile(Optional.of(onB), null));
+        assertEquals(Optional.empty(), ReviewTabProvider.followedFile(Optional.of(onB), "src/B.java"),
+                "the same file rebuilds nothing");
+        assertEquals(Optional.empty(), ReviewTabProvider.followedFile(Optional.empty(), "src/A.java"),
+                "the finish screen keeps the last file");
+
+        ReviewAnnotation onA = finding("a", "src/A.java", "n1", Triage.PROPOSED, AnnotationStatus.OPEN);
+        ReviewAnnotation onBFinding = finding("b", "src/B.java", "n1", Triage.PROPOSED, AnnotationStatus.OPEN);
+        WorkbenchState state = WorkbenchState.of("repo", WorkbenchState.Mode.LOCAL,
+                new ReviewTabModel.Snapshot(List.of(), 0, 0), WorkbenchState.Filter.ALL,
+                ReviewTabProvider.followedFile(Optional.of(onB), "src/A.java"), WorkbenchState.View.CHANGES_ONLY,
+                List.of(onA, onBFinding),
+                new WorkbenchState.InboxChoice(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.FILE));
+        assertEquals(List.of(onBFinding), state.inbox().cards().stream().map(InboxModel.Card::finding).toList());
     }
 }

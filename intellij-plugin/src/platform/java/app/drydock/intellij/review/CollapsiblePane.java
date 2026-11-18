@@ -61,6 +61,8 @@ final class CollapsiblePane extends JPanel {
     /** True while the divider is pressed: only a pressed divider makes a proportion change user intent. */
     private boolean dividerPressed;
     private boolean collapsed;
+    /** Whether the content shows the hide button itself, so the pane has no header row. */
+    private boolean toggleDetached;
 
     /**
      * Wraps {@code content} in {@code splitter}'s first or second slot
@@ -138,6 +140,22 @@ final class CollapsiblePane extends JPanel {
         return strip;
     }
 
+    /**
+     * Hands the hide button to the content, which places it in its own top
+     * row; the pane then shows no header row of its own. EDT.
+     */
+    JButton detachHeaderToggle() {
+        toggleDetached = true;
+        header.remove(headerToggle);
+        header.setVisible(false);
+        return headerToggle;
+    }
+
+    /** The label the collapsed strip reads sideways, such as "Sections · 3 to go". EDT. */
+    void setStripLabel(String label) {
+        strip.setLabel(label);
+    }
+
     /** Collapses or expands the pane; {@code byUser} routes to {@link #onUserToggle}. EDT. */
     void setCollapsed(boolean next, boolean byUser) {
         if (!EventQueue.isDispatchThread()) {
@@ -149,7 +167,7 @@ final class CollapsiblePane extends JPanel {
         collapsed = next;
         content.setVisible(!next);
         strip.setVisible(next);
-        header.setVisible(!next);
+        header.setVisible(!next && !toggleDetached);
         setMinimumSize(JBUI.size(next ? strip.getPreferredSize().width : minWidth, 0));
         if (next) {
             float proportion = splitter.getProportion();
@@ -220,13 +238,18 @@ final class CollapsiblePane extends JPanel {
      * (bottom to top). A click expands.
      */
     private static final class Strip extends JPanel {
-        private final String label;
+        private String label;
 
         Strip(String label) {
-            this.label = Objects.requireNonNull(label, "label");
             setOpaque(false);
-            setToolTipText("Show " + label);
             setPreferredSize(JBUI.size(24, 0));
+            setLabel(label);
+        }
+
+        void setLabel(String next) {
+            label = Objects.requireNonNull(next, "label");
+            setToolTipText("Show " + next);
+            repaint();
         }
 
         @Override protected void paintComponent(Graphics g) {
