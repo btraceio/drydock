@@ -1,0 +1,62 @@
+# cairn brief — topic: workspace-box remote mcp review ssh transport enrollment
+Searched 207 source(s) (global scratchpad + knowledgebase memories)
+
+## Design constraints (confirmed findings — honor these in the design)
+- [btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/find-delayed-tasks-decisions] (body:mcpx3, body:reviewx2, anchor:intellij-plugin/**) — Approved D1–D17/N1 requirements and P7–P9 safety clarifications
+    Canonical current requirements: docs/DelayedTasksRequirements.md. User approved
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/nodes/find-delayed-tasks-decisions.md  [verified@ 45e4a620]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/integrated-review/integrated-review/find-plugin-review-core-dormant] (tag:mcp, body:mcpx4, tag:review, title:review) — The plugin ships the review core and review_* router, but nothing in the platform glue uses them
+    - `intellij-plugin/src/main/java/app/drydock/review/` is byte-identical to the app's (diff -rq);
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-plugin-review-core-dormant.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/drydock-jb-giddy-bronze-falcon/project-sdlc-workflows/find-approved-scope] (body:workspace-boxx1, title:remote, body:remotex8, body:mcpx3) — Project workflow requirements and remote review scope are approved; implementation is not
+    Explicit user answers in the parent conversation, restored after the Pi host exited. These are product decisions, not claims that the current code implements them.
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/drydock-jb-giddy-bronze-falcon/project-sdlc-workflows/nodes/find-approved-scope.md  [verified@ bec9e0f7]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/feat-intellij-mvp/unattended-sessions/find-remote-ssh-sighup-on-disconnect] (tag:remote, title:remote, body:remotex19, tag:ssh) — A remote SSH session dies when Drydock disconnects: the remote agent gets SIGHUP
+    Remote sessions launch as `ssh -t <keepalive> -- <host> '<cd && exec claude>'`
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/unattended-sessions/nodes/find-remote-ssh-sighup-on-disconnect.md  [verified@ 807045d0]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/brave-dewy-sparrow/workspace-persistent-sessions/find-plugin-launch-path-pty] (body:remotex2, body:sshx1, anchor:intellij-plugin/src/platform/java/app/drydock/intellij/session/DrydockSessionService.java) — The IntelliJ plugin runs agents as children of the IDE on a Jediterm PTY; IDE quit kills every session
+    UI action -> `SessionDialogs.launchSession` -> `DrydockSessionService.prepareSession` +
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/brave-dewy-sparrow/workspace-persistent-sessions/nodes/find-plugin-launch-path-pty.md  [verified@ 4ad27e76]
+- [btraceio--drydock/integrated-review/integrated-review/find-p1-impl-gotchas] (tag:mcp, body:mcpx2, tag:review, body:reviewx2) — P1 implementation gotchas (planner + checker findings, 2026-10-22)
+    - Process end in production goes registry → `SessionEnds` (`endRecorder()`), not
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-p1-impl-gotchas.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/find-launch-and-mcp-seams] (tag:mcp, body:mcpx2, body:reviewx1, symbol:intellij-plugin/src/platform/java/app/drydock/intellij/session/DrydockSessionService.java) — Implementation seams and proven missing contracts
+    Source-verified in intellij-plugin at HEAD 45e4a620 (these launch paths have not
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/nodes/find-launch-and-mcp-seams.md  [verified@ 45e4a620]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/integrated-review/integrated-review/find-review-tab-diff-spike-code] (title:review, body:reviewx5, symbol:intellij-plugin/src/main/java/app/drydock/process/ProcessRunner.java) — P2 spikes 1-2 built: Review tab provider + CUSTOM_DIFF_COMPUTER diff chain (branch review-tab-spike)
+    Spike code on branch `review-tab-spike` (throwaway, package
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-review-tab-diff-spike-code.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+
+## Unresolved (open questions / hypotheses — design risks)
+- [btraceio--drydock/brave-dewy-sparrow/workspace-persistent-sessions/hyp-box-session-design] (title:remote, body:remotex7, body:mcpx2, body:sshx7) — Shape of the feature: plugin-driven shared box, remote tmux sessions, on-box gateway-only proxy
+    1. **Shared box, N sessions.** One workspace box (user-named, e.g.
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/brave-dewy-sparrow/workspace-persistent-sessions/nodes/hyp-box-session-design.md  [verified@ 4ad27e76]
+- [btraceio--drydock/feat-review-tour/lsp-tier3-integration/q-lsp-transport] (tag:review, tag:transport, symbol:intellij-plugin/src/main/java/app/drydock/process/ProcessRunner.java) — Can a long-lived bidirectional stdio LSP server live inside the house process rules?
+    The house rule says every external spawn goes through ProcessRunner —
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-review-tour/lsp-tier3-integration/nodes/q-lsp-transport.md  [verified@ 3ddb653e]
+- [btraceio--drydock/feat-review-tour/lsp-tier3-integration/q-lsp-server-discovery] (tag:review, body:reviewx1, symbol:intellij-plugin/src/main/java/app/drydock/process/ProcessRunner.java) — How does drydock learn where jdt.ls and the JDK live?
+    Decision already made in the prior investigation
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-review-tour/lsp-tier3-integration/nodes/q-lsp-server-discovery.md  [verified@ 3ddb653e]
+
+## Evidence (read on demand)
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-design-handoff-mvp  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-design-handoff-mvp.md
+- btraceio--drydock/brisk-ivory-egret/writing-any-code-thoroughly/ev-jira-group-test-verification  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/brisk-ivory-egret/writing-any-code-thoroughly/evidence/ev-jira-group-test-verification.md
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-mvp-surface-status  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-mvp-surface-status.md
+- btraceio--drydock/improve-the-navigation/writing-any-code-thoroughly/ev-navigation-pr-handoff  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/improve-the-navigation/writing-any-code-thoroughly/evidence/ev-navigation-pr-handoff.md
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-v2-implementation  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-v2-implementation.md
+- btraceio--drydock/feat-review-tour/lsp-tier3-integration/ev-process-rules-today  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-review-tour/lsp-tier3-integration/evidence/ev-process-rules-today.md
+- btraceio--drydock/feat-intellij-mvp/unattended-sessions/ev-indrydock-tmux-spike  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/unattended-sessions/evidence/ev-indrydock-tmux-spike.md
+- btraceio--drydock/zippy-silky-pangolin/design-plugin-system-actions/ev-remote-and-platform  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/zippy-silky-pangolin/design-plugin-system-actions/evidence/ev-remote-and-platform.md
+- btraceio--drydock/feat-review-tour/lsp-tier3-integration/ev-local-machine  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-review-tour/lsp-tier3-integration/evidence/ev-local-machine.md
+
+---
+22 matching node(s). Read a node's full reasoning chain on demand —
+cite the node ids in your design/RFC so the loop is auditable.
+Then record them: cairn cite <doc>
