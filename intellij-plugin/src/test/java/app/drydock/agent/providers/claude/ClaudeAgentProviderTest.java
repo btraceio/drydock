@@ -167,6 +167,36 @@ class ClaudeAgentProviderTest {
                 command.subList(15, command.size()));
     }
 
+    /**
+     * The headless run pre-approves edits and git/gh through Bash. That is a
+     * pre-approved set, not a restriction: {@code --allowedTools} denies
+     * nothing, so the user's own permissions may allow more, and no
+     * denial flag is passed (none is probe-verified).
+     */
+    @Test
+    void headlessWriteRunResumesTheConversationPreApprovingEditsAndGitGhWithNoPlanMode(
+            @org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("claude"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        // Never init-ed: the detached watcher only discovers the executable.
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(executable), null, noDdtool());
+
+        List<String> command = provider.buildHeadlessWriteCommand(dir.resolve("wt"), dir.resolve("babysit"),
+                "conversation-42", "read the delta").orElseThrow();
+
+        assertEquals(executable.toString(), command.get(14));
+        assertEquals(List.of("--print", "--resume", "conversation-42", "--add-dir", dir.resolve("babysit").toString(),
+                        "--permission-mode", "acceptEdits", "--allowedTools",
+                        "Read Glob Grep Edit MultiEdit Write Bash(git:*) Bash(gh:*)", "--output-format", "text", "--",
+                        "read the delta"),
+                command.subList(15, command.size()));
+        assertFalse(command.contains("plan"), command.toString());
+        assertFalse(command.contains("--mcp-config"), command.toString());
+        assertFalse(command.contains("--disallowedTools") || command.contains("--tools"),
+                "no unverified denial flag: " + command);
+    }
+
     @Test
     void transferSummaryMakesTheApiKeyHelperReachable(@org.junit.jupiter.api.io.TempDir Path dir)
             throws Exception {

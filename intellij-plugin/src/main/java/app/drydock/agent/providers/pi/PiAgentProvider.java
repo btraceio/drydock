@@ -45,6 +45,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -284,6 +285,36 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
+     * {@code piProcessCommand --session <id> --print -- <prompt>}: the
+     * transfer command without {@code --no-tools}, so Pi's own tools (read,
+     * bash, edit, write) are available; Pi has no permission prompts and no
+     * working-directory confinement, so {@code sharedDirectory} needs no
+     * flag. None of the MCP, activity or initial-prompt {@code -e}
+     * extensions the interactive {@code piCommand} loads: no Drydock MCP
+     * server runs while the IDE is closed and nobody watches activity. It
+     * does carry the per-launch {@code PI_SESSION_ID} assignment the
+     * interactive create and resume supply (see {@code piCommand}): Pi
+     * resolves it from its launch environment when it loads {@code
+     * models.json}, so a provider config that sends it would fail auth
+     * headlessly without it. A fresh id per run, as per interactive launch;
+     * an {@code env} assignment in the argv, never a shell.
+     */
+    @Override
+    public Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,
+                                                             String agentSessionId, String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = piProcessCommand(executable);
+            // After "/usr/bin/env -u PI_CODING_AGENT": an env assignment, before the command.
+            command.add(3, PI_SESSION_ID_VAR + "=" + UUID.randomUUID());
+            command.addAll(List.of("--session", agentSessionId, "--print", "--", prompt));
+            return List.copyOf(command);
+        });
+    }
+
+    /** The per-launch session id variable Pi's {@code models.json} may reference. */
+    static final String PI_SESSION_ID_VAR = "PI_SESSION_ID";
+
+    /**
      * An argv-safe Pi prefix for background probes and transfer summaries.
      *
      * <p>A Node-script install is invoked through the resolved interpreter.
@@ -430,7 +461,7 @@ public final class PiAgentProvider implements AgentProvider {
         // launch env at config-load time, so a launch without it (e.g. drydock started from
         // a fresh shell) fails provider auth. drydock sets it per launch -- a non-secret id,
         // so it rides the env argv like DRYDOCK_EVAL.
-        String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
+        String piSessionId = PI_SESSION_ID_VAR + "=" + AgentCommands.shellQuote(UUID.randomUUID().toString()) + " ";
         boolean hasMcp = configFile.isPresent() || !stdioServers.isEmpty();
         CompletableFuture<Path> mcp = hasMcp ? extensionFuture(extensionFile, installer) : null;
         CompletableFuture<Path> evalSetup = eval ? extensionFuture(evalExtensionFile, evalInstaller) : null;

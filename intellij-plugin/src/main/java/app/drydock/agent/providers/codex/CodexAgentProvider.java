@@ -16,15 +16,20 @@ import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
 import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.codex.internal.CodexExecHelpProbe;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.agent.providers.codex.internal.CodexRolloutStore;
 import app.drydock.agent.providers.codex.internal.CodexVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 /**
@@ -32,6 +37,8 @@ import java.util.stream.Collectors;
  * remote, no activity badges.
  */
 public final class CodexAgentProvider implements AgentProvider {
+
+    private static final Logger LOG = System.getLogger(CodexAgentProvider.class.getName());
 
     // Codex nested-sandbox markers (verified in the binary). Preserve CODEX_HOME.
     private static final List<String> ENV_SCRUB = List.of("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED");
@@ -46,6 +53,7 @@ public final class CodexAgentProvider implements AgentProvider {
     private static final String TOKEN_ENV_VAR = "DRYDOCK_SESSION_TOKEN";
 
     private final CodexExecutableLocator locator;
+    private final ConcurrentMap<Path, CodexExecHelpProbe.Result> headlessProbeCache = new ConcurrentHashMap<>();
     private CodexConversationSource conversationSource;
     private SessionIdDiscovery idDiscovery;
 
@@ -211,6 +219,44 @@ public final class CodexAgentProvider implements AgentProvider {
         return locator.locate().map(executable -> List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
                 "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
                 "--sandbox", "read-only", "resume", agentSessionId, prompt));
+    }
+
+    /**
+     * Detached Codex runs use {@code workspace-write} and add the babysit directory as a writable root. This command
+     * is available only when a bounded {@code exec --help} capability probe advertises both required options; probe
+     * failures and unsupported CLIs fail closed so the watcher leaves the event pending for the IDE. The probe is
+     * cached only for definite results. No MCP overrides: no Drydock server runs while the IDE is closed.
+     */
+    @Override
+    public Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,
+                                                             String agentSessionId, String prompt) {
+        Optional<Path> located = locator.locate();
+        if (located.isEmpty()) {
+            LOG.log(Level.WARNING, "Detached Codex write unavailable: no executable at " + locator.describeSearched());
+            return Optional.empty();
+        }
+
+        Path executable = located.get();
+        Path cacheKey = executable.toAbsolutePath().normalize();
+        CodexExecHelpProbe.Result probe = headlessProbeCache.get(cacheKey);
+        if (probe == null) {
+            probe = CodexExecHelpProbe.probe(executable);
+            if (probe.cacheable()) {
+                CodexExecHelpProbe.Result previous = headlessProbeCache.putIfAbsent(cacheKey, probe);
+                if (previous != null) {
+                    probe = previous;
+                }
+            }
+        }
+        if (!probe.supported()) {
+            LOG.log(Level.WARNING, "Detached Codex write unavailable for " + executable + ": " + probe.reason());
+            return Optional.empty();
+        }
+
+        return Optional.of(List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                "--sandbox", "workspace-write", "--add-dir", sharedDirectory.toAbsolutePath().normalize().toString(),
+                "resume", agentSessionId, prompt));
     }
 
     /**
