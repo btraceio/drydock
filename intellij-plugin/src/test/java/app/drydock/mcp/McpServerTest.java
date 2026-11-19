@@ -675,6 +675,10 @@ class McpServerTest {
         assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf("session_rename"));
         // unknown tools are reads, not writes
         assertEquals(McpActivityLog.Direction.OUTBOUND, McpServer.directionOf("repos_list"));
+        // the babysitting tools all write (a pairing, a rerun counter, an escalation)
+        for (String babysit : McpToolRouter.BABYSIT_TOOLS) {
+            assertEquals(McpActivityLog.Direction.INBOUND, McpServer.directionOf(babysit), babysit);
+        }
     }
 
     @Test
