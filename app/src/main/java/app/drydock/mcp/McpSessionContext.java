@@ -347,4 +347,41 @@ public interface McpSessionContext {
      * the session already tracks is a silent no-op success.</p>
      */
     void reclaimConversation(ManagedSessionId caller, String newAgentSessionId) throws McpToolException;
+
+    /** How a {@code session_message} delivery attempt ended. */
+    enum MessageOutcome {
+        /** The line was typed into the live terminal, or parked in the hold
+         *  slot of a tab whose surface is still attaching (see
+         *  {@code TerminalBridge#sendPrompt}); both reach the process. */
+        DELIVERED,
+        /** The target session has no open tab. */
+        NO_TAB,
+        /** The target session's tab exists but its terminal is closing. */
+        UNWRITABLE,
+        /** The target runs a plain shell, so a message would execute as a
+         *  shell command rather than reach an agent. */
+        TERMINAL_TARGET
+    }
+
+    /**
+     * Types {@code message} into the target session's terminal and submits
+     * it ({@code session_message}). The implementation composes the typed
+     * line -- prefixing it with the caller's attribution, collapsing
+     * whitespace to one line -- and never types the raw argument: a message
+     * the receiving agent cannot trace to a sender is a prompt injection
+     * with no return address, and an embedded newline would submit early.
+     *
+     * <p>{@code caller} is validated live by the router; the target is
+     * resolved here, because the terminal-kind refusal needs the target's
+     * {@code ManagedAgentSession}, which the router's {@code sessions_list}
+     * view does not carry. The implementation returns refusals as outcomes
+     * ({@code NO_TAB}, {@code UNWRITABLE}, {@code TERMINAL_TARGET}), and the
+     * ROUTER translates every one of them into a thrown refusal -- from the
+     * calling agent's side a refused delivery is indistinguishable from a
+     * failed one, both surface as tool errors. Only a timeout or the
+     * caller/target vanishing mid-call reaches the implementation as a
+     * throw.</p>
+     */
+    MessageOutcome deliverMessage(ManagedSessionId caller, ManagedSessionId target, String message)
+            throws McpToolException;
 }

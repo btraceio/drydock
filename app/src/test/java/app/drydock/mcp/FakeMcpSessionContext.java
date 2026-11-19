@@ -462,4 +462,38 @@ final class FakeMcpSessionContext implements McpSessionContext {
         }
         reclaimedTo = newAgentSessionId;
     }
+
+    private McpSessionContext.MessageOutcome messageOutcome = McpSessionContext.MessageOutcome.DELIVERED;
+    private McpToolException messageFailure;
+    private final List<String> deliveredMessages = new ArrayList<>();
+    private final List<ManagedSessionId> messageTargets = new ArrayList<>();
+
+    /** Canned answer for the next delivery -- the fake has no terminals. */
+    void setMessageOutcome(McpSessionContext.MessageOutcome messageOutcome) {
+        this.messageOutcome = messageOutcome;
+    }
+
+    /** When set, {@link #deliverMessage} throws this instead of recording. */
+    void setMessageFailure(McpToolException messageFailure) {
+        this.messageFailure = messageFailure;
+    }
+
+    List<String> deliveredMessages() {
+        return deliveredMessages;
+    }
+
+    List<ManagedSessionId> messageTargets() {
+        return messageTargets;
+    }
+
+    @Override
+    public McpSessionContext.MessageOutcome deliverMessage(ManagedSessionId caller, ManagedSessionId target,
+                                                           String message) throws McpToolException {
+        if (messageFailure != null) {
+            throw messageFailure;
+        }
+        messageTargets.add(target);
+        deliveredMessages.add(message);
+        return messageOutcome;
+    }
 }

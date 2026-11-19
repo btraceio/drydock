@@ -51,6 +51,15 @@ public final class McpSessionRegistry {
      */
     public static final int MAX_HANDOFFS_PER_SESSION = 40;
 
+    /**
+     * Messages one session may type into another's terminal. Every attempt
+     * costs an FX-thread hop and a keystroke-by-keypoint submission into a
+     * live TUI -- the most disruptive thing an agent can do to a sibling --
+     * so the cap matches the handoff budget: generous for real coordination,
+     * fatal for a loop.
+     */
+    public static final int MAX_MESSAGES_PER_SESSION = 40;
+
     /** Whether a session may create worktrees and start further sessions. */
     public enum Spawn {
         /** A session the human started. */
@@ -67,6 +76,7 @@ public final class McpSessionRegistry {
     private final Map<ManagedSessionId, AtomicInteger> sessionsStarted = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> renamesApplied = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> handoffsApplied = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> messagesSent = new ConcurrentHashMap<>();
 
     /** Returns this session's token, minting one on first call. Idempotent per session. */
     public String mint(ManagedSessionId sessionId, Spawn spawn) {
@@ -167,6 +177,25 @@ public final class McpSessionRegistry {
     /** Releases a handoff charge whose call then failed outright. */
     public void refundHandoff(ManagedSessionId sessionId) {
         refund(handoffsApplied, sessionId);
+    }
+
+    /**
+     * Charges one {@code session_message} attempt. Like {@link #chargeRename},
+     * a refused attempt is charged: it costs the same FX hop, and it explains
+     * itself, so the budget bounds looping rather than learning.
+     */
+    public void chargeMessage(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        AtomicInteger counter = messagesSent.computeIfAbsent(sessionId, id -> new AtomicInteger());
+        if (counter.incrementAndGet() > MAX_MESSAGES_PER_SESSION) {
+            counter.decrementAndGet();
+            throw new McpBudgetExhaustedException("This session has already sent its limit of "
+                    + MAX_MESSAGES_PER_SESSION + " messages to other sessions.");
+        }
+    }
+
+    /** Releases a message charge whose call then failed outright. */
+    public void refundMessage(ManagedSessionId sessionId) {
+        refund(messagesSent, sessionId);
     }
 
     private static void refund(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId) {

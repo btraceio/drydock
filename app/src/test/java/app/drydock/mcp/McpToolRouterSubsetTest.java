@@ -82,10 +82,10 @@ class McpToolRouterSubsetTest {
 
         List<JsonValue> descriptors = router.toolDescriptors();
 
-        assertEquals(16, descriptors.size());
+        assertEquals(17, descriptors.size());
         Set<String> expected = new HashSet<>(REVIEW_NAMES);
         expected.addAll(Set.of("worktree_create", "session_start", "session_rename",
-                "session_handoff", "repos_list", "sessions_list"));
+                "session_handoff", "session_message", "repos_list", "sessions_list"));
         assertEquals(expected, names(descriptors));
         // Unadvertised, but still dispatched: a full router must not call it unknown.
         context.sessionRunning = true;
