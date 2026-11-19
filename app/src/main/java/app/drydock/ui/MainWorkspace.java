@@ -4557,7 +4557,7 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     // however long the successor takes to launch. The
                     // completion handler's own sessionGone check makes this
                     // harmless to call twice.
-                    id -> sessionManager.deleteSession(id)
+                    id -> sessionManager.deleteSession(id, SessionManager.DeletionReason.HANDED_OFF)
                             .thenRun(() -> Platform.runLater(() -> dropHandedOffSessionTab(id))),
                     reviewScopeRegistry::rebind,
                     id -> sessionManager.handoffBriefs().stream()

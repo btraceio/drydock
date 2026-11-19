@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.app.SessionManager;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.WorktreeService;
 import org.junit.jupiter.api.Test;
@@ -68,14 +69,15 @@ class MergeFinishBranchDriftTest {
 
             List<ManagedSessionId> deleted = new ArrayList<>();
             WorktreeSessionCleanup cleanup = new WorktreeSessionCleanup(
-                    (root, wt, branch, force) -> service.remove(root, wt, branch), id -> {
+                    (root, wt, branch, force) -> service.remove(root, wt, branch), (id, reason) -> {
                 deleted.add(id);
                 return CompletableFuture.completedFuture(null);
             });
             ManagedSessionId sessionId = ManagedSessionId.newId();
 
             MergeFinishDecision.CleanupOutcome outcome =
-                    cleanup.run(sessionId, repo, worktree, "feat/x", plan, false).get();
+                    cleanup.run(sessionId, repo, worktree, "feat/x", plan, false,
+                            SessionManager.DeletionReason.MERGED_AND_FINISHED).get();
 
             assertTrue(outcome.worktreeRemoved(), "the worktree removal is still safe and must still happen");
             assertEquals(MergeFinishDecision.BranchResult.KEPT_MOVED, outcome.branch());

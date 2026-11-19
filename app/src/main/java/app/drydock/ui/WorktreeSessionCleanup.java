@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.app.SessionManager;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.BranchNotDeletedException;
 import app.drydock.git.WorktreeLockedException;
@@ -48,9 +49,9 @@ final class WorktreeSessionCleanup {
         CompletableFuture<Void> remove(Path repositoryRoot, Path worktree, Optional<String> branch, boolean force);
     }
 
-    /** Matches {@code SessionManager::deleteSession}. */
+    /** Matches {@code SessionManager::deleteSession(ManagedSessionId, DeletionReason)}. */
     interface SessionDeletion {
-        CompletableFuture<Void> delete(ManagedSessionId sessionId);
+        CompletableFuture<Void> delete(ManagedSessionId sessionId, SessionManager.DeletionReason reason);
     }
 
     private final WorktreeRemoval removal;
@@ -81,10 +82,12 @@ final class WorktreeSessionCleanup {
      *              worktree immediately before the forced removal and refuses
      *              when unshown changes appeared, so {@code true} only ever
      *              discards changes the user saw or fewer.
+     * @param reason the deliberate deletion intent forwarded only after successful worktree removal
      */
     CompletableFuture<MergeFinishDecision.CleanupOutcome> run(ManagedSessionId sessionId, Path repositoryRoot,
                                                               Path worktreeRoot, String branch,
-                                                              MergeFinishDecision.BranchDeletePlan plan, boolean force) {
+                                                              MergeFinishDecision.BranchDeletePlan plan, boolean force,
+                                                              SessionManager.DeletionReason reason) {
         // A blank branch name is never ours to pass to `git branch -D`
         // (WorktreeService.removeBlocking silently skips it), so treating it
         // as deletable here would report BranchResult.DELETED for a branch
@@ -99,7 +102,7 @@ final class WorktreeSessionCleanup {
         return attempt(() -> removal.remove(repositoryRoot, worktreeRoot, branchToDelete, force))
                 .handle((ignored, failure) -> classify(failure, effective))
                 .thenCompose(partial -> partial.worktreeRemoved()
-                        ? closeSession(sessionId, partial)
+                        ? closeSession(sessionId, reason, partial)
                         : CompletableFuture.completedFuture(partial));
     }
 
@@ -185,8 +188,9 @@ final class WorktreeSessionCleanup {
      * reflect what actually happened.
      */
     private CompletableFuture<MergeFinishDecision.CleanupOutcome> closeSession(
-            ManagedSessionId sessionId, MergeFinishDecision.CleanupOutcome partial) {
-        return attempt(() -> deletion.delete(sessionId)).handle((ignored, failure) -> {
+            ManagedSessionId sessionId, SessionManager.DeletionReason reason,
+            MergeFinishDecision.CleanupOutcome partial) {
+        return attempt(() -> deletion.delete(sessionId, reason)).handle((ignored, failure) -> {
             if (failure == null) {
                 return new MergeFinishDecision.CleanupOutcome(partial.worktreeRemoved(), partial.branch(),
                         true, partial.worktreeKeptReason());
