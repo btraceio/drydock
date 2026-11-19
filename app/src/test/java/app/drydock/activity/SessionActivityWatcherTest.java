@@ -81,11 +81,50 @@ class SessionActivityWatcherTest {
         writeState(activity, "sess-unseen", "attention");
         SessionActivityWatcher watcher = watcherOn(activity);
 
+        // The user switches to a tab the watcher has already polled: what is
+        // acknowledged is what the poll observed, so the first read here is
+        // what makes the attention acknowledgeable at all.
+        watcher.readBlocking();
         watcher.acknowledge("sess-seen");
         Map<String, SessionActivity> states = watcher.readBlocking();
 
         assertEquals(SessionActivity.IDLE, states.get("sess-seen"));
         assertEquals(SessionActivity.NEEDS_ATTENTION, states.get("sess-unseen"));
+    }
+
+    /**
+     * Regression: acknowledge used to store a constant NEEDS_ATTENTION no
+     * matter what the session was doing, so switching to a tab while it was
+     * busy armed a stale acknowledgement -- a question arriving within the
+     * next poll cycle then matched it and its badge stayed suppressed for the
+     * whole wait. What is recorded now is the state the user actually saw, so
+     * a later NEEDS_ATTENTION can never equal it.
+     */
+    @Test
+    void switchingToABusyTabDoesNotSuppressTheNextQuestionBadge(@TempDir Path dir) throws IOException {
+        Path activity = dir.resolve("activity");
+        writeState(activity, "sess", "busy");
+        SessionActivityWatcher watcher = watcherOn(activity);
+        assertEquals(SessionActivity.BUSY, watcher.readBlocking().get("sess"));
+
+        // The user looks at the tab while it is busy; the question lands right
+        // after the switch, before the next poll.
+        watcher.acknowledge("sess");
+        writeState(activity, "sess", "attention");
+
+        assertEquals(SessionActivity.NEEDS_ATTENTION, watcher.readBlocking().get("sess"));
+    }
+
+    /** A switch to a tab the watcher has not observed yet cannot suppress anything. */
+    @Test
+    void acknowledgingAnUnobservedSessionSuppressesNothing(@TempDir Path dir) throws IOException {
+        Path activity = dir.resolve("activity");
+        writeState(activity, "sess", "attention");
+        SessionActivityWatcher watcher = watcherOn(activity);
+
+        watcher.acknowledge("sess");
+
+        assertEquals(SessionActivity.NEEDS_ATTENTION, watcher.readBlocking().get("sess"));
     }
 
     /**
@@ -98,6 +137,7 @@ class SessionActivityWatcherTest {
         Path activity = dir.resolve("activity");
         writeState(activity, "sess", "attention");
         SessionActivityWatcher watcher = watcherOn(activity);
+        assertEquals(SessionActivity.NEEDS_ATTENTION, watcher.readBlocking().get("sess"));
         watcher.acknowledge("sess");
         assertEquals(SessionActivity.IDLE, watcher.readBlocking().get("sess"));
 

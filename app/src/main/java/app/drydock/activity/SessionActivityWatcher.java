@@ -49,8 +49,19 @@ public final class SessionActivityWatcher implements AutoCloseable {
      * Sessions whose current NEEDS_ATTENTION has already been seen by the
      * user (they switched to it). Cleared as soon as the underlying state
      * changes, so the next time Claude blocks on a human the badge returns.
+     * The value is the state the user actually saw -- never a constant -- so
+     * an acknowledgement taken while a session was busy can never collide
+     * with a NEEDS_ATTENTION that arrives later and suppress its badge.
      */
     private final Map<String, SessionActivity> acknowledged = new ConcurrentHashMap<>();
+
+    /**
+     * What each session last reported, so {@link #acknowledge} can record the
+     * state that was on screen when the user switched to a tab. Entries for
+     * sessions that stopped reporting are dropped with each poll; a session
+     * with no entry here has nothing to acknowledge yet.
+     */
+    private final Map<String, SessionActivity> observed = new ConcurrentHashMap<>();
 
     public SessionActivityWatcher(Path activityDirectory) {
         this(activityDirectory, Executors.newVirtualThreadPerTaskExecutor(), true);
@@ -91,6 +102,8 @@ public final class SessionActivityWatcher implements AutoCloseable {
             LOG.log(Level.WARNING, "Could not list activity directory " + activityDirectory + ": " + e.getMessage());
             return Map.of();
         }
+        observed.putAll(activities);
+        observed.keySet().retainAll(activities.keySet());
         activities.replaceAll(this::applyAcknowledgement);
         acknowledged.keySet().retainAll(activities.keySet());
         return Map.copyOf(activities);
@@ -127,13 +140,23 @@ public final class SessionActivityWatcher implements AutoCloseable {
     }
 
     /**
-     * Marks the session's current activity as seen, clearing its badge. Called
-     * when the user switches to a session -- the badge exists to say "this one
-     * needs you", and looking at it answers that.
+     * Marks the session's last observed activity as seen, clearing its badge.
+     * Called when the user switches to a session -- the badge exists to say
+     * "this one needs you", and looking at it answers that.
+     *
+     * <p>Only a state that was actually observed is recorded: switching to a
+     * tab whose session is busy must not suppress a NEEDS_ATTENTION that
+     * arrives moments later. If nothing has been observed yet (no poll has
+     * run), nothing is stored, so a pending badge survives until the user
+     * answers it or the state moves on.</p>
      */
     public void acknowledge(String agentSessionId) {
-        if (agentSessionId != null) {
-            acknowledged.put(agentSessionId, SessionActivity.NEEDS_ATTENTION);
+        if (agentSessionId == null) {
+            return;
+        }
+        SessionActivity seen = observed.get(agentSessionId);
+        if (seen != null) {
+            acknowledged.put(agentSessionId, seen);
         }
     }
 
@@ -151,6 +174,7 @@ public final class SessionActivityWatcher implements AutoCloseable {
             return CompletableFuture.completedFuture(null);
         }
         acknowledged.remove(agentSessionId);
+        observed.remove(agentSessionId);
         return CompletableFuture.runAsync(() -> {
             try {
                 Files.deleteIfExists(activityDirectory.resolve(agentSessionId));

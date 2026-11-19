@@ -136,6 +136,67 @@ class ClaudeHookInstallerTest {
         assertEquals(SessionActivity.BUSY, observedActivity(base));
     }
 
+    /**
+     * Claude sends no Notification hook while {@code AskUserQuestion} blocks
+     * on the user's answer (anthropics/claude-code #13830), so the pair of
+     * tool hooks is what lifts the session out of "busy" for the duration of
+     * the question -- and hands the word back when it is answered.
+     */
+    @Test
+    void askUserQuestionToolRaisesAttentionUntilAnswered(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "attention",
+                payload("PreToolUse", ",\"tool_name\":\"AskUserQuestion\",\"tool_input\":{\"questions\":[]}")));
+        assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
+
+        assertEquals(0, runHook(installer, base, "busy",
+                payload("PostToolUse", ",\"tool_name\":\"AskUserQuestion\",\"tool_response\":{}")));
+        assertEquals(SessionActivity.BUSY, observedActivity(base));
+    }
+
+    /** The generated settings must scope the AskUserQuestion hooks to that tool only. */
+    @Test
+    void askUserQuestionHooksAreMatcherScopedToThatTool(@TempDir Path base) throws IOException {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        String settings = Files.readString(installer.settingsFile(), StandardCharsets.UTF_8);
+
+        assertEquals(2, settings.split("\"AskUserQuestion\"", -1).length - 1,
+                "the matcher must scope exactly the Pre/PostToolUse pair");
+        assertEquals(1, settings.split("sh [^\"]*attention", -1).length - 1,
+                "attention is written by the AskUserQuestion PreToolUse hook only");
+    }
+
+    /** An MCP server asking the user through an elicitation dialog blocks on a human, too. */
+    @Test
+    void elicitationDialogNotificationsRaiseAttention(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"elicitation_dialog\"")));
+        assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"elicitation_url_dialog\"")));
+        assertEquals(SessionActivity.NEEDS_ATTENTION, observedActivity(base));
+    }
+
+    /** Completing an elicitation is chatter, not a blocked-on-human signal. */
+    @Test
+    void elicitationCompletionNotificationsDoNotRaiseAttention(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+
+        assertEquals(0, runHook(installer, base, "notify",
+                payload("Notification", ",\"notification_type\":\"elicitation_complete\"")));
+
+        assertEquals(SessionActivity.UNKNOWN, observedActivity(base));
+    }
+
     /** The generated settings must scope the bg hooks to the wait tools, not every tool call. */
     @Test
     void backgroundWaitHooksAreMatcherScopedToTheWaitTools(@TempDir Path base) throws IOException {
