@@ -39,6 +39,7 @@ import javax.swing.Icon;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +68,16 @@ final class TaskActions {
 
     private static final long REMOVE_TIMEOUT_SECONDS = 120;
     private static final long FLAG_TIMEOUT_SECONDS = 30;
+
+    /**
+     * The actions the context menu offers but the toolbar does not: the
+     * babysitting commands. They apply to few rows -- a session with an open
+     * PR, or either side of an engagement -- so as toolbar buttons they would
+     * stand greyed on nearly every selection (four more of them, crowding
+     * the buttons people use); the row menu is where they are found.
+     */
+    static final Set<TaskMenu.Item> MENU_ONLY = EnumSet.of(TaskMenu.Item.BABYSIT_PR,
+            TaskMenu.Item.STOP_BABYSITTING, TaskMenu.Item.SHOW_BABYSITTER, TaskMenu.Item.SHOW_WATCHED);
 
     private TaskActions() {
     }
@@ -206,18 +217,40 @@ final class TaskActions {
         actions.put(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES, removeWorktrees);
         actions.put(TaskMenu.Item.REMOVE_WORKTREES, removeWorktrees);
         actions.put(TaskMenu.Item.REMOVE_FROM_DRYDOCK, removeProject);
+        actions.put(TaskMenu.Item.BABYSIT_PR, task("Babysit This PR",
+                "Start a babysitter session that watches this session's pull request for conflicts and CI failures",
+                InboxList.BABYSITTER_ICON, BabysitActions::offersStart,
+                row -> notBusy(row) && BabysitActions.available(row.session().id()),
+                (presentation, row) -> presentation.setText(BabysitActions.startText(row)),
+                BabysitActions::start));
+        actions.put(TaskMenu.Item.STOP_BABYSITTING, task("Stop Babysitting",
+                "End this babysitting engagement and stop the babysitter's agent", AllIcons.Actions.Suspend,
+                BabysitActions::stoppable, row -> BabysitActions.available(row.session().id()),
+                BabysitActions::stop));
+        actions.put(TaskMenu.Item.SHOW_BABYSITTER, task("Go to Babysitter",
+                "Switch to the babysitter watching this session's pull request", AllIcons.Actions.Forward,
+                BabysitActions::showsBabysitter,
+                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(part.counterpart()))));
+        actions.put(TaskMenu.Item.SHOW_WATCHED, task("Go to Watched Session",
+                "Switch to the session whose pull request this babysitter watches", AllIcons.Actions.Back,
+                BabysitActions::showsWatched,
+                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(part.counterpart()))));
         return actions;
     }
 
     /**
      * Pure: the map's actions as the toolbar shows them — one button per
-     * action instance, in the enum's {@code values()} order. The removal
+     * action instance, in the enum's {@code values()} order, the
+     * {@link #MENU_ONLY} ones left out. The removal
      * action is one instance under several menu entries; a raw copy of the
      * map's values would add its button several times.
      */
     static List<AnAction> toolbarActions(Map<TaskMenu.Item, AnAction> actions) {
         List<AnAction> toolbar = new ArrayList<>();
         for (TaskMenu.Item item : TaskMenu.Item.values()) {
+            if (MENU_ONLY.contains(item)) {
+                continue;
+            }
             AnAction action = actions.get(item);
             if (action != null && !toolbar.contains(action)) {
                 toolbar.add(action);

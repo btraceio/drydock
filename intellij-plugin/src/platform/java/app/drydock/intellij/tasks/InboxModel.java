@@ -35,9 +35,11 @@ import java.util.Set;
  * by repository. Built from the rows {@link TaskTreeModel} already derives
  * (the ALL view, no search) and the task layer's rows; no I/O, no clock.
  *
- * <p>A session goes to the first group that takes it: Needs you
+ * <p>A session goes to the first group that takes it: Babysitting (a
+ * babysitter whose engagement is active), Needs you
  * ({@link DelayedTaskRows#needsYou(TaskRow)}: a running session waiting
- * for the user), Flagged, Running, else Idle. An assigned task in review
+ * for the user, or a watched session its babysitter escalated), Flagged,
+ * Running, else Idle. An assigned task in review
  * does not pin its session here -- the task shows as its own row under
  * In review, and the session's group follows its dot alone. A task goes
  * by its presentation: Blocked, In review, Ready to start
@@ -63,6 +65,8 @@ final class InboxModel {
         BLOCKED("Blocked", "blocked", false, true),
         IN_REVIEW("In review", "review", false, true),
         READY("Ready to start", "ready", false, true),
+        /** Babysitter sessions with an active engagement: their own section, never mixed into the others. */
+        BABYSITTING("Babysitting", "babysit", false, true),
         IDLE("Idle", "idle", true, true),
         DONE("Done today", "done", true, true);
 
@@ -96,9 +100,13 @@ final class InboxModel {
             return truncates;
         }
 
-        /** Whether the group's rows count as the project's activity (Idle and Done do not). */
+        /**
+         * Whether the group's rows count as the project's activity: Idle and
+         * Done do not, and neither do babysitters -- background helpers whose
+         * news reaches the human through the watched session's row.
+         */
         boolean active() {
-            return this != IDLE && this != DONE;
+            return this != IDLE && this != DONE && this != BABYSITTING;
         }
     }
 
@@ -385,8 +393,19 @@ final class InboxModel {
         return placed;
     }
 
-    private static GroupKind sessionKind(TaskRow row) {
-        if (DelayedTaskRows.needsYou(row)) {
+    /**
+     * A session's group. A babysitter with an active engagement goes to
+     * Babysitting before any other check, so it never mixes into the regular
+     * groups whatever its dot says; a watched session whose engagement needs
+     * the human (escalated) goes to Needs you -- an escalation is the
+     * babysitter asking for the human.
+     */
+    static GroupKind sessionKind(TaskRow row) {
+        if (row.babysit().filter(part -> part.role() == SessionBabysit.Role.BABYSITTER
+                && part.active()).isPresent()) {
+            return GroupKind.BABYSITTING;
+        }
+        if (DelayedTaskRows.needsYou(row) || row.babysit().filter(SessionBabysit::needsHuman).isPresent()) {
             return GroupKind.NEEDS_YOU;
         }
         if (row.session().flagged()) {

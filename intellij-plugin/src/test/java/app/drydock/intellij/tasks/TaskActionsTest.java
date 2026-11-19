@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -9,7 +11,9 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -211,8 +215,17 @@ class TaskActionsTest {
         // The removal action serves four menu entries but must be one button.
         assertEquals(1, Collections.frequency(toolbar, actions.get(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES)),
                 "the shared removal action must be one toolbar button");
-        assertEquals(Set.copyOf(actions.values()), Set.copyOf(toolbar), "every action, and no other");
-        assertEquals(actions.size() - 3, toolbar.size(), "four removal keys share one instance");
+        Set<AnAction> menuOnly = new HashSet<>();
+        TaskActions.MENU_ONLY.forEach(item -> menuOnly.add(actions.get(item)));
+        Set<AnAction> expected = new HashSet<>(actions.values());
+        expected.removeAll(menuOnly);
+        assertEquals(expected, Set.copyOf(toolbar), "every action but the menu-only ones, and no other");
+        assertTrue(Collections.disjoint(menuOnly, toolbar), "the babysitting commands are not toolbar buttons");
+        assertEquals(Set.of(TaskMenu.Item.BABYSIT_PR, TaskMenu.Item.STOP_BABYSITTING,
+                TaskMenu.Item.SHOW_BABYSITTER, TaskMenu.Item.SHOW_WATCHED), TaskActions.MENU_ONLY);
+        assertTrue(actions.keySet().containsAll(TaskActions.MENU_ONLY), "menu-only still means TaskActions owns it");
+        assertEquals(actions.size() - 3 - TaskActions.MENU_ONLY.size(), toolbar.size(),
+                "four removal keys share one instance");
         // values() is the toolbar's order: the enum's declaration order.
         assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.SHOW_HERE))
                 < toolbar.indexOf(actions.get(TaskMenu.Item.DEACTIVATE)));
@@ -243,9 +256,19 @@ class TaskActionsTest {
                         false, Optional.empty(), Optional.empty())),
                 row(true, new TaskPlacement.Here()));
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
+        // The babysitting rows: a session with an open branch PR (Babysit),
+        // and both sides of an active engagement (Stop and the two jumps).
+        TaskNode.TaskRow watched = row(false, new TaskPlacement.Idle(false));
+        TaskNode.TaskRow babysitter = row(true, new TaskPlacement.Here());
+        Map<ManagedSessionId, SessionBabysit> engagement = SessionBabysit.join(List.of(new BabysitPairing(
+                babysitter.session().id(), watched.session().id(), watched.session().repositoryId(), 7,
+                BabysitState.WATCHING)), List.of());
         List<TaskNode> shapes = List.of(
                 row(true, new TaskPlacement.OwnWindow()),
                 row(false, new TaskPlacement.Idle(false)),
+                withOpenPullRequest(row(false, new TaskPlacement.Idle(false))),
+                withBabysit(watched, engagement.get(watched.session().id())),
+                withBabysit(babysitter, engagement.get(babysitter.session().id())),
                 pullRequest(Optional.of("https://github.com/DataDog/repo/pull/7")),
                 new PullRequestRow(Path.of("/repo"), new OpenPullRequest(8, "Conflicts", "pr-8", "main",
                         false, Optional.empty(), Optional.empty(), true)),
@@ -283,6 +306,17 @@ class TaskActionsTest {
     private static ProjectRow project(IdleWorktree... inactive) {
         return new ProjectRow(SharedProject.local(RepositoryId.newId(), Path.of("/repo"), "repo", Instant.EPOCH),
                 false, false, List.of(), List.of(inactive), 0);
+    }
+
+    private static TaskNode.TaskRow withOpenPullRequest(TaskNode.TaskRow row) {
+        return new TaskNode.TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), Optional.of(new BranchPullRequest(7,
+                        PrLifecycle.OPEN, false, "feature/fix", "Fix the thing", Optional.empty())));
+    }
+
+    private static TaskNode.TaskRow withBabysit(TaskNode.TaskRow row, SessionBabysit part) {
+        return new TaskNode.TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest(), Optional.of(part));
     }
 
     private static TaskNode.TaskRow row(boolean running, TaskPlacement placement) {

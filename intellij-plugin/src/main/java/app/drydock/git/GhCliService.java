@@ -834,7 +834,7 @@ public final class GhCliService implements AutoCloseable {
         return true;
     }
 
-    private static PrInfo.PrLifecycle lifecycleOf(String raw) {
+    static PrInfo.PrLifecycle lifecycleOf(String raw) {
         return switch (raw.toUpperCase(Locale.ROOT)) {
             case "OPEN" -> PrInfo.PrLifecycle.OPEN;
             case "MERGED" -> PrInfo.PrLifecycle.MERGED;

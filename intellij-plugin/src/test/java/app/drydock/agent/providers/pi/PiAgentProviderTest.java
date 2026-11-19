@@ -166,6 +166,58 @@ class PiAgentProviderTest {
     }
 
     @Test
+    void headlessWriteRunPrintsOnTheExactConversationWithItsTools(@TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("pi"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        HostBinaryLocator noNode = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.empty(); }
+        };
+        PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(executable), noNode,
+                () -> PiCapabilities.of("1.3.0"));
+
+        List<String> command = provider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "conversation-42",
+                "read the delta").orElseThrow();
+
+        assertTrue(command.get(3).matches("PI_SESSION_ID=[0-9a-f-]{36}"), command.toString());
+        assertEquals(List.of("/usr/bin/env", "-u", "PI_CODING_AGENT", "<id>", executable.toString(),
+                        "--session", "conversation-42", "--print", "--", "read the delta"),
+                withIdMasked(command));
+    }
+
+    /**
+     * Parity with the interactive path: the headless run carries the same
+     * per-launch PI_SESSION_ID assignment that create and resume do (Pi reads
+     * it from its launch env when it loads models.json), fresh per run.
+     */
+    @Test
+    void headlessWriteRunCarriesThePerLaunchSessionIdAsInteractiveLaunchesDo(@TempDir Path dir) throws Exception {
+        Path executable = Files.writeString(dir.resolve("pi"), "#!/bin/sh\n");
+        assertTrue(executable.toFile().setExecutable(true));
+        HostBinaryLocator noNode = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.empty(); }
+        };
+        PiAgentProvider provider = new PiAgentProvider(new PiExecutableLocator(executable), noNode,
+                () -> PiCapabilities.of("1.3.0"));
+        provider.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+
+        String interactive = provider.buildResumeCommand(new ResumeContext(Optional.of("conversation-42"),
+                Optional.empty(), dir, Optional.empty(), Optional.empty())).command();
+        List<String> first = provider.buildHeadlessWriteCommand(dir, dir, "conversation-42", "go").orElseThrow();
+        List<String> second = provider.buildHeadlessWriteCommand(dir, dir, "conversation-42", "go").orElseThrow();
+
+        assertTrue(interactive.contains(PiAgentProvider.PI_SESSION_ID_VAR + "="), interactive);
+        assertEquals(1, first.stream().filter(arg -> arg.startsWith(PiAgentProvider.PI_SESSION_ID_VAR + "=")).count(),
+                first.toString());
+        assertTrue(first.indexOf(first.get(3)) < first.indexOf(executable.toString()),
+                "an env assignment, before the command: " + first);
+        assertFalse(first.get(3).equals(second.get(3)), "a fresh id per run, as per interactive launch");
+    }
+
+    private static List<String> withIdMasked(List<String> command) {
+        return command.stream().map(arg -> arg.startsWith("PI_SESSION_ID=") ? "<id>" : arg).toList();
+    }
+
+    @Test
     void transferSummaryPutsResolvedNodeOnPathForAShellLauncher(@TempDir Path dir) throws Exception {
         Path nodeDirectory = Files.createDirectory(dir.resolve("node-bin"));
         Path fakeNode = Files.createFile(nodeDirectory.resolve("node"));

@@ -5,6 +5,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.intellij.tasks.SessionBabysit;
 import app.drydock.intellij.ui.SessionDots;
 
 import com.intellij.icons.AllIcons;
@@ -87,12 +88,21 @@ final class AgentConsoleStrip extends JPanel {
      * strip and the tab surfaces cannot drift apart; {@code SHOW_AGENT} is
      * the detached tab's reconnect (A6) — the agent runs, just not in this
      * window, and the command reaches it without starting anything.
+     * {@code SHOW_WATCHED} and {@code SHOW_BABYSITTER} are babysitting's
+     * jumps to the other side of the tab's engagement.
      */
-    enum StripAction { DEACTIVATE, RESUME, START, SHOW_AGENT, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, DONE }
+    enum StripAction { DEACTIVATE, RESUME, START, SHOW_AGENT, TRANSFER, RENAME, SHOW_CHANGES, OPEN_PROJECT_WINDOW, DONE,
+        SHOW_WATCHED, SHOW_BABYSITTER }
 
     private final ActionLink title;
     private final JBLabel state = new JBLabel();
     private final JBLabel chip = new JBLabel();
+    /**
+     * The babysitting chip ({@link SessionBabysit#chipText}), monospace like
+     * the inbox row's: the engagement state, and on a watched session's tab
+     * the latest escalation's message while one stands.
+     */
+    private final JBLabel babysit = new JBLabel();
     private final JBLabel secondary = new JBLabel();
     /** {@code from <repo> ⑂ <branch>}: only on a tab hosted from another worktree. */
     private final JBLabel provenance = new JBLabel();
@@ -137,6 +147,8 @@ final class AgentConsoleStrip extends JPanel {
     private final JPanel commands = new JPanel(new FlowLayout(FlowLayout.RIGHT, JBUI.scale(2), 0));
     /** The overflow items, in menu order; their visibility and enablement are set by {@link #update}. */
     private final List<OverflowItem> overflow = new ArrayList<>();
+    private final OverflowItem showWatched;
+    private final OverflowItem showBabysitter;
 
     /** Which action {@link #primary} currently performs; see {@link #update}. */
     private StripAction primaryAction = StripAction.START;
@@ -166,6 +178,12 @@ final class AgentConsoleStrip extends JPanel {
         overflow.add(new OverflowItem(AgentStripText.TRANSFER_TO_PROVIDER,
                 SessionCommands.Command.TRANSFER.icon(), StripAction.TRANSFER,
                 "Drydock.AgentTab.Transfer"));
+        showWatched = new OverflowItem(AgentTabCommands.BABYSIT_WATCHED_LABEL, AllIcons.Actions.Back,
+                StripAction.SHOW_WATCHED, "Drydock.AgentTab.Babysit");
+        overflow.add(showWatched);
+        showBabysitter = new OverflowItem(AgentTabCommands.BABYSIT_BABYSITTER_LABEL, AllIcons.Actions.Forward,
+                StripAction.SHOW_BABYSITTER, "Drydock.AgentTab.Babysit");
+        overflow.add(showBabysitter);
 
         // One row; a narrow editor drops labels to icons (see doLayout)
         // rather than wrapping or clipping the last command (A4, A5).
@@ -183,6 +201,12 @@ final class AgentConsoleStrip extends JPanel {
         chip.setBorder(JBUI.Borders.compound(
                 JBUI.Borders.customLine(JBColor.border(), 1),
                 JBUI.Borders.empty(0, 4)));
+        // The small font's size is already scaled; only the family changes.
+        babysit.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBUI.Fonts.smallFont().getSize()));
+        babysit.setBorder(JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 1),
+                JBUI.Borders.empty(0, 4)));
+        babysit.setVisible(false);
         secondary.setForeground(UIUtil.getContextHelpForeground());
         provenance.setForeground(UIUtil.getContextHelpForeground());
 
@@ -193,6 +217,8 @@ final class AgentConsoleStrip extends JPanel {
         identity.add(state);
         identity.add(Box.createHorizontalStrut(JBUI.scale(8)));
         identity.add(chip);
+        identity.add(Box.createHorizontalStrut(JBUI.scale(8)));
+        identity.add(babysit);
         identity.add(Box.createHorizontalStrut(JBUI.scale(8)));
         identity.add(secondary);
         identity.add(Box.createHorizontalStrut(JBUI.scale(12)));
@@ -260,6 +286,50 @@ final class AgentConsoleStrip extends JPanel {
             }
             return item;
         }
+    }
+
+    private boolean anyOverflowVisible() {
+        for (OverflowItem item : overflow) {
+            if (item.visible) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Repaints the babysitting part of the strip for {@code part}, the tab's
+     * session's side of an engagement as the editor last read it: the chip,
+     * and the overflow menu's jump to the other side. Empty hides both.
+     * EDT only; the editor calls it after {@link #update} on every refresh.
+     */
+    void showBabysit(Optional<SessionBabysit> part) {
+        babysit.setVisible(part.isPresent());
+        part.ifPresent(found -> {
+            String text = found.chipText();
+            if (found.needsHuman() && found.escalation().isPresent()) {
+                text += ": " + SessionBabysit.summary(found.escalation().get().message(),
+                        BABYSIT_CHIP_SUMMARY_LIMIT);
+            }
+            babysit.setText(text);
+            babysit.setIcon(found.needsHuman() ? AllIcons.General.BalloonWarning : null);
+            babysit.setToolTipText(found.tooltipText());
+        });
+        showWatched.visible = part.filter(found -> found.role() == SessionBabysit.Role.BABYSITTER).isPresent();
+        showWatched.enabled = true;
+        showBabysitter.visible = part.filter(found -> found.role() == SessionBabysit.Role.WATCHED).isPresent();
+        showBabysitter.enabled = true;
+        more.setVisible(anyOverflowVisible());
+        revalidate();
+        repaint();
+    }
+
+    /** How much of an escalation's message the strip's chip carries; the tooltip has the longer form. */
+    static final int BABYSIT_CHIP_SUMMARY_LIMIT = 60;
+
+    /** The babysitting chip's text, or empty while it is hidden. */
+    Optional<String> babysitChip() {
+        return babysit.isVisible() ? Optional.of(babysit.getText()) : Optional.empty();
     }
 
     /** The labels of the overflow items currently offered, in menu order. */
@@ -572,7 +642,7 @@ final class AgentConsoleStrip extends JPanel {
         transfer.visible = running && !commands.transferring()
                 && SessionTransfer.available(session, activity);
         transfer.enabled = !commands.moving();
-        more.setVisible(openWindow.visible || transfer.visible);
+        more.setVisible(anyOverflowVisible());
 
         SessionCommands.Lifecycle lifecycle = SessionCommands.lifecycle(commands);
         primaryAction = switch (lifecycle) {

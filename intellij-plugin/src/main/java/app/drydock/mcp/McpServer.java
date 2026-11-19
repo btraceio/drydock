@@ -647,7 +647,7 @@ public final class McpServer implements AutoCloseable {
      */
     private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
             "review_reply", "review_tour", "review_check", "review_finding", "review_answer", "session_rename",
-            "session_handoff");
+            "session_handoff", "babysit_start", "ci_rerun", "babysit_escalate");
 
     static McpActivityLog.Direction directionOf(String tool) {
         return AGENT_WRITE_TOOLS.contains(tool)

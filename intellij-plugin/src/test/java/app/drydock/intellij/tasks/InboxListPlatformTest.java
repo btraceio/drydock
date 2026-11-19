@@ -1,6 +1,9 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.Escalation;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -46,6 +49,7 @@ import com.intellij.ui.icons.RowIcon;
 
 import javax.swing.JLabel;
 import javax.swing.Icon;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Point;
@@ -61,6 +65,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -470,5 +475,69 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 InboxList.icon(bare));
         String tooltip = InboxList.tooltip(ready, NOW);
         assertFalse(tooltip, tooltip.contains("conflicts") || tooltip.contains("failing CI"));
+    }
+
+    /** {@code row} with its part in a babysitting engagement. */
+    private static TaskRow withBabysit(TaskRow row, SessionBabysit part) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest(), Optional.of(part));
+    }
+
+    public void testABabysitterAndItsEscalatedWatchedSessionWearTheirChipsBadgeAndSection() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        TaskRow watchedRow = running("Watched", NOW);
+        TaskRow babysitterRow = running("babysit PR #12", NOW.minusSeconds(60));
+        BabysitPairing pairing = new BabysitPairing(babysitterRow.session().id(), watchedRow.session().id(),
+                watchedRow.session().repositoryId(), 12, BabysitState.ESCALATED);
+        Map<ManagedSessionId, SessionBabysit> parts = SessionBabysit.join(List.of(pairing), List.of(
+                new Escalation(UUID.randomUUID(), pairing.watchedId(), pairing.babysitterId(), 12,
+                        "Needs a design call\nsecond line", NOW, false)));
+        TaskRow watched = withBabysit(watchedRow, parts.get(watchedRow.session().id()));
+        TaskRow babysitter = withBabysit(babysitterRow, parts.get(babysitterRow.session().id()));
+        TaskRow plain = running("Plain", NOW.minusSeconds(120));
+        list.show(InboxModel.build(new InboxModel.Inputs(
+                List.of(new ProjectRow(ALPHA_PROJECT, false, false, List.<TaskNode>of(watched, babysitter, plain),
+                        List.of(), 3)),
+                List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE),
+                false);
+
+        assertEquals(List.of("v Needs you", "  Watched", "v Running", "  Plain", "v Babysitting", "  babysit PR #12"),
+                describe(list.entries()));
+        assertEquals("the engagement chip comes last, after the project tag",
+                List.of("babysit PR #12", "alpha", "escalated #12"), renderedLabels(indexOf("babysit PR #12")));
+        assertEquals(List.of("Watched", "alpha", "babysat · escalated"), renderedLabels(indexOf("Watched")));
+        assertEquals("a plain row has no chip", List.of("Plain", "alpha"), renderedLabels(indexOf("Plain")));
+
+        Icon dot = SessionDots.dotIcon(SessionStatus.RUNNING, Optional.of(SessionActivity.BUSY));
+        assertEquals("a babysitter: its dot, then the watch mark; the badge is the watched row's",
+                List.of(dot, InboxList.BABYSITTER_ICON), iconParts(InboxList.icon(itemOf("babysit PR #12"))));
+        assertEquals("the watched row wears the escalation badge after its dot",
+                List.of(dot, InboxList.ESCALATION_ICON), ((RowIcon) InboxList.icon(itemOf("Watched"))).getAllIcons());
+        assertSame(dot, InboxList.icon(itemOf("Plain")));
+
+        assertEquals(InboxList.NEEDS_BACKGROUND, renderedBackground(indexOf("Watched")));
+        assertEquals("the human acts on the watched session, so only its row is tinted",
+                list.getBackground(), renderedBackground(indexOf("babysit PR #12")));
+        assertEquals(list.getBackground(), renderedBackground(indexOf("Plain")));
+        assertEquals(InboxList.BABYSIT_TEXT, InboxList.headerColor(GroupKind.BABYSITTING));
+
+        String tooltip = InboxList.tooltip(itemOf("Watched"), NOW);
+        assertTrue(tooltip, tooltip.endsWith(" · PR #12 is babysat (escalated) · escalated: Needs a design call"));
+        assertTrue(InboxList.tooltip(itemOf("babysit PR #12"), NOW)
+                .endsWith(" · Babysitter of PR #12 (escalated) · escalated: Needs a design call"));
+    }
+
+    /** A row icon's parts, one nesting level deep: a nested row icon becomes its own part list. */
+    private static List<Object> iconParts(Icon icon) {
+        List<Object> parts = new ArrayList<>();
+        for (Icon part : ((RowIcon) icon).getAllIcons()) {
+            parts.add(part instanceof RowIcon nested ? nested.getAllIcons() : part);
+        }
+        return parts;
+    }
+
+    private Color renderedBackground(int index) {
+        return list.getCellRenderer().getListCellRendererComponent(list, list.entries().get(index), index, false,
+                false).getBackground();
     }
 }

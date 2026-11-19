@@ -38,6 +38,21 @@ class InboxViewStateTest {
     }
 
     @Test
+    void theBabysittingGroupsTogglesRoundTripByName() {
+        InboxViewState state = new InboxViewState();
+        state.setToggles(new InboxViewState.Toggles(Set.of(GroupKind.BABYSITTING), Set.of(),
+                Set.of(GroupKind.BABYSITTING)));
+        assertEquals(List.of("BABYSITTING"), state.getState().collapsed, "stored by the enum's name");
+
+        InboxViewState reloaded = new InboxViewState();
+        reloaded.loadState(state.getState());
+        assertEquals(Set.of(GroupKind.BABYSITTING), reloaded.toggles().collapsed());
+        assertEquals(Set.of(GroupKind.BABYSITTING), reloaded.toggles().showingAll());
+        assertFalse(GroupKind.BABYSITTING.collapsedByDefault(), "the section opens expanded");
+        assertTrue(GroupKind.BABYSITTING.truncates());
+    }
+
+    @Test
     void malformedEntriesAreDropped() {
         InboxViewState.Stored stored = new InboxViewState.Stored();
         stored.collapsed = List.of("READY", "NO_SUCH_GROUP");

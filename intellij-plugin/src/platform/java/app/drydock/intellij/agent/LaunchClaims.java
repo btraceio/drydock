@@ -74,6 +74,25 @@ public final class LaunchClaims {
     }
 
     /**
+     * Whether a launch, resume or removal of the session holds its claim right now, without claiming
+     * anything. A snapshot: the answer can be stale by the time the caller acts on it.
+     */
+    public synchronized boolean isClaimed(ManagedSessionId id) {
+        Objects.requireNonNull(id, "id");
+        return claimed.contains(id);
+    }
+
+    /**
+     * Whether {@link #tryClaim} would refuse right now -- the session has a claim (a launch, resume or
+     * removal in flight) or a live execution -- without claiming anything. A snapshot: the answer can
+     * be stale by the time the caller acts on it.
+     */
+    public synchronized boolean isClaimedOrLive(ManagedSessionId id) {
+        Objects.requireNonNull(id, "id");
+        return claimed.contains(id) || liveExecution.test(id);
+    }
+
+    /**
      * Runs {@code release} only when the session has neither a claim nor a live execution.
      *
      * @return whether {@code release} ran

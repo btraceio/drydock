@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.SessionBabysit;
 import app.drydock.ui.AgentLabels;
 
 import com.intellij.openapi.application.ApplicationManager;
@@ -278,6 +279,8 @@ final class SessionPane {
         painted = commands;
         title = AgentConsoleTabPresentation.tabTitle(session);
         DrydockPluginService plugin = DrydockPluginService.getInstance();
+        // Memory-only read, like AgentTabCommands.babysitOf: the engagement chip rides the same repaint as the strip.
+        strip.showBabysit(SessionBabysit.of(plugin.stateStore().state(), sessionId));
         // Activity is a local process's; a remote row shows the box's liveness, never a local working/idle.
         Optional<SessionActivity> activity = running && session.workspaceBox().isEmpty()
                 ? plugin.activityMonitor().current(sessionId) : Optional.empty();

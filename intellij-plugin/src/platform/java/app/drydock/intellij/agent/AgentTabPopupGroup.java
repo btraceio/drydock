@@ -42,6 +42,7 @@ public final class AgentTabPopupGroup extends ActionGroup implements DumbAware {
     private static final String TRANSFER = "Drydock.AgentTab.Transfer";
     private static final String RENAME = "Drydock.AgentTab.Rename";
     private static final String DONE = "Drydock.AgentTab.Done";
+    private static final String BABYSIT = "Drydock.AgentTab.Babysit";
 
     /**
      * The sections, in popup order. A separator stands only between two
@@ -50,7 +51,7 @@ public final class AgentTabPopupGroup extends ActionGroup implements DumbAware {
      * shows an empty section or a doubled separator.
      */
     private static final String[][] SECTIONS = {
-            {OWN_PROJECT, CHANGES},
+            {OWN_PROJECT, CHANGES, BABYSIT},
             {LIFECYCLE, TRANSFER},
             {RENAME},
             {DONE},
@@ -133,6 +134,7 @@ public final class AgentTabPopupGroup extends ActionGroup implements DumbAware {
             case TRANSFER -> AgentTabCommands.transfer(transferAvailable(tab), state, name, true);
             case RENAME -> AgentTabCommands.rename(state, name, true);
             case DONE -> AgentTabCommands.done(state, name, true);
+            case BABYSIT -> AgentTabCommands.babysit(AgentTabCommands.babysitOf(tab), name, true);
             default -> throw new IllegalStateException("unknown Drydock tab command id " + id);
         };
     }

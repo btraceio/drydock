@@ -189,10 +189,14 @@ public sealed interface TaskNode {
      * {@code false} while it runs. {@code branchPullRequest}: the GitHub
      * pull request whose head is the session's current branch, when the
      * project lists pull requests and {@code gh} has answered.
+     * {@code babysit}: the session's part in a babysitting engagement
+     * ({@link SessionBabysit}), joined from the same state snapshot the
+     * rebuild read its sessions from.
      */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                    Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
-                   boolean resumable, Optional<BranchPullRequest> branchPullRequest)
+                   boolean resumable, Optional<BranchPullRequest> branchPullRequest,
+                   Optional<SessionBabysit> babysit)
             implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
@@ -200,6 +204,15 @@ public sealed interface TaskNode {
             Objects.requireNonNull(branch, "branch");
             Objects.requireNonNull(placement, "placement");
             Objects.requireNonNull(branchPullRequest, "branchPullRequest");
+            Objects.requireNonNull(babysit, "babysit");
+        }
+
+        /** The shape before the model carried babysitting: no engagement. */
+        public TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
+                       Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
+                       boolean resumable, Optional<BranchPullRequest> branchPullRequest) {
+            this(session, activity, running, branch, placement, readOnly, folderMissing, resumable,
+                    branchPullRequest, Optional.empty());
         }
 
         /** The shape before the model carried a branch's pull request: none known. */

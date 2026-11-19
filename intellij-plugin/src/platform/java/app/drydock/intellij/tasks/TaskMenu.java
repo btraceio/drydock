@@ -76,6 +76,14 @@ final class TaskMenu {
         ASSOCIATE_PR,
         /** Set or clear the human's follow-up flag; the label follows the session's current flag. */
         FLAG,
+        /** Start a babysitter for the session's open branch PR; only a local session with no engagement. */
+        BABYSIT_PR,
+        /** End the active babysitting engagement the row is either side of, and stop the babysitter's agent. */
+        STOP_BABYSITTING,
+        /** Switch to the babysitter watching this session's PR; a watched session only. */
+        SHOW_BABYSITTER,
+        /** Switch to the session a babysitter watches; a babysitter only. */
+        SHOW_WATCHED,
         NEW_TASK,
         DEACTIVATE_AND_CLOSE,
         DONE_WITH_TASK,
@@ -292,16 +300,39 @@ final class TaskMenu {
                 facts.jiraUrls().isEmpty() ? null : Item.OPEN_JIRA_TICKETS);
     }
 
+    /**
+     * The babysitting jumps, in the links section: the other side of the
+     * row's engagement. Pure over the carried row.
+     */
+    private static Item[] babysitJumps(TaskRow row) {
+        return new Item[] {
+                BabysitActions.showsWatched(row) ? Item.SHOW_WATCHED : null,
+                BabysitActions.showsBabysitter(row) ? Item.SHOW_BABYSITTER : null};
+    }
+
+    /** The babysitting section: start one, or stop the one the row takes part in. Pure over the carried row. */
+    private static List<Item> babysitting(TaskRow row) {
+        return section(BabysitActions.offersStart(row) ? Item.BABYSIT_PR : null,
+                BabysitActions.stoppable(row) ? Item.STOP_BABYSITTING : null);
+    }
+
+    /** The links section: the tree's reveals, then the babysitting jumps. */
+    private static List<Item> links(TaskRow row, MenuFacts facts) {
+        Item[] jumps = babysitJumps(row);
+        return section(facts.showPullRequest() != null ? Item.SHOW_PULL_REQUEST : null,
+                facts.showTask() != null ? Item.SHOW_TASK : null, jumps[0], jumps[1]);
+    }
+
     /** A running task: its tree links, then switch or pull it here, work on it, manage it, clean up last. */
     private static List<List<Item>> running(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
-                section(facts.showPullRequest() != null ? Item.SHOW_PULL_REQUEST : null,
-                        facts.showTask() != null ? Item.SHOW_TASK : null),
+                links(row, facts),
                 section(Item.SWITCH_TO_TASK, shownElsewhere(row) ? Item.SHOW_HERE : null),
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
                 List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
+                babysitting(row),
                 sessionLinks(facts),
                 section(TaskActions.closesOwnWindow(row) ? Item.DEACTIVATE_AND_CLOSE : null,
                         Item.DONE_WITH_TASK)));
@@ -316,12 +347,12 @@ final class TaskMenu {
      */
     private static List<List<Item>> idle(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
-                section(facts.showPullRequest() != null ? Item.SHOW_PULL_REQUEST : null,
-                        facts.showTask() != null ? Item.SHOW_TASK : null),
+                links(row, facts),
                 List.of(Item.SWITCH_TO_TASK),
                 section(facts.remoteStop() ? Item.DEACTIVATE : null,
                         Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
                 List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
+                babysitting(row),
                 sessionLinks(facts),
                 List.of(Item.DONE_WITH_TASK)));
     }

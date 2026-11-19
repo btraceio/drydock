@@ -56,9 +56,10 @@ public class AgentTabActionsRegistrationPlatformTest extends BasePlatformTestCas
     private static final String[] ACTION_IDS = {
             "Drydock.AgentTab.OwnProject", "Drydock.AgentTab.Changes", "Drydock.AgentTab.Lifecycle",
             "Drydock.AgentTab.Transfer", "Drydock.AgentTab.Rename", "Drydock.AgentTab.Done",
+            "Drydock.AgentTab.Babysit",
     };
 
-    public void testA_TheSixIdsResolveToTheSharedClassesOnTheEdt() {
+    public void testA_TheSevenIdsResolveToTheSharedClassesOnTheEdt() {
         ActionManager actions = ActionManager.getInstance();
         for (String id : ACTION_IDS) {
             AnAction action = actions.getAction(id);
@@ -211,6 +212,7 @@ public class AgentTabActionsRegistrationPlatformTest extends BasePlatformTestCas
             case "Transfer" -> AgentTabActions.Transfer.class;
             case "Rename" -> AgentTabActions.Rename.class;
             case "Done" -> AgentTabActions.Done.class;
+            case "Babysit" -> AgentTabActions.Babysit.class;
             default -> throw new IllegalArgumentException(id);
         };
     }

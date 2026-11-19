@@ -520,7 +520,8 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return ciFailing ? rowIcon(icon, PR_CI_FAILURE_ICON) : icon;
     }
 
-    private static Icon rowIcon(Icon first, Icon second) {
+    /** {@code first} then {@code second}, one cached composite per pair. */
+    static Icon rowIcon(Icon first, Icon second) {
         return ROW_ICONS.computeIfAbsent(new IconPair(first, second),
                 pair -> IconManager.getInstance().createRowIcon(pair.first(), pair.second()));
     }

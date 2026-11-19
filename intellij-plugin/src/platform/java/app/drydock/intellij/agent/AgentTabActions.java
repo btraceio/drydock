@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SessionActivity;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.TaskNavigator;
 
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -407,6 +408,33 @@ public final class AgentTabActions {
         @Override
         void perform(AgentTabCommands.Target target, @Nullable SessionCommands.State presented) {
             SessionRename.show(target.project(), target.session());
+        }
+    }
+
+    /**
+     * The babysitting jump: the tab popup only, on a babysitter's or a
+     * watched session's tab; switches to the other side's console.
+     */
+    public static final class Babysit extends TabAction {
+
+        public Babysit() {
+            super(null);
+        }
+
+        Babysit(Perform perform) {
+            super(perform);
+        }
+
+        @Override
+        AgentTabCommands.Shown shown(AgentTabCommands.Target target, SessionCommands.State state,
+                                     boolean popup) {
+            return AgentTabCommands.babysit(AgentTabCommands.babysitOf(target), target.session().displayName(),
+                    popup);
+        }
+
+        @Override
+        void perform(AgentTabCommands.Target target, @Nullable SessionCommands.State presented) {
+            AgentTabCommands.babysitOf(target).ifPresent(part -> TaskNavigator.switchTo(part.counterpart()));
         }
     }
 

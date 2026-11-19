@@ -1,6 +1,9 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.Escalation;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -9,6 +12,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.intellij.IsolatedCatalog;
+import app.drydock.intellij.tasks.SessionBabysit;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.DataManager;
@@ -42,6 +46,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * The console ribbon in a booted IDE (A4, A5, A7): a real
@@ -221,6 +226,48 @@ public class AgentConsoleStripPlatformTest extends BasePlatformTestCase {
         assertTrue(strip.overflowItems().isEmpty());
         assertFalse("an empty overflow menu must not leave a dead button",
                 strip.moreButton().isVisible());
+    }
+
+    // ---- babysitting --------------------------------------------------------
+
+    public void testTheBabysittingChipAndJumpFollowTheTabsSideOfTheEngagement() {
+        SessionCommands.State idle = commands(false, false, false);
+        strip.update(session("Watched", Optional.empty(), SessionStatus.INACTIVE),
+                Optional.empty(), false, false, "Pi", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false, Optional.empty(), false, false, idle);
+        BabysitPairing pairing = new BabysitPairing(ManagedSessionId.newId(), ManagedSessionId.newId(),
+                RepositoryId.newId(), 12, BabysitState.ESCALATED);
+        Escalation raised = new Escalation(UUID.randomUUID(), pairing.watchedId(), pairing.babysitterId(), 12,
+                "Needs a design call\nsecond line", Instant.EPOCH, false);
+
+        strip.showBabysit(Optional.of(new SessionBabysit(SessionBabysit.Role.WATCHED, pairing, Optional.of(raised))));
+        assertEquals(Optional.of("babysat · escalated: Needs a design call"), strip.babysitChip());
+        assertEquals(List.of(AgentTabCommands.BABYSIT_BABYSITTER_LABEL), strip.overflowItems());
+        assertTrue("the jump makes the overflow button worth showing", strip.moreButton().isVisible());
+
+        strip.showBabysit(Optional.of(new SessionBabysit(SessionBabysit.Role.BABYSITTER, pairing, Optional.empty())));
+        assertEquals(Optional.of("escalated #12"), strip.babysitChip());
+        assertEquals(List.of(AgentTabCommands.BABYSIT_WATCHED_LABEL), strip.overflowItems());
+
+        strip.showBabysit(Optional.empty());
+        assertEquals(Optional.empty(), strip.babysitChip());
+        assertTrue(strip.overflowItems().isEmpty());
+        assertFalse(strip.moreButton().isVisible());
+    }
+
+    public void testBabysitterJumpKeepsItsMenuOrderAlongsideTheProjectWindowJump() {
+        ManagedAgentSession hosted = session("Hosted watched", Optional.empty(), SessionStatus.RUNNING);
+        strip.update(hosted, Optional.empty(), true, false, "Pi", Duration.ZERO,
+                Optional.empty(), Optional.empty(), false,
+                Optional.of(new SessionPlace("hosted-repo", Optional.of("feature/x"))),
+                false, false, commands(true, false, false));
+        BabysitPairing pairing = new BabysitPairing(ManagedSessionId.newId(), ManagedSessionId.newId(),
+                RepositoryId.newId(), 12, BabysitState.WATCHING);
+        strip.showBabysit(Optional.of(new SessionBabysit(SessionBabysit.Role.WATCHED, pairing, Optional.empty())));
+
+        assertEquals(List.of(AgentStripText.OPEN_IN_PROJECT_WINDOW,
+                        AgentTabCommands.BABYSIT_BABYSITTER_LABEL),
+                strip.overflowItems());
     }
 
     // ---- keyboard access (AGENTS.md) ---------------------------------------

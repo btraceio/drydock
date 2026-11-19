@@ -427,6 +427,57 @@ public final class ClaudeAgentProvider implements AgentProvider {
         });
     }
 
+    /**
+     * The tools the headless babysitter run PRE-APPROVES: reading,
+     * searching, editing and writing files, and {@code git} and {@code gh}
+     * through Bash -- what a rebase, a mechanical fix, a push and a CI log
+     * read need. One space-separated value, the form {@code claude --help}
+     * documents for {@code --allowedTools}.
+     *
+     * <p><b>What this guarantees, and what not.</b> {@code --allowedTools}
+     * only spares these tools a permission prompt; it neither selects nor
+     * denies the others. In {@code --print} mode nothing can be asked, so a
+     * tool that would need a prompt is not run -- but one the user's own
+     * Claude settings already allow (a {@code permissions.allow} rule, an
+     * allow-listed command) still runs. Drydock enforces no denial here:
+     * {@code --disallowedTools} / {@code --tools} exist in current Claude
+     * Code, but the capability probe does not verify them, and an install
+     * that rejected one would fail every detached run.</p>
+     */
+    static final String HEADLESS_ALLOWED_TOOLS = "Read Glob Grep Edit MultiEdit Write Bash(git:*) Bash(gh:*)";
+
+    /**
+     * {@code env -u CLAUDE… claude --print --resume <id> --add-dir <shared>
+     * --permission-mode acceptEdits --allowedTools "<tools>" --output-format
+     * text -- <prompt>}: the transfer command's shape without its read-only
+     * safety flags. {@code acceptEdits} auto-approves file edits (the only
+     * permission mode besides the bypass, which this deliberately is not),
+     * {@code --allowedTools} pre-approves the tools above (it denies nothing;
+     * see there), {@code --add-dir}
+     * lets the tools reach the babysitting directory outside the worktree.
+     * No {@code --safe-mode} (what it disables beyond the transfer's needs is
+     * not verified in-tree), and no {@code --mcp-config}: no Drydock MCP
+     * server runs while the IDE is closed. None of these flags is covered by
+     * the capability probe, which only knows the interactive flag set; an
+     * install that rejects one fails the run, which the watcher logs.
+     */
+    @Override
+    public Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,
+                                                             String agentSessionId, String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = new ArrayList<>(List.of(
+                    "/usr/bin/env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                    "-u", "CLAUDE_CODE_EXECPATH", "-u", "CLAUDE_CODE_SESSION_ID", "-u",
+                    "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_EFFORT", "LANG=en_US.UTF-8"));
+            ddtoolPathValue().ifPresent(path -> command.add("PATH=" + path));
+            command.addAll(List.of(executable.toString(), "--print", "--resume", agentSessionId,
+                    "--add-dir", sharedDirectory.toAbsolutePath().normalize().toString(),
+                    "--permission-mode", "acceptEdits", "--allowedTools", HEADLESS_ALLOWED_TOOLS,
+                    "--output-format", "text", "--", prompt));
+            return List.copyOf(command);
+        });
+    }
+
     @Override
     public SessionIdStrategy idStrategy() {
         return SessionIdStrategy.PRESET;

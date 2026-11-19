@@ -84,6 +84,26 @@ public final class ProcessRunner {
         if (maxOutputBytes <= 0) {
             throw new IllegalArgumentException("maxOutputBytes must be positive");
         }
+        ProcessBuilder builder = builderFor(command, options);
+        return runBuilder(builder, command, options.timeout(), maxOutputBytes, false);
+    }
+
+    /**
+     * As {@link #run(List, Options, int)}, but output beyond {@code
+     * maxOutputBytes} per stream is dropped instead of refused: the result
+     * carries the exit code and the first {@code maxOutputBytes} of each
+     * stream. For a long child whose output is only logged.
+     */
+    public static ProcessResult runTruncating(List<String> command, Options options, int maxOutputBytes)
+            throws IOException, InterruptedException {
+        if (maxOutputBytes <= 0) {
+            throw new IllegalArgumentException("maxOutputBytes must be positive");
+        }
+        ProcessBuilder builder = builderFor(command, options);
+        return runBuilder(builder, command, options.timeout(), maxOutputBytes, true);
+    }
+
+    private static ProcessBuilder builderFor(List<String> command, Options options) {
         ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(false);
         if (options.workingDirectory() != null) {
             builder.directory(options.workingDirectory().toFile());
@@ -98,11 +118,11 @@ public final class ProcessRunner {
             builder.environment().put("PATH", path);
         }
         builder.environment().putAll(options.environment());
-        return runBuilder(builder, command, options.timeout(), maxOutputBytes);
+        return builder;
     }
 
     private static ProcessResult runBuilder(ProcessBuilder builder, List<String> command, Duration timeout,
-                                            int maxOutputBytes)
+                                            int maxOutputBytes, boolean truncate)
             throws IOException, InterruptedException {
         Process process = builder.start();
 
@@ -130,7 +150,7 @@ public final class ProcessRunner {
             throw e;
         }
 
-        if (stdoutReader.exceeded() || stderrReader.exceeded()) {
+        if (!truncate && (stdoutReader.exceeded() || stderrReader.exceeded())) {
             throw new IOException("Process output exceeded " + maxOutputBytes + " bytes");
         }
         return new ProcessResult(process.exitValue(), stdoutReader.result(), stderrReader.result());

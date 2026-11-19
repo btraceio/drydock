@@ -1,5 +1,8 @@
 package app.drydock.state;
 
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.Escalation;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.HandoffBrief;
@@ -42,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Converts between {@link ApplicationState} and its {@link JsonValue}
@@ -218,7 +222,11 @@ import java.util.Set;
  * build that drops the member on re-save turns the row local with its
  * placeholder path, never a rejected state file. A remote row's {@code
  * workingDirectory} is the box's deterministic placeholder root, re-derived
- * from the binding on decode rather than trusted from the file.</p>
+ * from the binding on decode rather than trusted from the file.
+ * The {@code pairings} and {@code escalations} arrays (babysitting) were
+ * likewise added leniently within version 2, decoded like {@code
+ * handoffBriefs}: an absent member is an empty list and a malformed entry is
+ * dropped. A pairing whose session ids no longer resolve is kept.</p>
  */
 public final class ApplicationStateCodec {
 
@@ -259,7 +267,42 @@ public final class ApplicationStateCodec {
             briefs.add(handoffBriefToJson(brief));
         }
         root.put("handoffBriefs", new JsonArray(briefs));
+
+        List<JsonValue> pairings = new ArrayList<>();
+        for (BabysitPairing pairing : state.pairings()) {
+            pairings.add(pairingToJson(pairing));
+        }
+        root.put("pairings", new JsonArray(pairings));
+
+        List<JsonValue> escalations = new ArrayList<>();
+        for (Escalation escalation : state.escalations()) {
+            escalations.add(escalationToJson(escalation));
+        }
+        root.put("escalations", new JsonArray(escalations));
         return root;
+    }
+
+    private static JsonValue pairingToJson(BabysitPairing pairing) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("babysitterId", new JsonString(pairing.babysitterId().value().toString()));
+        obj.put("watchedId", new JsonString(pairing.watchedId().value().toString()));
+        obj.put("repositoryId", new JsonString(pairing.repositoryId().value().toString()));
+        obj.put("prNumber", JsonNumber.of((long) pairing.prNumber()));
+        obj.put("state", new JsonString(pairing.state().name()));
+        obj.put("knownHead", optionalStringToJson(pairing.knownHead()));
+        return obj;
+    }
+
+    private static JsonValue escalationToJson(Escalation escalation) {
+        JsonObject obj = JsonObject.empty();
+        obj.put("id", new JsonString(escalation.id().toString()));
+        obj.put("watchedId", new JsonString(escalation.watchedId().value().toString()));
+        obj.put("babysitterId", new JsonString(escalation.babysitterId().value().toString()));
+        obj.put("prNumber", JsonNumber.of((long) escalation.prNumber()));
+        obj.put("message", new JsonString(escalation.message()));
+        obj.put("createdAt", new JsonString(escalation.createdAt().toString()));
+        obj.put("resolved", new JsonBoolean(escalation.resolved()));
+        return obj;
     }
 
     private static JsonValue repositoryToJson(Repository repository) {
@@ -450,7 +493,76 @@ public final class ApplicationStateCodec {
 
         List<Workflow> workflows = workflowsFromJson(root);
 
-        return new ApplicationState(repositories, sessions, workflows, ui, handoffBriefsFromJson(root));
+        return new ApplicationState(repositories, sessions, workflows, ui, handoffBriefsFromJson(root),
+                pairingsFromJson(root), escalationsFromJson(root));
+    }
+
+    /** Lenient like {@link #handoffBriefsFromJson}: absent yields none, a bad entry is dropped. */
+    private static List<BabysitPairing> pairingsFromJson(JsonObject root) {
+        if (!(root.get("pairings") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<BabysitPairing> pairings = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            pairingFromJson(element).ifPresent(pairings::add);
+        }
+        return List.copyOf(pairings);
+    }
+
+    /**
+     * An unrecognized {@code state} drops the pairing rather than defaulting:
+     * any default could resurrect a {@code STOPPED} engagement or hide an
+     * {@code ESCALATED} one. {@code knownHead} (added later, same version) is
+     * lenient on its own: absent, null or not a full lowercase commit id
+     * decodes to empty and keeps the pairing -- the monitor re-reads the head
+     * on its next poll.
+     */
+    private static Optional<BabysitPairing> pairingFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new BabysitPairing(
+                    ManagedSessionId.of(requireString(obj, "babysitterId")),
+                    ManagedSessionId.of(requireString(obj, "watchedId")),
+                    RepositoryId.of(requireString(obj, "repositoryId")),
+                    requireInt(obj, "prNumber"),
+                    BabysitState.valueOf(requireString(obj, "state")),
+                    optionalString(obj, "knownHead").filter(BabysitPairing::isCommitId)));
+        } catch (IllegalArgumentException | StateDecodeException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** Lenient like {@link #handoffBriefsFromJson}: absent yields none, a bad entry is dropped. */
+    private static List<Escalation> escalationsFromJson(JsonObject root) {
+        if (!(root.get("escalations") instanceof JsonArray array)) {
+            return List.of();
+        }
+        List<Escalation> escalations = new ArrayList<>();
+        for (JsonValue element : array.elements()) {
+            escalationFromJson(element).ifPresent(escalations::add);
+        }
+        return List.copyOf(escalations);
+    }
+
+    /** An absent or non-boolean {@code resolved} decodes as unresolved, so the escalation stays visible. */
+    private static Optional<Escalation> escalationFromJson(JsonValue element) {
+        if (!(element instanceof JsonObject obj)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new Escalation(
+                    UUID.fromString(requireString(obj, "id")),
+                    ManagedSessionId.of(requireString(obj, "watchedId")),
+                    ManagedSessionId.of(requireString(obj, "babysitterId")),
+                    requireInt(obj, "prNumber"),
+                    requireString(obj, "message"),
+                    Instant.parse(requireString(obj, "createdAt")),
+                    obj.get("resolved") instanceof JsonBoolean resolved && resolved.value()));
+        } catch (IllegalArgumentException | DateTimeException | StateDecodeException e) {
+            return Optional.empty();
+        }
     }
 
     /**
@@ -952,6 +1064,13 @@ public final class ApplicationStateCodec {
             return s.value();
         }
         throw new StateDecodeException("Missing or non-string field: " + key);
+    }
+
+    private static int requireInt(JsonObject obj, String key) {
+        if (obj.get(key) instanceof JsonNumber n) {
+            return n.asInt();
+        }
+        throw new StateDecodeException("Missing or non-numeric field: " + key);
     }
 
     private static JsonObject asObject(JsonValue value, String what) {

@@ -138,6 +138,77 @@ class CodexAgentProviderTest {
     }
 
     @Test
+    void headlessWriteUsesWorkspaceWriteAndTheBabysitDirectoryOnlyAfterCapabilityProbe(@TempDir Path dir)
+            throws Exception {
+        Path executable = writeExecutable(dir, "if [ \"$1\" = exec ] && [ \"$2\" = --help ]; then\n"
+                + "  printf '%s\\n' '--add-dir workspace-write'\n"
+                + "  exit 0\n"
+                + "fi\nexit 1\n");
+        CodexAgentProvider provider = new CodexAgentProvider(new CodexExecutableLocator(executable));
+        Path sharedDirectory = dir.resolve("babysit data");
+
+        List<String> command = provider.buildHeadlessWriteCommand(dir, sharedDirectory, "conversation-42", "read the delta")
+                .orElseThrow();
+        assertEquals(List.of("/usr/bin/env", "-u", "CODEX_SANDBOX", "-u",
+                        "CODEX_SANDBOX_NETWORK_DISABLED", executable.toString(), "exec",
+                        "--sandbox", "workspace-write", "--add-dir", sharedDirectory.toAbsolutePath().normalize().toString(),
+                        "resume", "conversation-42", "read the delta"), command);
+        assertTrue(command.indexOf("--sandbox") < command.indexOf("resume"), command.toString());
+        assertTrue(command.indexOf("--add-dir") < command.indexOf("resume"), command.toString());
+        assertFalse(command.contains("danger-full-access"), command.toString());
+    }
+
+    @Test
+    void headlessWriteIsUnavailableWhenARequiredCapabilityIsMissingOrHelpFails(@TempDir Path dir) throws Exception {
+        Path missing = writeExecutable(dir, "if [ \"$1\" = exec ] && [ \"$2\" = --help ]; then\n"
+                + "  printf '%s\\n' '--add-dir'\n"
+                + "  exit 0\n"
+                + "fi\nexit 1\n");
+        CodexAgentProvider missingProvider = new CodexAgentProvider(new CodexExecutableLocator(missing));
+        assertTrue(missingProvider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isEmpty());
+
+        Path nonzero = writeExecutable(dir, "if [ \"$1\" = exec ] && [ \"$2\" = --help ]; then\n"
+                + "  printf '%s\\n' '--add-dir workspace-write'\n"
+                + "  exit 7\n"
+                + "fi\nexit 1\n");
+        CodexAgentProvider nonzeroProvider = new CodexAgentProvider(new CodexExecutableLocator(nonzero));
+        assertTrue(nonzeroProvider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isEmpty());
+    }
+
+    @Test
+    void definiteCapabilityResultsAreCachedButTransientProbeFailuresCanBeRetried(@TempDir Path dir) throws Exception {
+        Path count = dir.resolve("probe-count");
+        String quotedCount = "'" + count.toString().replace("'", "'\\''") + "'";
+        Path executable = writeExecutable(dir, "if [ \"$1\" = exec ] && [ \"$2\" = --help ]; then\n"
+                + "  printf x >> " + quotedCount + "\n"
+                + "  printf '%s\\n' '--add-dir workspace-write'\n"
+                + "  exit 0\n"
+                + "fi\nexit 1\n");
+        CodexAgentProvider provider = new CodexAgentProvider(new CodexExecutableLocator(executable));
+        assertTrue(provider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isPresent());
+        assertTrue(provider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isPresent());
+        assertEquals("x", Files.readString(count), "the definite supported result is cached");
+
+        Path retryExecutable = writeExecutable(dir.resolve("retry"), "head -c 262145 /dev/zero\n");
+        CodexAgentProvider retryProvider = new CodexAgentProvider(new CodexExecutableLocator(retryExecutable));
+        assertTrue(retryProvider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isEmpty());
+        writeExecutable(dir.resolve("retry"), "if [ \"$1\" = exec ] && [ \"$2\" = --help ]; then\n"
+                + "  printf '%s\\n' '--add-dir workspace-write'\n"
+                + "  exit 0\n"
+                + "fi\nexit 1\n");
+        assertTrue(retryProvider.buildHeadlessWriteCommand(dir, dir.resolve("babysit"), "id", "prompt").isPresent(),
+                "an output-limit failure is transient and must not be cached");
+    }
+
+    private static Path writeExecutable(Path directory, String body) throws Exception {
+        Files.createDirectories(directory);
+        Path executable = directory.resolve("codex");
+        Files.writeString(executable, "#!/bin/sh\n" + body);
+        assertTrue(executable.toFile().setExecutable(true));
+        return executable;
+    }
+
+    @Test
     void remoteIsUnsupported() {
         // A remote CreateContext yields an unsupported plan (Codex declines remote).
         LaunchPlan plan = provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),

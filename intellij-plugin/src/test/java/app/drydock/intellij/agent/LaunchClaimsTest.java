@@ -45,6 +45,20 @@ class LaunchClaimsTest {
     }
 
     @Test
+    void theProbesAnswerWithoutClaiming() {
+        assertFalse(claims.isClaimedOrLive(ID));
+        assertFalse(claims.isClaimed(ID));
+        assertTrue(claims.tryClaim(ID), "the probes must not have claimed");
+        assertTrue(claims.isClaimedOrLive(ID));
+        assertTrue(claims.isClaimed(ID));
+        claims.finish(ID, this::release);
+        assertFalse(claims.isClaimedOrLive(ID));
+        live.add(ID);
+        assertTrue(claims.isClaimedOrLive(ID));
+        assertFalse(claims.isClaimed(ID), "a live execution is not a claim");
+    }
+
+    @Test
     void aClaimIsAllowedAgainAfterFinish() {
         assertTrue(claims.tryClaim(ID));
         claims.finish(ID, this::release);

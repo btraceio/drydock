@@ -51,6 +51,14 @@ public final class McpSessionRegistry {
      */
     public static final int MAX_HANDOFFS_PER_SESSION = 40;
 
+    /**
+     * Escalations one babysitter session may raise. Like a brief, an
+     * escalation is written per event rather than once, so the bound is the
+     * handoff one: a babysitter that has escalated forty times is looping
+     * rather than reporting.
+     */
+    public static final int MAX_ESCALATIONS_PER_SESSION = 40;
+
     /** Whether a session may create worktrees and start further sessions. */
     public enum Spawn {
         /** A session the human started. */
@@ -67,6 +75,7 @@ public final class McpSessionRegistry {
     private final Map<ManagedSessionId, AtomicInteger> sessionsStarted = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> renamesApplied = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> handoffsApplied = new ConcurrentHashMap<>();
+    private final Map<ManagedSessionId, AtomicInteger> escalationsRaised = new ConcurrentHashMap<>();
 
     /** Returns this session's token, minting one on first call. Idempotent per session. */
     public String mint(ManagedSessionId sessionId, Spawn spawn) {
@@ -167,6 +176,31 @@ public final class McpSessionRegistry {
     /** Releases a handoff charge whose call then failed outright. */
     public void refundHandoff(ManagedSessionId sessionId) {
         refund(handoffsApplied, sessionId);
+    }
+
+    /**
+     * Charges one babysitter escalation after validation and the babysitter
+     * identity check. The charge is refunded only when the write is known not
+     * to have happened: an explicit refusal or a synchronous pre-dispatch
+     * failure. Unknown post-dispatch outcomes keep the charge; {@link #chargeHandoff}
+     * has its separate policy.
+     */
+    public void chargeEscalation(ManagedSessionId sessionId) throws McpBudgetExhaustedException {
+        AtomicInteger counter = escalationsRaised.computeIfAbsent(sessionId, id -> new AtomicInteger());
+        if (counter.incrementAndGet() > MAX_ESCALATIONS_PER_SESSION) {
+            counter.decrementAndGet();
+            throw new McpBudgetExhaustedException("This session has already escalated "
+                    + MAX_ESCALATIONS_PER_SESSION + " times; stop and let the human catch up.");
+        }
+    }
+
+    /**
+     * Releases an escalation charge only when the write is known not to have
+     * happened (explicit refusal or synchronous pre-dispatch failure). Never
+     * drops below zero.
+     */
+    public void refundEscalation(ManagedSessionId sessionId) {
+        refund(escalationsRaised, sessionId);
     }
 
     private static void refund(Map<ManagedSessionId, AtomicInteger> counters, ManagedSessionId sessionId) {

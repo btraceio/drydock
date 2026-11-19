@@ -120,6 +120,32 @@ public interface AgentProvider {
         return Optional.empty();
     }
 
+    /**
+     * A non-interactive, WRITE-CAPABLE argv that resumes the exact provider
+     * conversation {@code agentSessionId} in {@code workingDirectory} with
+     * one prompt and exits when the turn ends: the detached babysitting
+     * watcher's headless run, while the IDE is closed. The agent may edit
+     * files and run {@code git}/{@code gh}; nothing prompts (there is no
+     * terminal), so a provider must grant exactly that up front and nothing
+     * it cannot grant without asking. {@code sharedDirectory} is the
+     * babysitting directory outside the worktree the agent must read (its
+     * delta and instructions) and write (its request files) -- a provider
+     * whose tools are confined to the working directory adds it.
+     *
+     * <p>Like {@link #buildTransferSummaryCommand}: an argument list for
+     * {@code ProcessRunner}, never a shell string, never a picker. Called by
+     * a separate watcher process that never calls {@link #init}: an
+     * implementation may use executable discovery and bounded, ProcessRunner-run
+     * capability probes of the executable itself (for example, {@code --help}),
+     * but must not depend on {@code init} state or run on the JavaFX Application
+     * Thread. Providers that cannot supply a required capability return empty;
+     * the watcher leaves pending events for delivery when the IDE is available.</p>
+     */
+    default Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,
+                                                              String agentSessionId, String prompt) {
+        return Optional.empty();
+    }
+
     SessionIdStrategy idStrategy();
 
     /**

@@ -181,4 +181,38 @@ public final class ApplicationStateStore {
             LOG.log(Level.WARNING, "Could not flush pending application-state saves", e);
         }
     }
+
+    /**
+     * Writes the current state on the writer thread and answers whether
+     * that write succeeded: true only once the state as it stands at this
+     * call (or later) is on disk. False -- logged -- when the save failed,
+     * the writer refused the task, or it did not finish within {@value
+     * #FLUSH_TIMEOUT_SECONDS} s. For a caller that may delete another copy
+     * of what it just put into the state only once the state has it
+     * durably; {@link #flush} cannot tell, since a failed save is swallowed.
+     * Blocking; never on the FX thread or the EDT.
+     */
+    public boolean flushDurably() {
+        try {
+            return writer.submit(() -> {
+                ApplicationState toSave;
+                synchronized (lock) {
+                    toSave = state;
+                }
+                try {
+                    repository.save(toSave);
+                    return true;
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "Failed to persist application state", e);
+                    return false;
+                }
+            }).get(FLUSH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException | RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Could not persist the application state durably", e);
+            return false;
+        }
+    }
 }

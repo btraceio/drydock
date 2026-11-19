@@ -106,6 +106,10 @@ import java.util.stream.Stream;
  * like any other unknown tool, and routing them adds names, never
  * privileges (P7: {@code session_start}/{@code worktree_create} stay
  * exactly as forbidden as before).</p>
+ *
+ * <p>The babysitting tools ride a second optional delegate, {@link
+ * BabysitTools}, under exactly the same rules; the router adds only the
+ * live-session check before handing them over.</p>
  */
 public final class McpToolRouter {
 
@@ -124,6 +128,13 @@ public final class McpToolRouter {
      * every existing client is byte-identical.
      */
     private final TaskTools taskTools;
+
+    /**
+     * The optional babysitting delegate: null on every router built without
+     * it, with exactly the task delegate's semantics -- a babysit name is
+     * then not one of this router's tools at all.
+     */
+    private final BabysitTools babysitTools;
 
     /** The ten {@code review_*} tools, for a router that serves review only. */
     public static final Set<String> REVIEW_TOOLS = Set.of(
@@ -165,6 +176,16 @@ public final class McpToolRouter {
             "task_get", "task_list", "task_update", "task_create", "task_claim");
 
     /**
+     * The babysitting tools (docs/BabysittingSessions.md), served only by a
+     * router built with a {@link BabysitTools} delegate AND these names in
+     * its allowed set -- the same opt-in, name-adding-only rule as {@link
+     * #TASK_TOOLS}. Listed to every session like every tool here; the
+     * delegate gates {@code ci_rerun} and {@code babysit_escalate} by the
+     * caller's persisted pairing, not by listing.
+     */
+    public static final Set<String> BABYSIT_TOOLS = Set.copyOf(BabysitTools.NAMES);
+
+    /**
      * One scope's change graph and out-of-diff caller scan, keyed by the diff
      * they were computed from, and shared by every {@code review_scope}
      * include built on them ({@code sections}, {@code impact}): asking for
@@ -197,7 +218,7 @@ public final class McpToolRouter {
     }
 
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry) {
-        this(context, registry, ChangeGraph::of, ALL_TOOLS, null);
+        this(context, registry, ChangeGraph::of, ALL_TOOLS, null, null);
     }
 
     /**
@@ -210,7 +231,7 @@ public final class McpToolRouter {
      */
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                          Set<String> allowedTools) {
-        this(context, registry, ChangeGraph::of, allowedTools, null);
+        this(context, registry, ChangeGraph::of, allowedTools, null, null);
     }
 
     /**
@@ -222,7 +243,7 @@ public final class McpToolRouter {
      */
     McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                   Function<UnifiedDiff, ChangeGraph> graphBuilder) {
-        this(context, registry, graphBuilder, ALL_TOOLS, null);
+        this(context, registry, graphBuilder, ALL_TOOLS, null, null);
     }
 
     /**
@@ -236,7 +257,7 @@ public final class McpToolRouter {
      */
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry, TaskTools taskTools) {
         this(context, registry, ChangeGraph::of, allToolsAndTasks(),
-                Objects.requireNonNull(taskTools, "taskTools"));
+                Objects.requireNonNull(taskTools, "taskTools"), null);
     }
 
     /**
@@ -251,17 +272,35 @@ public final class McpToolRouter {
     public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                          Set<String> allowedTools, TaskTools taskTools) {
         this(context, registry, ChangeGraph::of, allowedTools,
-                Objects.requireNonNull(taskTools, "taskTools"));
+                Objects.requireNonNull(taskTools, "taskTools"), null);
+    }
+
+    /**
+     * Builds a router that serves {@code allowedTools} with the babysitting
+     * delegate, and the task delegate when {@code taskTools} is non-null:
+     * an allowed set may name {@link #BABYSIT_TOOLS} only because {@code
+     * babysitTools} serves them (and task tools only with a task delegate),
+     * and adding them changes no other allowlist decision.
+     *
+     * @throws NullPointerException if {@code babysitTools} is null
+     * @throws IllegalArgumentException if a name is not a tool {@link #call} dispatches
+     */
+    public McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
+                         Set<String> allowedTools, TaskTools taskTools, BabysitTools babysitTools) {
+        this(context, registry, ChangeGraph::of, allowedTools, taskTools,
+                Objects.requireNonNull(babysitTools, "babysitTools"));
     }
 
     private McpToolRouter(McpSessionContext context, McpSessionRegistry registry,
                           Function<UnifiedDiff, ChangeGraph> graphBuilder,
                           Set<String> allowedTools,
-                          TaskTools taskTools) {
+                          TaskTools taskTools,
+                          BabysitTools babysitTools) {
         this.context = context;
         this.registry = registry;
         this.graphBuilder = graphBuilder;
         this.taskTools = taskTools;
+        this.babysitTools = babysitTools;
         this.allowedTools = Set.copyOf(allowedTools);
         Set<String> dispatchable = dispatchableTools();
         for (String name : this.allowedTools) {
@@ -279,7 +318,11 @@ public final class McpToolRouter {
      * one.
      */
     private Set<String> dispatchableTools() {
-        return taskTools == null ? ALL_TOOLS : allToolsAndTasks();
+        Set<String> base = taskTools == null ? ALL_TOOLS : allToolsAndTasks();
+        if (babysitTools == null) {
+            return base;
+        }
+        return Stream.concat(base.stream(), BABYSIT_TOOLS.stream()).collect(Collectors.toUnmodifiableSet());
     }
 
     /** The full shared set plus the task tools, for a task-enabled router. */
@@ -306,6 +349,13 @@ public final class McpToolRouter {
             // above rather than sharing it, so the pre-task path stays
             // byte-for-byte what it was.
             descriptors.addAll(taskTools.toolDescriptors().stream()
+                    .filter(d -> d instanceof JsonObject o
+                            && o.members().get("name") instanceof JsonString n
+                            && allowedTools.contains(n.value()))
+                    .toList());
+        }
+        if (babysitTools != null) {
+            descriptors.addAll(babysitTools.toolDescriptors().stream()
                     .filter(d -> d instanceof JsonObject o
                             && o.members().get("name") instanceof JsonString n
                             && allowedTools.contains(n.value()))
@@ -579,6 +629,7 @@ public final class McpToolRouter {
             case "sessions_list" -> sessionsList(caller);
             case "task_get", "task_list", "task_update", "task_create", "task_claim" ->
                     taskCall(caller, tool, arguments);
+            case "babysit_start", "ci_rerun", "babysit_escalate" -> babysitCall(caller, tool, arguments);
             default -> throw new McpToolException("Unknown tool: " + tool);
         };
     }
@@ -1905,6 +1956,20 @@ public final class McpToolRouter {
             throw new McpToolException("Unknown tool: " + tool);
         }
         return taskTools.call(caller, tool, asObject(arguments));
+    }
+
+    /**
+     * Routes a babysitting tool to its delegate, after the same live-session
+     * check every session tool makes: an ended session can neither start a
+     * babysitter nor spend a rerun. The null guard mirrors {@link #taskCall}'s.
+     */
+    private JsonValue babysitCall(ManagedSessionId caller, String tool, JsonValue arguments)
+            throws McpToolException {
+        if (babysitTools == null) {
+            throw new McpToolException("Unknown tool: " + tool);
+        }
+        requireLiveSession(caller);
+        return babysitTools.call(caller, tool, asObject(arguments));
     }
 
     // ---- shared helpers -----------------------------------------------------

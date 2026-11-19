@@ -1,6 +1,9 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.Escalation;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -39,6 +42,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -137,7 +141,8 @@ class InboxModelTest {
         Inbox inbox = inbox(Query.NONE);
 
         assertEquals(List.of(GroupKind.NEEDS_YOU, GroupKind.FLAGGED, GroupKind.RUNNING, GroupKind.BLOCKED,
-                GroupKind.IN_REVIEW, GroupKind.READY, GroupKind.IDLE, GroupKind.DONE), kinds(inbox));
+                GroupKind.IN_REVIEW, GroupKind.READY, GroupKind.IDLE, GroupKind.DONE), kinds(inbox),
+                "no babysitter, no Babysitting group: an empty group is never shown");
         assertEquals(List.of("Waiting"), titles(inbox, GroupKind.NEEDS_YOU));
         assertEquals(List.of("Flagged stopped"), titles(inbox, GroupKind.FLAGGED));
         assertEquals(List.of("Working"), titles(inbox, GroupKind.RUNNING));
@@ -271,6 +276,81 @@ class InboxModelTest {
         assertEquals(Optional.of(""), InboxModel.projectPrefix("  Project:"));
         assertEquals(Optional.empty(), InboxModel.projectPrefix("proj"));
         assertEquals(Optional.empty(), InboxModel.projectPrefix(null));
+    }
+
+    // -- babysitting ------------------------------------------------------
+
+    /** The session's row rebuilt with its part in a babysitting engagement. */
+    private static TaskRow withBabysit(TaskRow row, SessionBabysit part) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest(), Optional.of(part));
+    }
+
+    /** {@code watched} and {@code babysitter} paired in {@code state}, with {@code escalations}. */
+    private static Map<ManagedSessionId, SessionBabysit> paired(TaskRow watched, TaskRow babysitter,
+                                                                BabysitState state, boolean escalated) {
+        BabysitPairing pairing = new BabysitPairing(babysitter.session().id(), watched.session().id(),
+                watched.session().repositoryId(), 12, state);
+        List<Escalation> escalations = escalated
+                ? List.of(new Escalation(UUID.randomUUID(), pairing.watchedId(), pairing.babysitterId(), 12,
+                        "Needs a design call", NOW, false))
+                : List.of();
+        return SessionBabysit.join(List.of(pairing), escalations);
+    }
+
+    @Test
+    void anActiveBabysitterGoesToBabysittingBeforeEveryOtherCheck() {
+        // Running, waiting for the user AND flagged: every other group would
+        // take it, Babysitting takes it first.
+        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.NEEDS_ATTENTION), true, NOW);
+        TaskRow watched = running("Watched", NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
+        alphaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
+        alphaRows.add(withBabysit(watched, parts.get(watched.session().id())));
+        task("Ready one", Presentation.READY);
+        betaRows.add(session("Stopped", false, Optional.empty(), false, NOW));
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(List.of(GroupKind.RUNNING, GroupKind.READY, GroupKind.BABYSITTING, GroupKind.IDLE),
+                kinds(inbox), "Babysitting sits between Ready to start and Idle");
+        assertEquals(List.of("babysit PR #12"), titles(inbox, GroupKind.BABYSITTING));
+        assertEquals(List.of("Watched"), titles(inbox, GroupKind.RUNNING),
+                "a watched session with nothing to say stays where its dot puts it");
+        assertEquals("Babysitting", inbox.groups().get(2).label());
+        assertEquals(List.of(GroupKind.BABYSITTING), kinds(inbox(new Query(Optional.empty(), "is:babysit"))));
+    }
+
+    @Test
+    void aStoppedBabysitterIsAnOrdinarySessionAgain() {
+        TaskRow babysitter = session("babysit PR #12", false, Optional.empty(), false, NOW);
+        TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.STOPPED, false);
+        alphaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
+        alphaRows.add(watched);
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(List.of(GroupKind.IDLE), kinds(inbox));
+        assertEquals(List.of("babysit PR #12", "Watched"), titles(inbox, GroupKind.IDLE));
+    }
+
+    @Test
+    void anEscalatedWatchedSessionNeedsYouAndTheBabysitterIsNoActivity() {
+        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
+        TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.ESCALATED, true);
+        betaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
+        alphaRows.add(withBabysit(watched, parts.get(watched.session().id())));
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(List.of(GroupKind.NEEDS_YOU, GroupKind.BABYSITTING), kinds(inbox));
+        assertEquals(List.of("Watched"), titles(inbox, GroupKind.NEEDS_YOU),
+                "a stopped watched session its babysitter escalated needs the human");
+        assertEquals(2, inbox.quietProjects(), "a project with only a babysitter is quiet");
+        assertEquals(List.of("alpha"), inbox.projects().stream().filter(suggestion -> suggestion.active() > 0)
+                .map(suggestion -> suggestion.project().name()).toList());
     }
 
     // -- the pr: and issue: terms -----------------------------------------

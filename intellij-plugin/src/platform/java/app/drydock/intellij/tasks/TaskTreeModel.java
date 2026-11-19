@@ -125,7 +125,8 @@ public final class TaskTreeModel {
                          Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs,
                          Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot,
                          Set<Path> pendingIssueRoots,
-                         Set<ListingExpansionTracker.GroupKey> pendingJiraGroups) {
+                         Set<ListingExpansionTracker.GroupKey> pendingJiraGroups,
+                         Map<ManagedSessionId, SessionBabysit> babysitBySession) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -165,6 +166,39 @@ public final class TaskTreeModel {
             looseTaskRefsByMainRoot = Map.copyOf(copiedLooseRefs);
             pendingIssueRoots = Set.copyOf(pendingIssueRoots);
             pendingJiraGroups = Set.copyOf(pendingJiraGroups);
+            babysitBySession = Map.copyOf(babysitBySession);
+        }
+
+        /** The shape before sessions carried their babysitting engagement: none known. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
+                      Map<RepositoryId, Path> recordedRoots,
+                      Set<Path> worktreeContainers, Set<Path> pullRequestContainers,
+                      Set<Path> githubIssueRoots, Set<Path> githubGhostRoots,
+                      Set<Path> jiraRoots, Set<Path> jiraGhostRoots,
+                      Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
+                      Map<Path, IssueListing> issuesByMainRoot,
+                      Map<Path, List<JiraGroups.Listing>> jiraGroupsByMainRoot,
+                      Map<Path, PullRequestListing> pullRequestsByMainRoot,
+                      Map<Path, List<Worktree>> pullRequestDedupWorktrees,
+                      Optional<String> listProblem, String filter,
+                      List<String> prTerms, List<String> issueTerms, Optional<Path> focusRoot,
+                      Map<ManagedSessionId, Boolean> resumable,
+                      Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession,
+                      Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs,
+                      Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot,
+                      Set<Path> pendingIssueRoots,
+                      Set<ListingExpansionTracker.GroupKey> pendingJiraGroups) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                    openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms,
+                    focusRoot, resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
+                    pendingIssueRoots, pendingJiraGroups, Map.of());
         }
 
         /** Compatibility with the previous full constructor, before item search references were carried. */
@@ -203,7 +237,7 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
-                    pendingIssueRoots, pendingJiraGroups);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession);
         }
 
         /** These inputs with item references available to the scoped search matcher. Pure. */
@@ -215,7 +249,7 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessions, looseTasks,
-                    pendingIssueRoots, pendingJiraGroups);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession);
         }
 
         /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
@@ -434,7 +468,8 @@ public final class TaskTreeModel {
         return new TaskRow(session, in.activity().getOrDefault(session.id(), Optional.empty()),
                 running, branch, placement, session.readOnly(),
                 running && in.missingFolders().contains(directory), resumable,
-                Optional.ofNullable(in.pullRequestsBySession().get(session.id())));
+                Optional.ofNullable(in.pullRequestsBySession().get(session.id())),
+                Optional.ofNullable(in.babysitBySession().get(session.id())));
     }
 
     private record Children(List<TaskNode> visible, List<IdleWorktree> inactive, boolean termsMatched) {

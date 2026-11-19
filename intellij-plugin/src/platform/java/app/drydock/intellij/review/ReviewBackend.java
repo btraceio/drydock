@@ -3,6 +3,7 @@ package app.drydock.intellij.review;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
+import app.drydock.babysit.BabysitStateFile;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -19,6 +20,8 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.McpSessionRegistry;
 import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.McpToolRouter;
+import app.drydock.mcp.BabysitToolContext;
+import app.drydock.mcp.BabysitTools;
 import app.drydock.mcp.TaskTools;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
@@ -159,6 +162,18 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     }
 
     /**
+     * The tools of a babysitting-enabled backend: review, rename, the task
+     * tools when {@code withTasks}, and exactly the three {@link
+     * McpToolRouter#BABYSIT_TOOLS}.
+     */
+    private static Set<String> servedTools(boolean withTasks) {
+        Stream<String> base = withTasks ? reviewRenameAndTaskTools().stream()
+                : McpToolRouter.REVIEW_TOOLS_AND_RENAME.stream();
+        return Stream.concat(base, McpToolRouter.BABYSIT_TOOLS.stream())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
      * As the five-argument constructor, with the delayed-task delegate
      * (T14a): {@code taskTools} is the {@link TaskTools} instance the router
      * dispatches the four {@code task_*} tools to, and the backend's surface
@@ -169,10 +184,10 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
      * legacy constructor, serves exactly what it served before: no task
      * tool is advertised or callable.
      *
-     * <p>The body repeats the five-argument one instead of delegating to it
-     * on purpose: the existing constructors and the four/five-argument test
-     * seams stay byte-identical, so the only difference here is the router's
-     * allowed set and its delegate.</p>
+     * <p>The shared delegate-carrying body repeats the five-argument one
+     * instead of delegating to it on purpose: the four/five-argument
+     * constructors and test seams stay byte-identical, so the only
+     * difference here is the router's allowed set and its delegates.</p>
      *
      * @throws NullPointerException if {@code taskTools} is null (build a
      *         delegate-less backend through a legacy constructor instead)
@@ -181,7 +196,41 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
                          BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
                          TaskTools taskTools) {
-        Objects.requireNonNull(taskTools, "taskTools");
+        this(baseDir, sessions, repositories, agentRegistry, sessionRenamer, (BabysitToolContext) null,
+                Objects.requireNonNull(taskTools, "taskTools"));
+    }
+
+    /**
+     * As above, with the babysitting delegate as well: the router also serves
+     * exactly the three {@link McpToolRouter#BABYSIT_TOOLS}, through a {@link
+     * BabysitTools} built here over {@code babysitContext}, this backend's
+     * own MCP registry (the escalation budget) and the shared babysitting
+     * state file under {@code baseDir} (the persisted rerun counters).
+     * {@code taskTools} may be null: a failed task service still leaves the
+     * babysitting tools served, beside review and rename.
+     *
+     * @throws NullPointerException if {@code babysitContext} is null
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                         TaskTools taskTools, BabysitToolContext babysitContext) {
+        this(baseDir, sessions, repositories, agentRegistry, sessionRenamer,
+                Objects.requireNonNull(babysitContext, "babysitContext"), taskTools);
+    }
+
+    /**
+     * The delegate-carrying body: {@code babysitContext} and {@code taskTools}
+     * are each optional here (at least one is present by the public
+     * constructors' checks), and the allowed set is review, rename and the
+     * names of exactly the delegates present. The parameter order differs
+     * from the public seven-argument constructor's so the two cannot be
+     * confused by overload resolution.
+     */
+    private ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                          BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                          BabysitToolContext babysitContext, TaskTools taskTools) {
         Path stateFile = baseDir.resolve("state.json");
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
         tourStore = new TourStore(TourStore.siblingOf(stateFile));
@@ -200,9 +249,10 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         credentialWriter = (id, delivery, endpointUrl, token) -> delivery == McpDelivery.COMMAND_LINE
                 ? configWriter.writeTokenFor(id, token)
                 : configWriter.writeFor(id, endpointUrl, token);
-        // The router serves the review tools, session_rename and the four
-        // task tools, and nothing more: the task delegate adds names, never
-        // privileges (P7), and the same allowlist gates every tool.
+        // The router serves the review tools, session_rename and the tools
+        // of the delegates present (task, babysitting), and nothing more:
+        // a delegate adds names, never privileges (P7), and the same
+        // allowlist gates every tool.
         WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
                 sessions,
                 repositories,
@@ -220,8 +270,15 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 (session, draft) -> notServed("session_handoff"),
                 (session, draft) -> notServed("session_handoff"),
                 pendingQuestions);
-        McpToolRouter router = new McpToolRouter(context, mcpRegistry,
-                reviewRenameAndTaskTools(), taskTools);
+        McpToolRouter router;
+        if (babysitContext == null) {
+            router = new McpToolRouter(context, mcpRegistry, reviewRenameAndTaskTools(), taskTools);
+        } else {
+            BabysitTools babysitTools = new BabysitTools(babysitContext, mcpRegistry,
+                    new BabysitStateFile(BabysitStateFile.defaultFile(baseDir)));
+            router = new McpToolRouter(context, mcpRegistry, servedTools(taskTools != null), taskTools,
+                    babysitTools);
+        }
         this.router = router;
         server = new McpServer(mcpRegistry, router);
         pullRequests = new GhCliService();

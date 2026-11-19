@@ -38,6 +38,7 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dimension;
+import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Point;
@@ -61,7 +62,7 @@ import java.util.function.Predicate;
  * rows, and a "+N more" / "Show less" toggle where the group truncates.
  * Clicking a header (or Enter on it) collapses or expands the group; the
  * collapsed and show-all sets live here, seeded from each group's default.
- * A row is {@code [icon] title … [#PR] [project] [window]}: the PR number
+ * A row is {@code [icon] title … [#PR] [project] [window] [babysit]}: the PR number
  * opens the pull request, the project tag reports the project to the owner,
  * the window tag names a running session's other window, and a double-click
  * or Enter activates the row. EDT only.
@@ -108,6 +109,13 @@ final class InboxList extends JBList<InboxList.Entry> {
     static final JBColor NEEDS_TAG_BORDER = new JBColor(0xE4D3C4, 0x5C4A3B);
     static final JBColor BLOCKED_TEXT = new JBColor(0xB4282E, 0xE5777C);
     static final JBColor TAG_BORDER = new JBColor(0xEBECF0, 0x43454A);
+    /** The Babysitting header and the babysitting chip's border: distinct from every other group's. */
+    static final JBColor BABYSIT_TEXT = new JBColor(0x2E7D6F, 0x5DB8A8);
+    static final JBColor BABYSIT_TAG_BORDER = new JBColor(0xBFDCD6, 0x355A53);
+    /** A babysitter row's mark after its dot: the debugger's watch eye. */
+    static final Icon BABYSITTER_ICON = AllIcons.Debugger.Watch;
+    /** The attention mark a row wears while its engagement needs the human. */
+    static final Icon ESCALATION_ICON = AllIcons.General.BalloonWarning;
 
     private final DefaultListModel<Entry> entries = new DefaultListModel<>();
     private final Set<GroupKind> collapsed = EnumSet.noneOf(GroupKind.class);
@@ -374,6 +382,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                             mirrors.stream().map(TaskMirror::label).toList()));
                 }
                 session.taskTitles().forEach(title -> text.append(" · task: ").append(title));
+                task.babysit().ifPresent(part -> text.append(" · ").append(part.tooltipText()));
             }
             case TaskItem task -> {
                 DelayedTaskRow row = task.row();
@@ -412,6 +421,32 @@ final class InboxList extends JBList<InboxList.Entry> {
         return Optional.empty();
     }
 
+    /**
+     * A session row's babysitting chip ({@link SessionBabysit#chipText}):
+     * {@code watching #12} on a babysitter, {@code babysat · escalated} on
+     * a watched session. Empty for everything else. Reads the carried row
+     * only.
+     */
+    static Optional<String> babysitChip(Item item) {
+        return item instanceof SessionItem session
+                ? session.row().babysit().map(SessionBabysit::chipText) : Optional.empty();
+    }
+
+    /**
+     * Whether the row is a watched session whose engagement needs the human:
+     * it wears the Needs you background and the escalation badge. Only the
+     * watched side -- that is where the human acts; the babysitter's row
+     * says "escalated" in its chip.
+     */
+    static boolean escalated(Item item) {
+        return item instanceof SessionItem session && session.row().babysit()
+                .filter(part -> part.role() == SessionBabysit.Role.WATCHED && part.needsHuman()).isPresent();
+    }
+
+    private static Optional<TaskRow> session(Item item) {
+        return item instanceof SessionItem session ? Optional.of(session.row()) : Optional.empty();
+    }
+
     /** The PR number a row shows, and whether it is a link (its page is known). */
     record PullRequestLabel(int number, boolean link, TaskTreeRenderer.PullRequestBadgeKind kind) {
         PullRequestLabel(int number, boolean link) {
@@ -444,20 +479,25 @@ final class InboxList extends JBList<InboxList.Entry> {
     }
 
     /**
-     * The row's status icon: a session's dot, or the task state's icon,
-     * followed by the carried PR's conflict and then CI-failure icons when
-     * those are positively known (the session's branch PR, the task's
-     * already-linked PR). No PR, or nothing known, leaves the base alone.
+     * The row's status icon: a session's dot (a babysitter's followed by
+     * the watch mark), or the task state's icon, followed by the carried
+     * PR's conflict and then CI-failure icons when those are positively
+     * known (the session's branch PR, the task's already-linked PR), and
+     * last, on a watched session, the escalation mark while its
+     * babysitting engagement needs the human. No PR, or nothing known, leaves the base alone.
      */
     static Icon icon(Item item) {
         return switch (item) {
             case SessionItem session -> {
                 TaskRow task = session.row();
                 SessionStatus status = task.running() ? SessionStatus.RUNNING : task.session().status();
-                Icon base = SessionDots.dotIcon(status, task.activity());
-                yield task.branchPullRequest()
+                Icon dot = SessionDots.dotIcon(status, task.activity());
+                Icon base = task.babysit().filter(part -> part.role() == SessionBabysit.Role.BABYSITTER).isPresent()
+                        ? TaskTreeRenderer.rowIcon(dot, BABYSITTER_ICON) : dot;
+                Icon health = task.branchPullRequest()
                         .map(pr -> TaskTreeRenderer.healthIcon(base, pr.conflicting(), !pr.ciFailures().isEmpty()))
                         .orElse(base);
+                yield escalated(item) ? TaskTreeRenderer.rowIcon(health, ESCALATION_ICON) : health;
             }
             case TaskItem task -> {
                 Icon base = stateIcon(task.row());
@@ -484,6 +524,7 @@ final class InboxList extends JBList<InboxList.Entry> {
         return switch (kind) {
             case NEEDS_YOU -> NEEDS_TEXT;
             case BLOCKED -> BLOCKED_TEXT;
+            case BABYSITTING -> BABYSIT_TEXT;
             case DONE, IDLE -> NamedColorUtil.getInactiveTextColor();
             default -> UIUtil.getLabelForeground();
         };
@@ -502,6 +543,8 @@ final class InboxList extends JBList<InboxList.Entry> {
         private final JBLabel pullRequest = new JBLabel();
         private final JBLabel tag = new JBLabel();
         private final JBLabel windowTag = new JBLabel();
+        /** The babysitting engagement chip, in the editor's monospace so it reads as machine state. */
+        private final JBLabel babysitTag = new JBLabel();
         private boolean pullRequestLink;
 
         Renderer() {
@@ -515,8 +558,11 @@ final class InboxList extends JBList<InboxList.Entry> {
             trailing.add(pullRequest, spaced);
             trailing.add(tag, spaced);
             trailing.add(windowTag, spaced);
+            trailing.add(babysitTag, spaced);
             tag.setFont(JBUI.Fonts.smallFont());
             windowTag.setFont(JBUI.Fonts.smallFont());
+            // The small font's size is already scaled; only the family changes.
+            babysitTag.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBUI.Fonts.smallFont().getSize()));
             panel.add(center, BorderLayout.CENTER);
             panel.add(trailing, BorderLayout.EAST);
         }
@@ -556,7 +602,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                 }
                 case Row row -> {
                     Item item = row.item();
-                    boolean needs = row.group().kind() == GroupKind.NEEDS_YOU;
+                    boolean needs = row.group().kind() == GroupKind.NEEDS_YOU || escalated(item);
                     if (!selected && needs) {
                         background = NEEDS_BACKGROUND;
                     }
@@ -590,7 +636,19 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
                                 JBUI.Borders.empty(0, 4)));
                     });
-                    trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent());
+                    Optional<String> babysit = babysitChip(item);
+                    babysitTag.setVisible(babysit.isPresent());
+                    babysit.ifPresent(text -> {
+                        babysitTag.setText(text);
+                        babysitTag.setForeground(selected ? foreground
+                                : session(item).flatMap(TaskRow::babysit).filter(SessionBabysit::needsHuman)
+                                        .isPresent() ? NEEDS_TEXT : NamedColorUtil.getInactiveTextColor());
+                        babysitTag.setBorder(BorderFactory.createCompoundBorder(
+                                JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : BABYSIT_TAG_BORDER, 1),
+                                JBUI.Borders.empty(0, 4)));
+                    });
+                    trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent()
+                            || babysit.isPresent());
                     panel.setBorder(JBUI.Borders.empty(0, 30, 0, 12));
                 }
             }

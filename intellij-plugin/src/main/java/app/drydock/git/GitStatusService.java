@@ -495,6 +495,215 @@ public final class GitStatusService implements AutoCloseable {
         return repositoryRoot.toAbsolutePath().normalize().toString();
     }
 
+    /**
+     * {@code git fetch origin +<branch>:refs/remotes/origin/<branch>}: one
+     * branch, its destination pinned by the explicit refspec regardless of
+     * the remote's configured refspecs.
+     */
+    static List<String> fetchBranchCommand(Path git, Path repositoryRoot, String branch) {
+        return List.of(git.toString(), "-C", repositoryRoot.toString(), "fetch", "origin",
+                "+" + branch + ":refs/remotes/origin/" + branch);
+    }
+
+    /**
+     * Runs {@link #fetchBranchCommand} under the repository's
+     * {@link #FETCH_LOCKS} monitor, credentials never prompted for (exactly
+     * as in {@link #fetchAllBlocking}). Best-effort: the answer is git's
+     * failure excerpt, empty when the fetch succeeded; a timeout or a spawn
+     * failure is reported the same way as a non-zero exit, never thrown.
+     * {@code repositoryRoot} must be the main checkout every caller keys on,
+     * not a linked worktree of it, or two fetches of the same ref would take
+     * different locks.
+     */
+    private static Optional<String> fetchBranchLocked(Path git, Path repositoryRoot, String branch) {
+        List<String> command = fetchBranchCommand(git, repositoryRoot, branch);
+        synchronized (FETCH_LOCKS.computeIfAbsent(fetchLockKey(repositoryRoot), k -> new Object())) {
+            try {
+                ProcessResult result = run(command, new ProcessRunner.Options(
+                        null, FETCH_TIMEOUT, true, Map.of("GIT_TERMINAL_PROMPT", "0")));
+                return result.exitCode() == 0
+                        ? Optional.empty()
+                        : Optional.of(ProcessRunner.excerpt(result.stderr()));
+            } catch (GitException e) {
+                // Timeout or spawn failure: same treatment as a non-zero exit.
+                return Optional.of(e.getMessage() == null ? e.toString() : e.getMessage());
+            }
+        }
+    }
+
+    // ---- babysitter worktrees: a detached checkout at a PR branch's remote tip ----
+
+    /** {@code git worktree add} checks out a whole tree; a large repository needs more than a query's budget. */
+    private static final Duration WORKTREE_ADD_TIMEOUT = Duration.ofSeconds(60);
+
+    /**
+     * A PR branch's remote tip after a one-branch fetch. {@link #commit()}
+     * is what {@code refs/remotes/origin/<branch>} resolved to afterwards --
+     * possibly a stale value when {@link #fetchError()} is present (the
+     * fetch failed and the ref is whatever an earlier fetch left), empty
+     * when it does not resolve at all.
+     */
+    public record RemoteBranchTip(Optional<String> commit, Optional<String> fetchError) {
+        public RemoteBranchTip {
+            Objects.requireNonNull(commit, "commit");
+            Objects.requireNonNull(fetchError, "fetchError");
+        }
+
+        public boolean fetchFailed() {
+            return fetchError.isPresent();
+        }
+    }
+
+    /**
+     * A detached worktree created by {@link #addDetachedWorktreeAtRemoteBranchBlocking}:
+     * {@link #baseCommit()} is the exact commit it was checked out at, and
+     * {@link #fetchError()} is present when the fetch before it failed, so
+     * that commit is the last-known remote tip rather than a fresh one.
+     */
+    public record DetachedWorktree(Path directory, String baseCommit, Optional<String> fetchError) {
+        public DetachedWorktree {
+            Objects.requireNonNull(directory, "directory");
+            Objects.requireNonNull(baseCommit, "baseCommit");
+            Objects.requireNonNull(fetchError, "fetchError");
+        }
+    }
+
+    /**
+     * {@code git -C <root> worktree add --detach <dir> --end-of-options <commit>}.
+     * The checkout is at a commit, not a ref: the caller resolved it from
+     * {@code refs/remotes/origin/<branch>} and records it as the worktree's
+     * base, and a fetch landing between the resolve and the add must not
+     * make the two disagree.
+     */
+    static List<String> addDetachedWorktreeCommand(Path git, Path repositoryRoot, Path directory, String commit) {
+        return List.of(git.toString(), "-C", repositoryRoot.toString(), "worktree", "add", "--detach",
+                directory.toString(), "--end-of-options", commit);
+    }
+
+    /**
+     * Fetches {@code branch} from origin (under the per-repository fetch
+     * lock) and resolves {@code refs/remotes/origin/<branch>}. A failed fetch
+     * is reported on the result, never thrown. Blocking; never on the EDT.
+     *
+     * @throws IllegalArgumentException when {@code branch} is not a plain ref name
+     * @throws GitExecutableNotFoundException when there is no git
+     */
+    public RemoteBranchTip remoteBranchTipBlocking(Path repositoryRoot, String branch) {
+        requireBranchName(branch);
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        Optional<String> fetchError = fetchBranchLocked(git, repositoryRoot, branch);
+        Optional<String> commit = commitForRefBlocking(repositoryRoot, "refs/remotes/origin/" + branch);
+        return new RemoteBranchTip(commit, fetchError);
+    }
+
+    /**
+     * Creates a <em>detached</em> worktree at {@code directory} checked out
+     * at {@code branch}'s remote tip: fetch the one branch (a failure is
+     * reported on the result, and the last-known remote-tracking ref is used),
+     * resolve {@code refs/remotes/origin/<branch>} -- fully qualified, so a
+     * local branch that happens to be called {@code origin/<branch>} cannot
+     * shadow it -- then {@link #addDetachedWorktreeCommand}. No branch is
+     * created: the PR branch stays owned by whichever worktree has it
+     * checked out. Blocking; never on the EDT.
+     *
+     * @throws IllegalArgumentException when {@code branch} is not a plain ref name
+     * @throws WorktreeDirectoryExistsException when {@code directory} exists; nothing ran
+     * @throws GitCommandFailedException when the remote-tracking ref does not
+     *         resolve, or the add fails ({@link GitCommandFailedException.Outcome#UNKNOWN}
+     *         when it was killed mid-way and may have left a directory behind)
+     */
+    public DetachedWorktree addDetachedWorktreeAtRemoteBranchBlocking(Path repositoryRoot, Path directory,
+                                                                      String branch) {
+        requireBranchName(branch);
+        Path normalizedDir = directory.toAbsolutePath().normalize();
+        if (Files.exists(normalizedDir)) {
+            throw new WorktreeDirectoryExistsException(normalizedDir);
+        }
+        RemoteBranchTip tip = remoteBranchTipBlocking(repositoryRoot, branch);
+        if (tip.commit().isEmpty()) {
+            throw new GitCommandFailedException(
+                    List.of("git", "rev-parse", "--verify", "refs/remotes/origin/" + branch), 128,
+                    "refs/remotes/origin/" + branch + " does not resolve"
+                            + tip.fetchError().map(error -> "; the fetch failed: " + error).orElse(""));
+        }
+        Path git = locator.locate()
+                .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
+        prepareWorktreeParent(normalizedDir);
+        List<String> command = addDetachedWorktreeCommand(git, repositoryRoot, normalizedDir, tip.commit().get());
+        ProcessResult result = run(command, new ProcessRunner.Options(null, WORKTREE_ADD_TIMEOUT, true, Map.of()));
+        if (result.exitCode() != 0) {
+            if (result.stderr().toLowerCase(Locale.ROOT).contains("not a git repository")) {
+                throw new NotAGitRepositoryException(repositoryRoot);
+            }
+            throw new GitCommandFailedException(command, result.exitCode(), ProcessRunner.excerpt(result.stderr()));
+        }
+        return new DetachedWorktree(normalizedDir, tip.commit().get(), tip.fetchError());
+    }
+
+    /**
+     * {@code git worktree remove --force <directory>}, for undoing a
+     * worktree this process has just created and nobody has worked in yet.
+     * Never throws: a failure is logged at WARNING with git's excerpt.
+     * Blocking; never on the EDT.
+     */
+    public void removeWorktreeQuietly(Path repositoryRoot, Path directory) {
+        Optional<Path> git = locator.locate();
+        if (git.isEmpty()) {
+            LOG.log(Level.WARNING, "Could not remove the worktree at " + directory + ": no git executable");
+            return;
+        }
+        List<String> command = List.of(git.get().toString(), "-C", repositoryRoot.toString(),
+                "worktree", "remove", "--force", directory.toAbsolutePath().normalize().toString());
+        try {
+            ProcessResult result = run(command, new ProcessRunner.Options(null, WORKTREE_ADD_TIMEOUT, true, Map.of()));
+            if (result.exitCode() != 0) {
+                LOG.log(Level.WARNING, "Could not remove the worktree at " + directory + "; remove it by hand: "
+                        + ProcessRunner.excerpt(result.stderr()));
+            }
+        } catch (GitException e) {
+            LOG.log(Level.WARNING, "Could not remove the worktree at " + directory + "; remove it by hand", e);
+        }
+    }
+
+    /**
+     * {@code git worktree prune}, after a {@link #removeWorktreeQuietly}
+     * that followed an add killed mid-way: the add may have registered the
+     * worktree before its directory was complete, and a stale entry for a
+     * directory that is gone would make the next add at that path fail.
+     * Prune touches git's metadata only, and only entries whose directory
+     * is gone. Never throws: a failure is logged at WARNING with git's
+     * excerpt. Blocking; never on the EDT.
+     */
+    public void pruneWorktreesQuietly(Path repositoryRoot) {
+        Optional<Path> git = locator.locate();
+        if (git.isEmpty()) {
+            LOG.log(Level.WARNING, "Could not prune the worktrees of " + repositoryRoot + ": no git executable");
+            return;
+        }
+        try {
+            ProcessResult result = run(pruneWorktreesCommand(git.get(), repositoryRoot),
+                    new ProcessRunner.Options(null, WORKTREE_ADD_TIMEOUT, true, Map.of()));
+            if (result.exitCode() != 0) {
+                LOG.log(Level.WARNING, "Could not prune the worktrees of " + repositoryRoot + ": "
+                        + ProcessRunner.excerpt(result.stderr()));
+            }
+        } catch (GitException e) {
+            LOG.log(Level.WARNING, "Could not prune the worktrees of " + repositoryRoot, e);
+        }
+    }
+
+    /** {@code git -C <root> worktree prune}. Pure. */
+    static List<String> pruneWorktreesCommand(Path git, Path repositoryRoot) {
+        return List.of(git.toString(), "-C", repositoryRoot.toString(), "worktree", "prune");
+    }
+
+    private static void requireBranchName(String branch) {
+        if (branch == null || !isRefComponent(branch)) {
+            throw new IllegalArgumentException("Not a plain branch name: " + branch);
+        }
+    }
+
     /** Synchronous form of {@link #defaultBranchFork(Path, boolean)}, package-private for tests. */
     DefaultBranchFork defaultBranchForkBlocking(Path repositoryRoot, boolean fetch) {
         Path git = locator.locate()
@@ -513,25 +722,9 @@ public final class GitStatusService implements AutoCloseable {
             // refspecs (single-branch clones, hand-edited fetch refspecs)
             // instead of relying on opportunistic updates. Credentials must
             // never be prompted for, exactly as in fetchAll.
-            List<String> command = List.of(
-                    git.toString(), "-C", repositoryRoot.toString(), "fetch", "origin",
-                    "+" + name.get() + ":refs/remotes/origin/" + name.get());
-            synchronized (FETCH_LOCKS.computeIfAbsent(fetchLockKey(repositoryRoot), k -> new Object())) {
-                try {
-                    ProcessResult result = run(command, new ProcessRunner.Options(
-                            null, FETCH_TIMEOUT, true, Map.of("GIT_TERMINAL_PROMPT", "0")));
-                    if (result.exitCode() != 0) {
-                        fetchFailed = true;
-                        fetchError = Optional.of(ProcessRunner.excerpt(result.stderr()));
-                    } else {
-                        fetched = true;
-                    }
-                } catch (GitException e) {
-                    // Timeout or spawn failure: same treatment as a non-zero exit.
-                    fetchFailed = true;
-                    fetchError = Optional.of(e.getMessage() == null ? e.toString() : e.getMessage());
-                }
-            }
+            fetchError = fetchBranchLocked(git, repositoryRoot, name.get());
+            fetchFailed = fetchError.isPresent();
+            fetched = !fetchFailed;
         }
         String ref;
         if (name.isEmpty()) {
@@ -577,8 +770,12 @@ public final class GitStatusService implements AutoCloseable {
         return Optional.empty();
     }
 
-    /** A branch-name-shaped string: no leading dash, no refspec tricks, no {@code ..}. */
-    private static boolean isRefComponent(String name) {
+    /**
+     * A branch-name-shaped string: no leading dash, no refspec tricks, no
+     * {@code ..} -- a name drydock is willing to put in a refspec or after
+     * {@code refs/remotes/origin/}. Stricter than git's own rules.
+     */
+    public static boolean isRefComponent(String name) {
         if (name.isEmpty() || name.length() > 200 || name.startsWith("-") || name.startsWith(".")
                 || name.contains("..") || name.endsWith("/") || name.endsWith(".") || name.contains("//")) {
             return false;
