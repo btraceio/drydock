@@ -403,4 +403,46 @@ class MergeFinishDecisionTest {
         assertThrows(IllegalArgumentException.class, () -> new MergeFinishDecision.CleanupOutcome(
                 true, MergeFinishDecision.BranchResult.NOT_ATTEMPTED, true, Optional.empty()));
     }
+
+    @Test
+    void theBaseCheckoutNameTravelsIntoThePreflightRefusals() {
+        String worktreeCheckout = "the worktree checkout of feat/parent";
+
+        MergeFinishDecision.Next.Stopped drifted = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forPreflight(
+                        target(Optional.of("release/2.0"), Optional.of(TIP), MergeTarget.InProgress.NONE),
+                        "main", "feat/x", true, worktreeCheckout));
+
+        assertEquals("The worktree checkout of feat/parent is on release/2.0, not main", drifted.headline());
+
+        MergeFinishDecision.Next.Stopped inProgress = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forPreflight(
+                        target(Optional.of("main"), Optional.of(TIP), MergeTarget.InProgress.MERGE),
+                        "main", "feat/x", true, worktreeCheckout));
+
+        assertEquals("The worktree checkout of feat/parent has a merge in progress", inProgress.headline());
+    }
+
+    @Test
+    void theDefaultBaseCheckoutNameIsStillTheMainCheckout() {
+        MergeFinishDecision.Next.Stopped drifted = assertInstanceOf(MergeFinishDecision.Next.Stopped.class,
+                MergeFinishDecision.forPreflight(
+                        target(Optional.of("release/2.0"), Optional.of(TIP), MergeTarget.InProgress.NONE),
+                        "main", "feat/x", true));
+
+        assertEquals("The main checkout is on release/2.0, not main", drifted.headline());
+    }
+
+    @Test
+    void aConflictHandOffNamesTheBaseCheckout() {
+        MergeFinishDecision.Next.HandOff handOff = assertInstanceOf(MergeFinishDecision.Next.HandOff.class,
+                MergeFinishDecision.forVerdict(new MergeVerdict.Conflicted(List.of("README.md")),
+                        "/parent", "feat/child", "feat/parent", false, "Codex",
+                        "the worktree checkout of feat/parent"));
+
+        assertEquals("Conflicts in 1 file — Codex is resolving them in the worktree checkout of feat/parent…",
+                handOff.headline());
+        assertTrue(handOff.prompt().startsWith("The merge of 'feat/child' into 'feat/parent' stopped on conflicts"
+                + " in the worktree checkout of feat/parent at /parent,"));
+    }
 }

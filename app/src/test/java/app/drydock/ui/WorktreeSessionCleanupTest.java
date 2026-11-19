@@ -1,5 +1,6 @@
 package app.drydock.ui;
 
+import app.drydock.app.SessionManager;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.BranchNotDeletedException;
 import app.drydock.git.WorktreeLockedException;
@@ -34,11 +35,13 @@ class WorktreeSessionCleanupTest {
             MergeFinishDecision.BranchDeletePlan.KEEP_NOT_OURS;
     private static final MergeFinishDecision.BranchDeletePlan KEEP_MOVED_PLAN =
             MergeFinishDecision.BranchDeletePlan.KEEP_MOVED;
+    private static final SessionManager.DeletionReason USER_DELETE =
+            SessionManager.DeletionReason.DELETED_BY_USER;
     private final ManagedSessionId sessionId = ManagedSessionId.newId();
     private final List<ManagedSessionId> deleted = new ArrayList<>();
 
     private WorktreeSessionCleanup cleanup(WorktreeSessionCleanup.WorktreeRemoval removal) {
-        return new WorktreeSessionCleanup(removal, id -> {
+        return new WorktreeSessionCleanup(removal, (id, reason) -> {
             deleted.add(id);
             return CompletableFuture.completedFuture(null);
         });
@@ -53,7 +56,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertEquals(List.of(Optional.of("feat/x")), requested);
         assertTrue(outcome.worktreeRemoved());
@@ -71,7 +74,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_NOT_OURS_PLAN, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_NOT_OURS_PLAN, false, USER_DELETE).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -84,7 +87,7 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new BranchNotDeletedException("feat/x", 1, "checked out")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.DELETE_FAILED, outcome.branch());
@@ -98,7 +101,7 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new WorktreeNotCleanException(WORKTREE)));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -111,10 +114,10 @@ class WorktreeSessionCleanupTest {
     void aFailedSessionDeletionIsReflectedInTheOutcome() throws Exception {
         WorktreeSessionCleanup subject = new WorktreeSessionCleanup(
                 (repo, worktree, branch, force) -> CompletableFuture.completedFuture(null),
-                id -> CompletableFuture.failedFuture(new IllegalStateException("state file locked")));
+                (id, reason) -> CompletableFuture.failedFuture(new IllegalStateException("state file locked")));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         // The worktree and branch are gone -- this is a genuine partial
         // success, not a reason to retry the destructive half -- but
@@ -132,7 +135,7 @@ class WorktreeSessionCleanupTest {
                 CompletableFuture.failedFuture(new WorktreeLockedException(WORKTREE, Optional.of("initializing"))));
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -152,7 +155,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_MOVED_PLAN, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", KEEP_MOVED_PLAN, false, USER_DELETE).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertTrue(outcome.worktreeRemoved());
@@ -169,7 +172,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertEquals(List.of(Optional.<String>empty()), requested);
         assertEquals(MergeFinishDecision.BranchResult.KEPT_NOT_OURS, outcome.branch());
@@ -184,10 +187,31 @@ class WorktreeSessionCleanupTest {
             return CompletableFuture.completedFuture(null);
         });
 
-        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, true).get();
-        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, true, USER_DELETE).get();
+        subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertEquals(List.of(true, false), requested);
+    }
+
+    @Test
+    void theExplicitDeletionReasonIsForwardedAfterWorktreeRemoval() throws Exception {
+        List<String> steps = new ArrayList<>();
+        WorktreeSessionCleanup subject = new WorktreeSessionCleanup(
+                (repo, worktree, branch, force) -> {
+                    steps.add("worktree removed");
+                    return CompletableFuture.completedFuture(null);
+                },
+                (id, reason) -> {
+                    assertEquals(sessionId, id);
+                    steps.add("session deleted: " + reason);
+                    return CompletableFuture.completedFuture(null);
+                });
+
+        MergeFinishDecision.CleanupOutcome outcome = subject.run(sessionId, REPO, WORKTREE, "feat/x",
+                DELETE_BRANCH, false, SessionManager.DeletionReason.MERGED_AND_FINISHED).get();
+
+        assertTrue(outcome.sessionDeleted());
+        assertEquals(List.of("worktree removed", "session deleted: MERGED_AND_FINISHED"), steps);
     }
 
     @Test
@@ -197,7 +221,7 @@ class WorktreeSessionCleanupTest {
         });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertFalse(outcome.worktreeRemoved());
         assertEquals(MergeFinishDecision.BranchResult.NOT_ATTEMPTED, outcome.branch());
@@ -209,12 +233,12 @@ class WorktreeSessionCleanupTest {
     void aSessionDeletionThatThrowsSynchronouslyStillYieldsACleanupOutcome() throws Exception {
         WorktreeSessionCleanup subject = new WorktreeSessionCleanup(
                 (repo, worktree, branch, force) -> CompletableFuture.completedFuture(null),
-                id -> {
+                (id, reason) -> {
                     throw new IllegalStateException("toolkit has stopped");
                 });
 
         MergeFinishDecision.CleanupOutcome outcome =
-                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false).get();
+                subject.run(sessionId, REPO, WORKTREE, "feat/x", DELETE_BRANCH, false, USER_DELETE).get();
 
         assertTrue(outcome.worktreeRemoved());
         assertFalse(outcome.sessionDeleted());

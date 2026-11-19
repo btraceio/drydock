@@ -297,16 +297,13 @@ class RepositorySidebarEmptyStateFxTest extends FxTest {
         public void noteSessionDeleted(ManagedSessionId sessionId) { }
 
         @Override
-        public void openNewSession(Repository repository) { }
+        public void promptNewTask(Repository repository) { }
 
         @Override
         public void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree) { }
 
         @Override
-        public void startParallelSession(ManagedAgentSession session) { }
-
-        @Override
-        public void startParallelWorktreeSession(ManagedAgentSession session) { }
+        public void promptTaskFromSession(ManagedAgentSession session) { }
 
         @Override
         public void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree) { }

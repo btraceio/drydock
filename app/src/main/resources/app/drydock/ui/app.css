@@ -1987,6 +1987,26 @@
     -fx-font-weight: bold;
     -fx-padding: 1 7 1 7;
 }
+/* Session started from another session via "New task…": a stacked follow-up
+   is informational (↳), a parent-waits child is a real constraint (⏸) -- its
+   parent cannot finish until this row is finished -- so the two read
+   differently at a glance. */
+.task-relation-chip {
+    -fx-background-color: -drydock-hover;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-text-dim;
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+}
+.task-relation-waits {
+    -fx-background-color: -drydock-accent-soft;
+    -fx-background-radius: 100px;
+    -fx-text-fill: -drydock-accent;
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+}
 .resume-cost-badge {
     -fx-background-color: -drydock-error-soft;
     -fx-background-radius: 100px;

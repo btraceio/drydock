@@ -22,6 +22,7 @@ import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.TaskRelation;
 import app.drydock.domain.Workflow;
 import app.drydock.domain.WorkflowBrief;
 import app.drydock.domain.WorkflowId;
@@ -104,6 +105,13 @@ import java.util.function.UnaryOperator;
  * application environment").</p>
  */
 public final class SessionManager implements AutoCloseable {
+
+    /** Why a managed session's metadata is being deleted. */
+    public enum DeletionReason {
+        DELETED_BY_USER,
+        MERGED_AND_FINISHED,
+        HANDED_OFF
+    }
 
     private static final Logger LOG = System.getLogger(SessionManager.class.getName());
 
@@ -1208,6 +1216,12 @@ public final class SessionManager implements AutoCloseable {
      * transcript is touched (plan section 21: never destroy user data).
      */
     public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId) {
+        return deleteSession(sessionId, DeletionReason.DELETED_BY_USER);
+    }
+
+    /** Deletes a session's metadata, retaining the intent for lifecycle observers. */
+    public CompletableFuture<Void> deleteSession(ManagedSessionId sessionId, DeletionReason reason) {
+        Objects.requireNonNull(reason, "reason");
         // thenRunAsync: closeSession's future completes on the FX thread
         // (closeGracefully's callback); the metadata removal must not run
         // there.
@@ -1216,7 +1230,12 @@ public final class SessionManager implements AutoCloseable {
                     // Also covers a session that had no active surface, and so
                     // never went through onSurfaceClosed.
                     releaseMcpConfig(sessionId);
-                    findSession(sessionId).ifPresent(this::unmarkEvalAsync);
+                    // Capture before the state rewrite removes the session; reuse
+                    // this exact pre-rewrite value for unmarking and notification.
+                    ManagedAgentSession deleted = findSession(sessionId).orElse(null);
+                    if (deleted != null) {
+                        unmarkEvalAsync(deleted);
+                    }
                     // The brief goes with the session it describes. Nothing
                     // else ever removes one, so leaving it would grow the state
                     // file by up to a full brief per deleted session, forever.
@@ -1227,8 +1246,40 @@ public final class SessionManager implements AutoCloseable {
                             .withHandoffBriefs(state.handoffBriefs().stream()
                                     .filter(brief -> !brief.sessionId().equals(sessionId))
                                     .toList()));
+                    notifyWaitChildReleased(deleted, reason);
                 },
                 backgroundExecutor);
+    }
+
+    /**
+     * Observes a deleted session that held a parent-waits relation: the gate
+     * it held over its parent's finish flow lifts with the deletion, and the
+     * parent's human should hear that the task ended WITHOUT its work being
+     * merged -- the one way a parent's pull request can silently omit work a
+     * waiting task had already done. Invoked on the FX thread, only when the
+     * parent session still exists.
+     */
+    public interface WaitChildReleaseObserver {
+        void onWaitChildReleased(ManagedAgentSession parent, ManagedAgentSession deletedChild);
+    }
+
+    private volatile WaitChildReleaseObserver waitChildReleaseObserver;
+
+    /** Wiring for {@link WaitChildReleaseObserver}; the UI installs one at startup. */
+    public void setWaitChildReleaseObserver(WaitChildReleaseObserver observer) {
+        this.waitChildReleaseObserver = observer;
+    }
+
+    /** Releases a parent-waits gate held by {@code deleted}, if it held one and its parent survives. */
+    private void notifyWaitChildReleased(ManagedAgentSession deleted, DeletionReason reason) {
+        if (reason != DeletionReason.DELETED_BY_USER
+                || deleted == null
+                || deleted.taskRelation().orElse(null) != TaskRelation.PARENT_WAITS
+                || waitChildReleaseObserver == null) {
+            return;
+        }
+        deleted.taskParent().flatMap(this::findSession).ifPresent(parent ->
+                Platform.runLater(() -> waitChildReleaseObserver.onWaitChildReleased(parent, deleted)));
     }
 
     // ---- Close --------------------------------------------------------------

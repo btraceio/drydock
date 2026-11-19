@@ -73,6 +73,8 @@ final class MergeAndFinishFlow {
      * lose the name in exactly the run that earned it.
      */
     private String agentName = "the agent";
+    /** The checkout the merge runs in, named for the copy; see {@link #start}. */
+    private String baseCheckoutName = "the main checkout";
     private boolean conflictsHandedOff;
     private Optional<String> lastProbeDetail = Optional.empty();
     /** The node this flow currently owns in the shared modal layer. */
@@ -112,11 +114,24 @@ final class MergeAndFinishFlow {
      * main, not origin/main".</p>
      */
     void start(ManagedSessionId sessionId, Path repositoryRoot, Path worktreeRoot, String branch, String base) {
+        start(sessionId, repositoryRoot, worktreeRoot, branch, base, "the main checkout");
+    }
+
+    /**
+     * As above, naming the checkout the merge runs in: the main checkout by
+     * default, the parent's worktree for a task child merging into its
+     * parent's branch (see {@code WorktreeLifecycleController#finishBaseOf}).
+     * The name travels into the user-facing copy, which must say which
+     * checkout to fix when the base is drifted or busy.
+     */
+    void start(ManagedSessionId sessionId, Path repositoryRoot, Path worktreeRoot, String branch, String base,
+               String baseCheckoutName) {
         this.sessionId = sessionId;
         this.repositoryRoot = repositoryRoot;
         this.worktreeRoot = worktreeRoot;
         this.branch = branch;
         this.base = base;
+        this.baseCheckoutName = baseCheckoutName;
         showBusy("Checking the main checkout…");
         // The header's Finish ▸ becomes the flow's pill for the same reason
         // the other hand-offs do it: the modal is dismissible, and a Finish
@@ -135,7 +150,8 @@ final class MergeAndFinishFlow {
                         return;
                     }
                     this.target = data.target();
-                    apply(MergeFinishDecision.forPreflight(data.target(), base, branch, data.worktreeClean()));
+                    apply(MergeFinishDecision.forPreflight(data.target(), base, branch, data.worktreeClean(),
+                            baseCheckoutName));
                 }));
     }
 
@@ -166,7 +182,7 @@ final class MergeAndFinishFlow {
                         return;
                     }
                     apply(MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, false,
-                            agentName));
+                            agentName, baseCheckoutName));
                 }));
     }
 
@@ -177,7 +193,8 @@ final class MergeAndFinishFlow {
         if (tab == null) {
             // No terminal to hand off to: the merge is open in the main
             // checkout and only the user can finish it.
-            stop(MergeFinishDecision.forHandOffWithoutATerminal(branch, base, repositoryRoot.toString()));
+            stop(MergeFinishDecision.forHandOffWithoutATerminal(branch, base, repositoryRoot.toString(),
+                    baseCheckoutName));
             return;
         }
         tab.sendPrompt(handOff.prompt());
@@ -186,7 +203,7 @@ final class MergeAndFinishFlow {
 
     private void pollAgain(int attemptNumber) {
         if (attemptNumber >= POLL_MAX_ATTEMPTS) {
-            stop(MergeFinishDecision.forTimeout(branch, base, lastProbeDetail));
+            stop(MergeFinishDecision.forTimeout(branch, base, lastProbeDetail, baseCheckoutName));
             return;
         }
         PauseTransition wait = new PauseTransition(POLL_INTERVAL);
@@ -201,7 +218,7 @@ final class MergeAndFinishFlow {
                     }
                     MergeFinishDecision.Next next =
                             MergeFinishDecision.forVerdict(verdict, repositoryRoot.toString(), branch, base, true,
-                                    agentName);
+                                    agentName, baseCheckoutName);
                     if (next instanceof MergeFinishDecision.Next.KeepWaiting) {
                         pollAgain(attemptNumber + 1);
                         return;
@@ -230,7 +247,8 @@ final class MergeAndFinishFlow {
         BranchDeleteGate.plan(sessionManager.mayDeleteBranchOf(worktreeRoot), target.branchTipOid(),
                         () -> worktreeService.inspectMergeTarget(repositoryRoot, branch))
                 .thenCompose(plan -> attempt(() ->
-                        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch, plan, false)))
+                        cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch, plan, false,
+                                SessionManager.DeletionReason.MERGED_AND_FINISHED)))
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     if (ex != null) {
                         // The merge landed; only the cleanup call failed to

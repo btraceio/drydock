@@ -129,6 +129,19 @@ public final class UiErrors {
         alert(title, header, detail);
     }
 
+    /**
+     * An informational notice, not an error: one headline, one detail
+     * paragraph, one OK. Used for lifecycle news the user must see but did
+     * nothing wrong (a waiting task released its parent's finish gate).
+     */
+    public static void showNotice(String title, String headline, String detail) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle(title);
+        alert.setHeaderText(headline);
+        alert.setContentText(detail);
+        alert.showAndWait();
+    }
+
     private static void alert(String title, String header, String body) {
         Alert alert = new Alert(Alert.AlertType.ERROR);
         alert.setTitle(title);

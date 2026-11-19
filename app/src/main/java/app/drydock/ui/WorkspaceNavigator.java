@@ -47,25 +47,19 @@ public interface WorkspaceNavigator {
     /** Called after a session's metadata was deleted so any open tab disappears too. */
     void noteSessionDeleted(ManagedSessionId sessionId);
 
-    /** Creates a brand-new session on {@code repository}'s main checkout and opens it. */
-    void openNewSession(Repository repository);
+    /** Opens the unified "New task" dialog for {@code repository} (destination chosen inside the dialog). */
+    void promptNewTask(Repository repository);
 
     /** Opens the Start-session modal for an existing worktree checkout. */
     void promptStartWorktreeSession(Repository repository, WorktreeService.Worktree worktree);
 
     /**
-     * Starts a fresh, parallel session in {@code session}'s own checkout --
-     * the same worktree (or main checkout), no context transferred -- so a
-     * second agent can investigate alongside a running or idle one.
+     * Opens the from-a-session "New task" dialog: the new task runs either in
+     * {@code session}'s own checkout (no relation) or on a sub-branch forked
+     * from its branch in a fresh worktree, with the human choosing the
+     * {@link app.drydock.domain.TaskRelation} to the parent session.
      */
-    void startParallelSession(ManagedAgentSession session);
-
-    /**
-     * Opens the create-worktree modal pre-seeded with {@code session}'s
-     * branch, so a second agent can work in a fresh worktree on the same
-     * branch rather than sharing the session's own checkout.
-     */
-    void startParallelWorktreeSession(ManagedAgentSession session);
+    void promptTaskFromSession(ManagedAgentSession session);
 
     /** Shows the main-pane empty state for a discovered worktree that has no session yet. */
     void showUnopenedWorktree(Repository repository, WorktreeService.Worktree worktree);

@@ -16,6 +16,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.TaskRelation;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
@@ -2892,7 +2893,7 @@ public final class RepositorySidebar extends VBox {
 
             Button newSession = new Button("+");
             newSession.getStyleClass().add("row-action-button");
-            newSession.setTooltip(new Tooltip("New session or worktree…"));
+            newSession.setTooltip(new Tooltip("New task…"));
             newSession.setFocusTraversable(false);
             ContextMenu newMenu = newSessionMenu(repository);
             newSession.setOnAction(e -> newMenu.show(newSession, Side.BOTTOM, 0, 4));
@@ -2945,6 +2946,37 @@ public final class RepositorySidebar extends VBox {
          * session row has a Review sub-tab to land on, an unopened worktree
          * row has to start a session first.</p>
          */
+        /**
+         * The task-relation chip: the session was started from another
+         * session via "New task…" and that parent still exists. "↳ name" for
+         * a stacked follow-up, "⏸ name" for a parent-waits child, whose
+         * parent literally cannot finish until this row is finished.
+         */
+        private Optional<Label> taskRelationChip(ManagedAgentSession session, Repository repository) {
+            if (session.taskParent().isEmpty()) {
+                return Optional.empty();
+            }
+            Optional<ManagedAgentSession> parent = sessionsFor(repository).stream()
+                    .filter(candidate -> session.taskParent().orElseThrow().equals(candidate.id()))
+                    .findFirst();
+            if (parent.isEmpty()) {
+                // The parent session was deleted; the relation resolved to
+                // nothing (a follow-up falls back to the repository base), so
+                // the row no longer advertises it.
+                return Optional.empty();
+            }
+            boolean parentWaits = session.taskRelation().orElseThrow() == TaskRelation.PARENT_WAITS;
+            Label chip = new Label((parentWaits ? "⏸ " : "↳ ") + parent.get().displayName());
+            chip.getStyleClass().add(parentWaits ? "task-relation-waits" : "task-relation-chip");
+            chip.setMouseTransparent(true);
+            chip.setTooltip(new Tooltip(parentWaits
+                    ? parent.get().displayName() + " waits for this task: it cannot merge or open a PR until "
+                            + "this session is finished; this task's work then merges into the parent's branch."
+                    : "Follow-up of " + parent.get().displayName() + " — this task's branch was forked from "
+                            + "the parent's, and its pull request bases on it."));
+            return Optional.of(chip);
+        }
+
         private Optional<Label> findingsBadge(Path checkoutRoot, Runnable onReview) {
             return openFindingsAt.apply(checkoutRoot).map(count -> {
                 Label badge = new Label("◨" + count);
@@ -3098,6 +3130,7 @@ public final class RepositorySidebar extends VBox {
                 row.getChildren().add(prChip);
             }
             row.getChildren().addAll(secondaryChips);
+            taskRelationChip(session, repository).ifPresent(chip -> row.getChildren().add(chip));
             session.worktreeRoot().ifPresent(root ->
                     findingsBadge(root, () -> navigator.showReviewForSession(session.id(),
                             SessionReviewScopes.Choice.LOCAL))
@@ -3524,14 +3557,8 @@ public final class RepositorySidebar extends VBox {
             MenuItem resume = new MenuItem("Resume");
             resume.setOnAction(e -> withLiveSession(id, navigator::resumeSession));
 
-            MenuItem parallel = new MenuItem("Same worktree (this branch)");
-            parallel.setOnAction(e -> withLiveSession(id, navigator::startParallelSession));
-
-            MenuItem parallelWorktree = new MenuItem("New worktree from this branch");
- parallelWorktree.setOnAction(e -> withLiveSession(id, navigator::startParallelWorktreeSession));
-
-            Menu newSessionMenu = new Menu("New session");
-            newSessionMenu.getItems().addAll(parallel, parallelWorktree);
+            MenuItem newTask = new MenuItem("New task…");
+            newTask.setOnAction(e -> withLiveSession(id, navigator::promptTaskFromSession));
 
             MenuItem rename = new MenuItem("Rename…");
             rename.setOnAction(e -> withLiveSession(id, navigator::promptRenameSession));
@@ -3556,7 +3583,7 @@ public final class RepositorySidebar extends VBox {
             sphinxReview.setOnAction(e -> navigator.startSphinxReviewInSession(id));
 
             ContextMenu menu = new ContextMenu();
-            menu.getItems().addAll(resume, newSessionMenu, rename, stop, delete,
+            menu.getItems().addAll(resume, newTask, rename, stop, delete,
                     new SeparatorMenuItem(), reviewLocal, reviewPullRequest, sphinxReview,
                     new SeparatorMenuItem(), reveal);
             // Relabelled on every showing, not once at build: this menu is
@@ -3654,29 +3681,27 @@ public final class RepositorySidebar extends VBox {
                 .flatMap(kind -> agentRegistry.sphinxReview(kind));
     }
 
-    /** The repo "+" menu (worktree handoff "Creating"): checkout session / new worktree / rescan. */
+    /** The repo "+" menu: one unified "New task…" (destination chosen in the dialog) plus rescan. */
     private ContextMenu newSessionMenu(Repository repository) {
         return newSessionMenus.computeIfAbsent(repository.id(), id -> {
-            MenuItem inCheckout = new MenuItem("❯_  Session on main checkout");
-            inCheckout.setOnAction(e -> navigator.openNewSession(repository));
+            MenuItem newTask = new MenuItem("New task…");
+            newTask.setOnAction(e -> navigator.promptNewTask(repository));
             if (repository.isRemote()) {
-                return new ContextMenu(inCheckout);
+                return new ContextMenu(newTask);
             }
-            MenuItem newWorktree = new MenuItem("◫  New worktree…");
-            newWorktree.setOnAction(e -> onNewWorktree.accept(repository));
             MenuItem rescan = new MenuItem("⟳  Rescan worktrees");
             rescan.setOnAction(e -> {
                 refreshWorktrees(repository, true);
                 refreshPullRequests(repository);
             });
-            return new ContextMenu(inCheckout, newWorktree, rescan);
+            return new ContextMenu(newTask, rescan);
         });
     }
 
     private ContextMenu repoMenu(Repository repository) {
         return repoMenus.computeIfAbsent(repository.id(), id -> {
-            MenuItem newSession = new MenuItem("New session");
-            newSession.setOnAction(e -> navigator.openNewSession(repository));
+            MenuItem newSession = new MenuItem("New task…");
+            newSession.setOnAction(e -> navigator.promptNewTask(repository));
 
             MenuItem refresh = new MenuItem("Refresh");
             refresh.setOnAction(e -> {

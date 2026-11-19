@@ -156,19 +156,31 @@ final class MergeFinishDecision {
      * worktree cannot survive the cleanup that follows a successful merge.
      */
     static Next forPreflight(MergeTarget target, String expectedBase, String branch, boolean worktreeClean) {
+        return forPreflight(target, expectedBase, branch, worktreeClean, "the main checkout");
+    }
+
+    /**
+     * As above, naming the checkout the merge targets. A follow-up child
+     * merges into its parent's branch, which lives in the parent's worktree
+     * rather than the main checkout -- the copy must name what the user
+     * actually has to fix, so the caller passes the checkout's name.
+     */
+    static Next forPreflight(MergeTarget target, String expectedBase, String branch, boolean worktreeClean,
+                             String baseCheckoutName) {
         if (target.baseBranch().isEmpty()) {
-            return new Next.Stopped("The main checkout is not on a branch",
+            return new Next.Stopped(capitalize(baseCheckoutName) + " is not on a branch",
                     "Its HEAD is detached, so a merge committed there would be lost once " + branch
                             + " is deleted. Check out " + expectedBase
-                            + " in the main checkout, then finish again. Nothing was merged.");
+                            + " there, then finish again. Nothing was merged.");
         }
         String actualBase = target.baseBranch().get();
         if (!actualBase.equals(expectedBase)) {
-            return new Next.Stopped("The main checkout is on " + actualBase + ", not " + expectedBase,
+            return new Next.Stopped(capitalize(baseCheckoutName) + " is on " + actualBase + ", not " + expectedBase,
                     "Check out " + expectedBase + " there, then finish again. Nothing was merged.");
         }
         if (target.inProgress() != MergeTarget.InProgress.NONE) {
-            return new Next.Stopped("The main checkout has a " + describe(target.inProgress()) + " in progress",
+            return new Next.Stopped(capitalize(baseCheckoutName) + " has a " + describe(target.inProgress())
+                            + " in progress",
                     "Finish or abort it there, then finish again. Nothing was merged.");
         }
         if (target.branchTipOid().isEmpty()) {
@@ -205,6 +217,12 @@ final class MergeFinishDecision {
      */
     static Next forVerdict(MergeVerdict verdict, String mainCheckout, String branch, String base,
                            boolean afterHandOff, String agentName) {
+        return forVerdict(verdict, mainCheckout, branch, base, afterHandOff, agentName, "the main checkout");
+    }
+
+    /** As above, naming the checkout the merge ran in; see {@link #forPreflight}. */
+    static Next forVerdict(MergeVerdict verdict, String mainCheckout, String branch, String base,
+                           boolean afterHandOff, String agentName, String baseCheckoutName) {
         return switch (verdict) {
             case MergeVerdict.Merged ignored -> new Next.CleanUp();
             case MergeVerdict.AlreadyMerged ignored -> new Next.CleanUp();
@@ -213,12 +231,13 @@ final class MergeFinishDecision {
                     : new Next.HandOff(
                             "Conflicts in " + conflicted.unmergedPaths().size()
                                     + (conflicted.unmergedPaths().size() == 1 ? " file" : " files")
-                                    + " — " + agentName + " is resolving them in the main checkout…",
-                            handOffPrompt(mainCheckout, branch, base, conflicted.unmergedPaths()));
+                                    + " — " + agentName + " is resolving them in " + baseCheckoutName + "…",
+                            handOffPrompt(mainCheckout, branch, base, conflicted.unmergedPaths(),
+                                    baseCheckoutName));
             case MergeVerdict.NotMerged ignored -> afterHandOff
                     ? new Next.Stopped("The merge was abandoned",
                             "The merge of " + branch + " into " + base
-                                    + " was aborted in the main checkout. Nothing was deleted.")
+                                    + " was aborted in " + baseCheckoutName + ". Nothing was deleted.")
                     : new Next.Stopped("Nothing was merged",
                             "Git left " + base + " unchanged and reported no conflicts. Nothing was deleted.");
             case MergeVerdict.Refused refused -> afterHandOff
@@ -243,15 +262,15 @@ final class MergeFinishDecision {
      * without the work actually being in it.
      */
     private static String handOffPrompt(String mainCheckout, String branch, String base,
-                                        List<String> unmergedPaths) {
+                                        List<String> unmergedPaths, String baseCheckoutName) {
         String absolutePaths = unmergedPaths.stream()
                 .map(path -> mainCheckout + "/" + path)
                 .collect(Collectors.joining(", "));
         String addCommands = unmergedPaths.stream()
                 .map(path -> "`git -C " + mainCheckout + " add " + path + "`")
                 .collect(Collectors.joining(", "));
-        return "The merge of '" + branch + "' into '" + base + "' stopped on conflicts in the main checkout at "
-                + mainCheckout + ", not in this worktree. The conflicted files to edit are: " + absolutePaths
+        return "The merge of '" + branch + "' into '" + base + "' stopped on conflicts in " + baseCheckoutName
+                + " at " + mainCheckout + ", not in this worktree. The conflicted files to edit are: " + absolutePaths
                 + ". Edit those files in place, then run " + addCommands
                 + " for each resolved file and `git -C " + mainCheckout + " commit --no-edit` to finish."
                 + " Do not modify this worktree."
@@ -291,6 +310,11 @@ final class MergeFinishDecision {
                                          String agentName) {
         return "✓ Merged " + branch + " into " + base
                 + (conflictsResolved ? " — conflicts resolved by " + agentName : "");
+    }
+
+    /** Uppercases the first letter of a checkout name reaching a headline. */
+    private static String capitalize(String name) {
+        return name.isEmpty() ? name : Character.toUpperCase(name.charAt(0)) + name.substring(1);
     }
 
     /**
@@ -364,16 +388,30 @@ final class MergeFinishDecision {
      * to name the checkout, and it has to say that nothing was deleted.
      */
     static Next.Stopped forHandOffWithoutATerminal(String branch, String base, String mainCheckout) {
+        return forHandOffWithoutATerminal(branch, base, mainCheckout, "the main checkout");
+    }
+
+    /** As above, naming the checkout the merge ran in; see {@link #forPreflight}. */
+    static Next.Stopped forHandOffWithoutATerminal(String branch, String base, String mainCheckout,
+                                                   String baseCheckoutName) {
         return new Next.Stopped("Conflicts need resolving",
-                "The merge of " + branch + " into " + base + " is open in the main checkout at " + mainCheckout
+                "The merge of " + branch + " into " + base + " is open in " + baseCheckoutName + " at "
+                        + mainCheckout
                         + ", but this session's terminal is closed. Resolve it there. Nothing was deleted.");
     }
 
     /** The poll gave up. Says where the merge might be, and that nothing was destroyed. */
     static Next.Stopped forTimeout(String branch, String base, Optional<String> lastProbeDetail) {
+        return forTimeout(branch, base, lastProbeDetail, "the main checkout");
+    }
+
+    /** As above, naming the checkout the merge ran in; see {@link #forPreflight}. */
+    static Next.Stopped forTimeout(String branch, String base, Optional<String> lastProbeDetail,
+                                   String baseCheckoutName) {
         return new Next.Stopped("Merge not confirmed after 5 minutes",
                 "The merge of " + branch + " into " + base
-                        + " may still be open in the main checkout — check the terminal. Nothing was deleted."
+                        + " may still be open in " + baseCheckoutName
+                        + " — check the terminal. Nothing was deleted."
                         + lastProbeDetail.map(detail -> " Last check: " + detail).orElse(""));
     }
 }

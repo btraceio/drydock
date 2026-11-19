@@ -6,6 +6,8 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
+import app.drydock.domain.SessionRelations;
+import app.drydock.domain.TaskRelation;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GitBranchState;
 import app.drydock.git.GitChangeSummary;
@@ -20,6 +22,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.util.Duration;
@@ -134,17 +137,18 @@ final class WorktreeLifecycleController {
             return;
         }
         tab.updatePrChip(session.prState(), session.prNumber());
-        record Branches(String branch, String base) { }
-        gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
-                        (worktreeStatus, baseStatus) ->
-                                new Branches(branchNameOf(worktreeStatus), branchNameOf(baseStatus)))
+        record Branches(String branch, FinishBase base) { }
+        gitStatusService.getStatus(worktreeRoot).thenCombine(finishBaseOf(session, repository),
+                        (worktreeStatus, finishBase) ->
+                                new Branches(branchNameOf(worktreeStatus), finishBase))
                 .whenComplete((branches, ex) -> Platform.runLater(() -> {
                     if (ex != null || openTab.apply(sessionId) == null) {
                         return;
                     }
-                    tab.configureWorktree(branches.branch(), branches.base(), worktreeRoot,
-                            () -> showFinishPanel(sessionId, worktreeRoot, branches.branch(), branches.base()));
-                    refreshWorktreeChips(tab, sessionId, worktreeRoot, branches.base());
+                    tab.configureWorktree(branches.branch(), branches.base().base(), worktreeRoot,
+                            () -> showFinishPanel(sessionId, worktreeRoot, branches.branch(), branches.base(),
+                                    false));
+                    refreshWorktreeChips(tab, sessionId, worktreeRoot, branches.base().base());
                 }));
     }
 
@@ -164,6 +168,37 @@ final class WorktreeLifecycleController {
 
     private Optional<ManagedAgentSession> sessionById(ManagedSessionId sessionId) {
         return sessionManager.sessions().stream().filter(s -> s.id().equals(sessionId)).findFirst();
+    }
+
+    /**
+     * Where this session's finish flow merges into, captured per open of the
+     * Finish panel. A session with no task relation merges into the main
+     * checkout's current branch, as it always has. A task child ({@code
+     * session.taskParent()}) merges into its PARENT'S branch instead, which
+     * lives in the parent's checkout -- a worktree git holds the branch
+     * checkout in, so the merge has to run there. The parent is resolved
+     * live, at finish time: the recorded id alone would silently merge into
+     * a branch that has since moved or vanished. When the parent session is
+     * gone or detached, the relation degrades to the plain main-checkout
+     * base rather than failing the finish.
+     */
+    record FinishBase(String base, Path baseCheckout, boolean stacked) { }
+
+    private CompletableFuture<FinishBase> finishBaseOf(ManagedAgentSession session, Repository repository) {
+        Path mainCheckout = repository.root();
+        return gitStatusService.getStatus(mainCheckout).thenCompose(repoStatus -> {
+            Optional<ManagedAgentSession> parent = session.taskParent().flatMap(this::sessionById);
+            if (parent.isEmpty()) {
+                return CompletableFuture.completedFuture(new FinishBase(branchNameOf(repoStatus), mainCheckout, false));
+            }
+            Path parentCheckout = parent.get().worktreeRoot().orElse(mainCheckout);
+            return gitStatusService.getStatus(parentCheckout).thenApply(parentStatus ->
+                    parentStatus.branch() instanceof GitBranchState.OnBranch onBranch
+                            ? new FinishBase(onBranch.name(), parentCheckout, true)
+                            // A detached parent has no branch to merge into
+                            // there; fall back to the main checkout.
+                            : new FinishBase(branchNameOf(repoStatus), mainCheckout, false));
+        });
     }
 
     private static String branchNameOf(GitStatus status) {
@@ -191,21 +226,24 @@ final class WorktreeLifecycleController {
         if (session == null || repository == null) {
             return;
         }
-        gitStatusService.getStatus(worktreeRoot).thenCombine(gitStatusService.getStatus(repository.root()),
-                        (worktreeStatus, baseStatus) ->
-                                new String[] { branchNameOf(worktreeStatus), branchNameOf(baseStatus) })
-                .whenComplete((branches, ex) -> Platform.runLater(() -> {
+        gitStatusService.getStatus(worktreeRoot).thenCombine(finishBaseOf(session, repository),
+                        (worktreeStatus, finishBase) -> new BranchAndBase(branchNameOf(worktreeStatus), finishBase))
+                .whenComplete((resolved, ex) -> Platform.runLater(() -> {
                     if (ex == null) {
-                        showFinishPanel(sessionId, worktreeRoot, branches[0], branches[1]);
+                        showFinishPanel(sessionId, worktreeRoot, resolved.branch(), resolved.base(), false);
                     }
                 }));
     }
 
-    private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
+    private record BranchAndBase(String branch, FinishBase base) { }
+
+    private void showFinishPanel(ManagedSessionId sessionId, Path worktreeRoot, String branch, FinishBase finishBase,
+                                 boolean bypassWaitingGate) {
         ManagedAgentSession session = sessionById(sessionId).orElse(null);
         if (session == null || modalLayer == null) {
             return;
         }
+        String base = finishBase.base();
         if (mergeInFlight.contains(sessionId)) {
             // A merge-and-finish is running and owns the modal layer; its own
             // progress/result modal is what the user should be looking at. The
@@ -218,6 +256,21 @@ final class WorktreeLifecycleController {
                 running.showHandoffRunning("Merging…");
             }
             return;
+        }
+        // The parent-waits gate: a task child launched with "parent waits"
+        // keeps this session from finishing until the child's session is
+        // finished -- its work merges into this session's branch first, so the
+        // finished PR contains both. Checked at the panel's open, not
+        // continuously: a child started while the panel is open does not yank
+        // a panel the user is already reading. "Finish anyway" is the escape
+        // hatch -- e.g. the child turns out to be unnecessary -- and it is
+        // deliberately per panel-open, so the next Finish is gated again.
+        if (!bypassWaitingGate) {
+            List<ManagedAgentSession> waiting = waitingChildrenOf(sessionId);
+            if (!waiting.isEmpty()) {
+                modalLayer.show(waitingPanel(sessionId, waiting, worktreeRoot, branch, finishBase));
+                return;
+            }
         }
         // The pre-panel inspection (git status + change summary + gh pr
         // view) can take seconds; show a busy modal IMMEDIATELY so the
@@ -308,19 +361,15 @@ final class WorktreeLifecycleController {
                         }
                     }
 
-                    FinishWorktreePanel.Context context = new FinishWorktreePanel.Context(
-                            branch, base, worktreeRoot, current.prState(), current.prNumber(),
-                            prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty(),
-                            sessionManager.mayDeleteBranchOf(worktreeRoot), data.worktreeClean());
-                    FinishWorktreePanel panel = new FinishWorktreePanel(context, new FinishWorktreePanel.Actions() {
+                    FinishWorktreePanel.Actions actions = new FinishWorktreePanel.Actions() {
                         @Override
                         public void mergeIntoBase() {
-                            startMergeAndFinish(sessionId, worktreeRoot, branch, base);
+                            startMergeAndFinish(sessionId, worktreeRoot, branch, finishBase);
                         }
 
                         @Override
                         public void createPullRequest() {
-                            handoffCreatePr(sessionId, worktreeRoot, branch);
+                            handoffCreatePr(sessionId, worktreeRoot, branch, finishBase);
                         }
 
                         @Override
@@ -332,7 +381,12 @@ final class WorktreeLifecycleController {
                         public void viewPullRequest(String url) {
                             openInBrowser(url);
                         }
-                    }, modalLayer::close);
+                    };
+                    FinishWorktreePanel panel = new FinishWorktreePanel(new FinishWorktreePanel.Context(
+                            branch, base, worktreeRoot, current.prState(), current.prNumber(),
+                            prInfo.flatMap(GhCliService.PrInfo::url), Optional.of(summary), status.dirty(),
+                            sessionManager.mayDeleteBranchOf(worktreeRoot), data.worktreeClean()),
+                            actions, modalLayer::close);
                     modalLayer.show(panel);
                 }));
     }
@@ -354,6 +408,63 @@ final class WorktreeLifecycleController {
     // ---- The three finish actions: merge-and-finish, PR hand-off, delete ----
 
     /**
+     * The session's live task children that hold the parent-waits gate: tasks
+     * launched from this session with "parent waits for this task" that have
+     * not been finished (their session still exists -- merge-and-finish
+     * deletes it, which is exactly what lifts the gate).
+     */
+    private List<ManagedAgentSession> waitingChildrenOf(ManagedSessionId sessionId) {
+        return SessionRelations.waitingChildrenOf(sessionManager.sessions(), sessionId);
+    }
+
+    /**
+     * The gate panel a parent-waits child puts in front of this session's
+     * Finish panel. Destructive nothing: only Close and Finish-again, where
+     * Finish-again re-enters the panel with the gate bypassed for that one
+     * open.
+     */
+    private Region waitingPanel(ManagedSessionId sessionId, List<ManagedAgentSession> waiting,
+                                Path worktreeRoot, String branch, FinishBase finishBase) {
+        Label title = new Label("⏸  Waiting for a task");
+        title.getStyleClass().add("modal-title");
+        Label lead = new Label(waiting.size() == 1
+                ? "This session cannot finish while its waiting task is unfinished:"
+                : "This session cannot finish while its waiting tasks are unfinished:");
+        lead.getStyleClass().add("finish-action-caption");
+        lead.setWrapText(true);
+        VBox children = new VBox(4);
+        for (ManagedAgentSession child : waiting) {
+            Label row = new Label("• " + child.displayName() + "  ·  " + child.status());
+            row.getStyleClass().add("merge-flow-detail");
+            row.setWrapText(true);
+            children.getChildren().add(row);
+        }
+        Label caption = new Label("Finish the task's session first — its work merges into " + finishBase.base()
+                + ", and this session's pull request then carries it. Finishing anyway goes to PR without "
+                + "the task's work.");
+        caption.getStyleClass().add("finish-action-caption");
+        caption.setWrapText(true);
+        Button close = new Button("Close");
+        close.getStyleClass().add("worktree-cancel-button");
+        close.setOnAction(e -> modalLayer.close());
+        Button finishAnyway = new Button("Finish anyway");
+        finishAnyway.getStyleClass().add("worktree-create-button");
+        finishAnyway.setOnAction(e -> {
+            modalLayer.close();
+            showFinishPanel(sessionId, worktreeRoot, branch, finishBase, true);
+        });
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox buttons = new HBox(8, spacer, close, finishAnyway);
+        buttons.setAlignment(Pos.CENTER_RIGHT);
+        VBox panel = new VBox(12, title, lead, children, caption, buttons);
+        panel.getStyleClass().add("modal");
+        panel.setMaxWidth(480);
+        panel.setMaxHeight(Region.USE_PREF_SIZE);
+        return panel;
+    }
+
+    /**
      * Starts the merge-and-finish flow, at most one per session: the Finish
      * panel closes before its action runs and the flow's modal is
      * dismissible without cancelling the work, so a second click would
@@ -369,7 +480,9 @@ final class WorktreeLifecycleController {
      * branch nobody named. {@link #DETACHED_LABEL} is refused for the same
      * reason, with copy of its own.</p>
      */
-    private void startMergeAndFinish(ManagedSessionId sessionId, Path worktreeRoot, String branch, String base) {
+    private void startMergeAndFinish(ManagedSessionId sessionId, Path worktreeRoot, String branch,
+                                     FinishBase finishBase) {
+        String base = finishBase.base();
         if (branch == null || branch.isBlank() || base == null || base.isBlank()) {
             LOG.log(Level.WARNING, "Refusing merge-and-finish for session " + sessionId
                     + ": branch=" + branch + " base=" + base);
@@ -393,17 +506,35 @@ final class WorktreeLifecycleController {
         }
         new MergeAndFinishFlow(worktreeService, sessionManager, modalLayer, cleanup, openTab,
                 onSessionsChanged, onSessionDeleted, () -> mergeInFlight.remove(sessionId))
-                .start(sessionId, repository.root(), worktreeRoot, branch, base);
+                .start(sessionId, finishBase.baseCheckout(), worktreeRoot, branch, base,
+                        baseCheckoutName(finishBase, repository));
     }
 
-    private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch) {
+    /**
+     * The checkout the merge targets, named the way the flow's copy refers to
+     * it: the main checkout by default, the parent's worktree for a task
+     * child merging into its parent's branch.
+     */
+    private String baseCheckoutName(FinishBase finishBase, Repository repository) {
+        return finishBase.baseCheckout().equals(repository.root())
+                ? "the main checkout"
+                : "the worktree checkout of " + finishBase.base();
+    }
+
+    private void handoffCreatePr(ManagedSessionId sessionId, Path worktreeRoot, String branch,
+                                 FinishBase finishBase) {
         OpenSessionTab tab = openTab.apply(sessionId);
         if (tab == null) {
             return;
         }
         tab.showHandoffRunning(tab.agentName() + " is opening a PR…");
+        // Only a live parent on a branch establishes a task-stack base. A
+        // missing or detached parent falls back to the main checkout's branch,
+        // which must not become an accidental PR base.
+        String baseClause = createPrBaseClause(finishBase);
         tab.sendPrompt("Push this worktree's branch '" + branch + "' to origin (git push -u origin " + branch
-                + ") and open a pull request with gh pr create --fill, then report the PR number.");
+                + ") and open a pull request with gh pr create --fill" + baseClause
+                + ", then report the PR number.");
         if (!ghCliService.isAvailable()) {
             // No gh to observe with: optimistic OPEN (chip without a number)
             // after a grace period, per the agreed fallback.
@@ -428,6 +559,12 @@ final class WorktreeLifecycleController {
                     tab.showHandoffDone("PR opened");
                     restoreFinishLater(tab, sessionId);
                 });
+    }
+
+    static String createPrBaseClause(FinishBase finishBase) {
+        boolean validStackedBase = finishBase.stacked() && !finishBase.base().isBlank()
+                && !DETACHED_LABEL.equals(finishBase.base());
+        return validStackedBase ? " with --base " + finishBase.base() : "";
     }
 
     /**
@@ -607,7 +744,7 @@ final class WorktreeLifecycleController {
                                     boolean force) {
         cleanup.run(sessionId, repositoryRoot, worktreeRoot, branch,
                         MergeFinishDecision.forRequestedDelete(sessionManager.mayDeleteBranchOf(worktreeRoot)),
-                        force)
+                        force, SessionManager.DeletionReason.DELETED_BY_USER)
                 .whenComplete((outcome, ex) -> Platform.runLater(() -> {
                     // Re-resolve rather than reuse the captured tab: ⌘W during
                     // `git worktree remove` disposes it, and header updates on a
