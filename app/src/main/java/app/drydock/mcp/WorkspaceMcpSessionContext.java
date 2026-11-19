@@ -29,6 +29,7 @@ import app.drydock.review.RecheckAssessment;
 import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.ui.AgentLabels;
 import app.drydock.review.ReviewScope;
@@ -119,6 +120,14 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public static final long RECLAIM_TIMEOUT_SECONDS = 25;
 
     /**
+     * Bound on {@link #deliverMessage}: one FX-thread hop and one
+     * keystroke-by-keystroke submission into the target's terminal. Same
+     * shape as a rename; the distinct constant keeps a message budget from
+     * ever being confused with a rename budget in a stack trace.
+     */
+    public static final long MESSAGE_TIMEOUT_SECONDS = 25;
+
+    /**
      * Bound on {@link #writeHandoff}: one FX-thread hop, one state transform,
      * and one {@code git rev-parse} off the FX thread to stamp the brief with
      * the commit it was written against. Slightly longer than a rename for
@@ -161,6 +170,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final BiFunction<ManagedSessionId, String, CompletableFuture<Void>> sessionReclaimer;
     private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<HandoffBrief>> handoffWriter;
     private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<Workflow>> workflowHandoffWriter;
+    private final BiFunction<ManagedSessionId, String, CompletableFuture<McpSessionContext.MessageOutcome>> messageSender;
 
     /**
      * @param sessionCatalog   every managed session, e.g. {@code SessionManager::sessions}
@@ -193,6 +203,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
                                               CompletableFuture<HandoffBrief>> handoffWriter,
                                       BiFunction<ManagedSessionId, HandoffDraft,
                                               CompletableFuture<Workflow>> workflowHandoffWriter,
+                                      BiFunction<ManagedSessionId, String,
+                                              CompletableFuture<McpSessionContext.MessageOutcome>> messageSender,
                                       PendingQuestions pendingQuestions) {
         this.sessionCatalog = Objects.requireNonNull(sessionCatalog, "sessionCatalog");
         this.pendingQuestions = Objects.requireNonNull(pendingQuestions, "pendingQuestions");
@@ -210,6 +222,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.sessionReclaimer = Objects.requireNonNull(sessionReclaimer, "sessionReclaimer");
         this.handoffWriter = Objects.requireNonNull(handoffWriter, "handoffWriter");
         this.workflowHandoffWriter = Objects.requireNonNull(workflowHandoffWriter, "workflowHandoffWriter");
+        this.messageSender = Objects.requireNonNull(messageSender, "messageSender");
     }
 
     // ---- caller lookup ------------------------------------------------------
@@ -760,6 +773,36 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public Workflow writeWorkflowHandoff(ManagedSessionId caller, HandoffDraft draft) throws McpToolException {
         return join(workflowHandoffWriter.apply(caller, draft), HANDOFF_TIMEOUT_SECONDS);
+    }
+
+    @Override
+    public McpSessionContext.MessageOutcome deliverMessage(ManagedSessionId caller, ManagedSessionId target,
+                                                           String message) throws McpToolException {
+        ManagedAgentSession sender = sessionOf(caller).orElseThrow(() ->
+                new McpToolException("Session has ended; its repository is no longer available."));
+        ManagedAgentSession recipient = sessionOf(target).orElseThrow(() ->
+                new McpToolException("No session with id '" + target + "' is managed right now; "
+                        + "sessions_list lists the ids that can be used here."));
+        // A terminal session IS a shell: typed text executes as a command,
+        // the same reason StartSessionModal hides its task textarea for that
+        // kind. Refuse before any FX work happens.
+        if (recipient.agentKind() == AgentKind.TERMINAL) {
+            return McpSessionContext.MessageOutcome.TERMINAL_TARGET;
+        }
+        if (recipient.status() != SessionStatus.RUNNING) {
+            throw new McpToolException("The target session's agent process is not running (status "
+                    + recipient.status().name() + "); nothing would read the message.");
+        }
+        // Attribution is drydock's, composed from its own catalog: a message
+        // the recipient cannot trace to a sender is a prompt with no return
+        // address. One line, because the terminal submits at the first
+        // newline (see TerminalBridge#sendPrompt).
+        String repoName = repositoryOf(caller)
+                .map(Repository::displayName)
+                .orElse("(unregistered)");
+        String line = "Message from session '" + sender.displayName() + "' (" + repoName + "): "
+                + message.strip();
+        return join(messageSender.apply(target, line), MESSAGE_TIMEOUT_SECONDS);
     }
 
     // ---- shared helpers -----------------------------------------------------

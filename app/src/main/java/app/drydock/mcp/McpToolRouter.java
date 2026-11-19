@@ -51,6 +51,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Optional;
 import java.util.Set;
@@ -114,7 +115,7 @@ public final class McpToolRouter {
             "review_comments", "review_reply", "review_scope", "review_tour", "review_check",
             "review_finding", "review_answer", "review_ask_answer", "review_state",
             "review_recheck", "worktree_create", "session_start", "session_rename",
-            "session_reclaim", "session_handoff", "repos_list", "sessions_list");
+            "session_reclaim", "session_handoff", "session_message", "repos_list", "sessions_list");
 
     /**
      * One scope's change graph and out-of-diff caller scan, keyed by the diff
@@ -416,6 +417,22 @@ public final class McpToolRouter {
                                 .put("workflow", schemaBoolean("When true, write the calling session's "
                                         + "workflow brief instead of its per-session brief.")),
                         "goal", "nextStep"),
+                descriptor("session_message",
+                        "Types a one-line message into ANOTHER managed session's terminal and submits "
+                                + "it, so the target agent reads it as its next prompt. Drydock prefixes "
+                                + "the line with this session's name, so the recipient knows who sent "
+                                + "it. Use sessions_list for the target's id. The target must run an "
+                                + "agent (a plain-terminal session is refused: a message would execute "
+                                + "as a shell command there) and the message must be a single line "
+                                + "that does not start with '!', '/' or '#'. Delivering while the "
+                                + "target is mid-turn is fine: the TUI queues the text.",
+                        JsonObject.empty()
+                                .put("to", schemaString("Target session id, exactly as sessions_list "
+                                        + "reports it."))
+                                .put("message", schemaString("What the target agent should read. One "
+                                        + "line; newlines are refused because the terminal submits at "
+                                        + "the first one.")),
+                        "to", "message"),
                 descriptor("repos_list",
                         "Lists every repository registered in Drydock, with git state for local repositories.",
                         JsonObject.empty()),
@@ -445,6 +462,7 @@ public final class McpToolRouter {
             case "session_rename" -> sessionRename(caller, arguments);
             case "session_reclaim" -> sessionReclaim(caller, arguments);
             case "session_handoff" -> sessionHandoff(caller, arguments);
+            case "session_message" -> sessionMessage(caller, arguments);
             case "repos_list" -> reposList(caller);
             case "sessions_list" -> sessionsList(caller);
             default -> throw new McpToolException("Unknown tool: " + tool);
@@ -473,6 +491,16 @@ public final class McpToolRouter {
 
     /** Default byte budget for one {@code review_scope} page (schema §1). */
     static final int DEFAULT_SCOPE_BYTES = 24_000;
+
+    /**
+     * Longest {@code session_message} text, in code points. Every character
+     * is typed as a separate native keystroke on the FX thread (see {@code
+     * GhosttySurface#sendTypedText}), so this cap bounds a real UI stall,
+     * not just payload size -- an 8000-character line would hold the UI for
+     * tens of milliseconds of pure keystroke synthesis, forty times per
+     * session budget.
+     */
+    static final int MAX_MESSAGE_CHARS = 1000;
 
     /** Ceiling on a caller-supplied budget, so one call cannot ask for the whole diff at once. */
     private static final int MAX_SCOPE_BYTES = 256_000;
@@ -1498,6 +1526,79 @@ public final class McpToolRouter {
         return JsonObject.empty()
                 .put("outcome", new JsonString(outcome))
                 .put("title", new JsonString(title));
+    }
+
+    // ---- session_message ----------------------------------------------------
+
+    /**
+     * Types a one-line message into another session's terminal and submits
+     * it. Validation happens before the charge -- a malformed message is the
+     * agent's mistake to fix, not a spend -- and the refused OUTCOMES are
+     * charged while an outright failure is refunded, exactly like a rename:
+     * every attempt costs an FX hop and a keystroke-by-keystroke submission,
+     * and each refusal says what is wrong.
+     */
+    private JsonValue sessionMessage(ManagedSessionId caller, JsonValue arguments) throws McpToolException {
+        requireLiveSession(caller);
+        JsonObject args = asObject(arguments);
+        String to = requiredStringArg(args, "to");
+        String message = requiredStringArg(args, "message");
+        // Single line, no TUI modes: the line is typed as real keystrokes and
+        // submitted, so an embedded newline submits half the message and a
+        // leading '!' would run it as a shell command (PromptSafety).
+        PromptSafety.validate(message);
+        // isBlank() is blind to non-breaking spaces and their kin, which is
+        // how a whitespace-only message would reach the target as an empty
+        // prompt -- the same gap checkSessionTitle closes with the same fold.
+        if (PromptSafety.foldForComparison(message).isEmpty()) {
+            throw new McpToolException("message must not be blank.");
+        }
+        // Checked before the charge: a malformed message is the agent's
+        // mistake to fix, not a spend.
+        int codePoints = message.codePointCount(0, message.length());
+        if (codePoints > MAX_MESSAGE_CHARS) {
+            throw new McpToolException("message is " + codePoints + " characters; the limit is "
+                    + MAX_MESSAGE_CHARS + ". Keep it to one line that points at the work; longer "
+                    + "content belongs in a file the target session can read.");
+        }
+
+        ManagedSessionId target = parseTarget(to);
+        if (target.equals(caller)) {
+            throw new McpToolException("The target session is this session; there is nothing to deliver.");
+        }
+
+        try {
+            registry.chargeMessage(caller);
+        } catch (McpBudgetExhaustedException e) {
+            throw new McpToolException(e.getMessage());
+        }
+
+        McpSessionContext.MessageOutcome outcome;
+        try {
+            outcome = context.deliverMessage(caller, target, message);
+        } catch (McpToolException e) {
+            registry.refundMessage(caller);
+            throw e;
+        }
+
+        return switch (outcome) {
+            case DELIVERED -> JsonObject.empty().put("outcome", new JsonString("delivered"));
+            case NO_TAB -> throw new McpToolException("The target session has no open tab; it accepted no message.");
+            case UNWRITABLE -> throw new McpToolException("The target session's terminal is closing; "
+                    + "it accepted no message.");
+            case TERMINAL_TARGET -> throw new McpToolException("The target session runs a plain terminal; "
+                    + "a message there would execute as a shell command, so it was not typed.");
+        };
+    }
+
+    /** Parses a target id exactly as sessions_list reports it; no guessing. */
+    private static ManagedSessionId parseTarget(String to) throws McpToolException {
+        try {
+            return new ManagedSessionId(UUID.fromString(to));
+        } catch (IllegalArgumentException e) {
+            throw new McpToolException("'" + to + "' is not a session id; sessions_list lists the ids "
+                    + "that can be used here.");
+        }
     }
 
     // ---- session_reclaim ----------------------------------------------------

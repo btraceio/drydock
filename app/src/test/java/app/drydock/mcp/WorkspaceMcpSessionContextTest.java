@@ -18,6 +18,7 @@ import app.drydock.git.GitCommandFailedException;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.mcp.McpSessionContext.ExistingBranchWorktree;
+import app.drydock.mcp.McpSessionContext.MessageOutcome;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.review.AnnotationStore;
@@ -560,6 +561,105 @@ class WorkspaceMcpSessionContextTest {
         assertTrue(failure.getMessage().contains("already open"), failure.getMessage());
     }
 
+    // ---- deliverMessage -----------------------------------------------------
+
+    /**
+     * A context whose catalog is {@code catalog} and whose message sender
+     * records the typed line, so the delivery seam can be tested without a
+     * window. Stores are local: these tests own closing them.
+     */
+    private WorkspaceMcpSessionContext messageContext(Path root, List<ManagedAgentSession> catalog,
+                                                       AtomicReference<String> typed) throws IOException {
+        AnnotationStore annotations = new AnnotationStore(root.resolve("annotations.json"));
+        TourStore tours = new TourStore(root.resolve("review-tours.json"));
+        // Closed by tearDown, like the fixtures contextWith builds.
+        annotationStore = annotations;
+        tourStore = tours;
+        Repository repo = localRepository(root);
+        return new WorkspaceMcpSessionContext(
+                () -> catalog,
+                () -> List.of(repo),
+                annotations,
+                tours,
+                new app.drydock.review.ReviewScopeRegistry(),
+                agentRegistry,
+                new app.drydock.git.DiffService(),
+                gitStatusService,
+                worktreeService,
+                () -> userConfig,
+                (worktree, prompt) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no window in this test")),
+                (id, title) -> CompletableFuture.completedFuture(new RenameOutcome(RenameKind.RENAMED, title)),
+                reclaimer,
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")),
+                (id, draft) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("no workspace in this test")),
+                (id, line) -> {
+                    typed.set(line);
+                    return CompletableFuture.completedFuture(MessageOutcome.DELIVERED);
+                },
+                pendingQuestions);
+    }
+
+    @Test
+    void deliverMessageComposesTheAttributionPrefix(@TempDir Path root) throws Exception {
+        caller(root);
+        ManagedAgentSession recipient = sessionIn(repository, root.toRealPath());
+        AtomicReference<String> typed = new AtomicReference<>();
+        WorkspaceMcpSessionContext context = messageContext(root, List.of(session, recipient), typed);
+
+        MessageOutcome outcome = context.deliverMessage(session.id(), recipient.id(), "hello there");
+
+        assertEquals(MessageOutcome.DELIVERED, outcome);
+        assertEquals("Message from session 'example session' (example): hello there", typed.get());
+    }
+
+    @Test
+    void deliverMessageRefusesATerminalTargetWithoutTypingAnything(@TempDir Path root) throws Exception {
+        caller(root);
+        Instant now = Instant.now();
+        ManagedAgentSession shell = new ManagedAgentSession(
+                ManagedSessionId.newId(), repository.id(), "a shell",
+                new AgentBinding(AgentKind.TERMINAL, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(root.toRealPath(), Optional.empty(), true),
+                SessionStatus.RUNNING, now, now, Optional.empty(),
+                PrLink.of(PrState.NONE, Optional.empty()), false, Optional.empty());
+        AtomicReference<String> typed = new AtomicReference<>();
+        WorkspaceMcpSessionContext context = messageContext(root, List.of(session, shell), typed);
+
+        assertEquals(MessageOutcome.TERMINAL_TARGET,
+                context.deliverMessage(session.id(), shell.id(), "ls"));
+        // The refusal happened before the FX hop: nothing was typed.
+        assertEquals(null, typed.get());
+    }
+
+    @Test
+    void deliverMessageRefusesATargetWhoseProcessIsNotRunning(@TempDir Path root) throws Exception {
+        caller(root);
+        ManagedAgentSession exited = sessionIn(repository, root.toRealPath()).withStatus(SessionStatus.EXITED);
+        AtomicReference<String> typed = new AtomicReference<>();
+        WorkspaceMcpSessionContext context = messageContext(root, List.of(session, exited), typed);
+
+        McpToolException refused = assertThrows(McpToolException.class,
+                () -> context.deliverMessage(session.id(), exited.id(), "hello"));
+
+        assertTrue(refused.getMessage().contains("not running"), refused.getMessage());
+        assertEquals(null, typed.get());
+    }
+
+    @Test
+    void deliverMessageRefusesAnUnknownTarget(@TempDir Path root) throws Exception {
+        caller(root);
+        AtomicReference<String> typed = new AtomicReference<>();
+        WorkspaceMcpSessionContext context = messageContext(root, List.of(session), typed);
+
+        McpToolException refused = assertThrows(McpToolException.class,
+                () -> context.deliverMessage(session.id(), ManagedSessionId.newId(), "hello"));
+
+        assertTrue(refused.getMessage().contains("No session"), refused.getMessage());
+    }
+
     // ---- fixtures -----------------------------------------------------------
 
     private Repository repository;
@@ -641,6 +741,7 @@ class WorkspaceMcpSessionContextTest {
                         new UnsupportedOperationException("no workspace in this test")),
                 (id, draft) -> CompletableFuture.failedFuture(
                         new UnsupportedOperationException("no workspace in this test")),
+                (id, line) -> CompletableFuture.completedFuture(MessageOutcome.DELIVERED),
                 pendingQuestions);
     }
 

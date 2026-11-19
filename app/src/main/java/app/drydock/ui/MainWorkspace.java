@@ -46,6 +46,7 @@ import app.drydock.github.GitHubReviewService;
 import app.drydock.lsp.JdtServerManager;
 import app.drydock.lsp.LspUsageProvider;
 import app.drydock.mcp.McpActivityLog;
+import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.HandoffDraft;
 import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -254,6 +255,18 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      */
     private static final long AGENT_HANDOFF_BUDGET_SECONDS =
             WorkspaceMcpSessionContext.HANDOFF_TIMEOUT_SECONDS / 2;
+
+    /**
+     * Whole budget for an agent-driven message delivery, and SMALLER than
+     * {@link WorkspaceMcpSessionContext#MESSAGE_TIMEOUT_SECONDS} for exactly
+     * the reason the rename budget is smaller than its own: if the context's
+     * join expired first, {@code McpToolRouter} would refund the message
+     * charge and tell the agent delivery failed -- and then the queued hop
+     * would type the message anyway, leaving the target with a prompt its
+     * sender believes was refused.
+     */
+    private static final long AGENT_MESSAGE_BUDGET_SECONDS =
+            WorkspaceMcpSessionContext.MESSAGE_TIMEOUT_SECONDS / 2;
 
     private final SessionManager sessionManager;
 
@@ -4250,6 +4263,49 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             }
         });
         return reclaimed;
+    }
+
+    /**
+     * Types an agent's {@code session_message} into the target session's
+     * terminal and submits it -- the same {@code TerminalBridge#sendPrompt}
+     * path the review asks use, so delivery is real keystrokes and the
+     * message reaches the target agent even mid-turn (the TUI queues it).
+     *
+     * <p>The caller composed the attributed one-line text; the only thing
+     * left here is the whitespace collapse, applied LAST so no earlier
+     * validation depends on it: an embedded newline would submit early (see
+     * {@code TerminalBridge#sendPrompt}). Outcomes, not exceptions: a target
+     * with no open tab or a closing terminal is a legal answer to a legal
+     * call; only the expired-deadline race throws, so a hop queued behind a
+     * busy FX thread must refuse rather than type a message whose sender has
+     * already been told it failed.
+     */
+    public CompletableFuture<McpSessionContext.MessageOutcome> deliverMessageFromAgent(ManagedSessionId id,
+                                                                                       String line) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(AGENT_MESSAGE_BUDGET_SECONDS);
+        CompletableFuture<McpSessionContext.MessageOutcome> delivered = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            if (expired(deadlineNanos)) {
+                delivered.completeExceptionally(new IllegalStateException(
+                        "Drydock was too busy to deliver the message in time."));
+                return;
+            }
+            OpenSessionTab open = openTabs.get(id);
+            if (open == null) {
+                // Untestable headless -- a no-tab branch needs a real window
+                // (see WorkspaceMcpSessionContextTest's delivery note). A
+                // regression here fails the delivery future instead of
+                // returning NO_TAB, which the router reports as a failure.
+                delivered.complete(McpSessionContext.MessageOutcome.NO_TAB);
+                return;
+            }
+            // Single line only (an embedded newline would submit early),
+            // matching sendTaskWhenReady's delivery.
+            delivered.complete(open.sendPrompt(line.replaceAll("\\s+", " ").strip())
+                    ? McpSessionContext.MessageOutcome.DELIVERED
+                    : McpSessionContext.MessageOutcome.UNWRITABLE);
+        });
+        return delivered;
     }
 
     /**
