@@ -24,6 +24,7 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.Workflow;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.TaskRelation;
 import app.drydock.domain.UiTheme;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.git.BranchCheckout;
@@ -873,12 +874,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             newTabButton.getItems().add(none);
             return;
         }
-        MenuItem caption = new MenuItem("New session in…");
+        MenuItem caption = new MenuItem("New task in…");
         caption.setDisable(true);
         newTabButton.getItems().add(caption);
         for (Repository repository : repositories) {
             MenuItem item = new MenuItem(repository.displayName());
-            item.setOnAction(e -> openNewSession(repository));
+            item.setOnAction(e -> promptNewTask(repository));
             newTabButton.getItems().add(item);
         }
     }
@@ -1009,80 +1010,22 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     }
 
     /**
-     * Starts a fresh, parallel session in an existing session's own checkout
-     * -- the same worktree or main checkout, with no context transferred --
-     * so a second agent can investigate alongside a running or idle one. The
-     * Start-session modal is reused exactly as for an unopened worktree:
-     * the human picks an agent and an optional task, and the new session is
-     * launched from the same directory as {@code session}. Nothing about
-     * {@code session} itself changes; the two rows coexist independently.
-     *
-     * <p>There is no duplicate-open guard keyed on the working directory: the
-     * only duplicate protection in {@link SessionManager} is on the agent
-     * conversation id, which a brand-new session does not have yet, so a
-     * parallel session is allowed by construction. {@code branchCreatedHere}
-     * is copied from {@code session} so the parallel row's later delete offer
-     * matches the original's ownership of the branch.</p>
+     * The from-a-session "New task…" dialog: the new task runs either in the
+     * session's own checkout (a plain parallel session, no relation) or on a
+     * sub-branch forked from the session's branch in a fresh worktree, with
+     * the human choosing whether the parent waits for it ({@link
+     * TaskRelation#PARENT_WAITS}) or it stacks as a follow-up.
      */
     @Override
-    public void startParallelSession(ManagedAgentSession session) {
+    public void promptTaskFromSession(ManagedAgentSession session) {
         Optional<Repository> owner = repositoryFor(session);
-        if (owner.isEmpty()) {
-            return;
-        }
-        Repository repository = owner.get();
-        if (modalLayer == null) {
-            return;
-        }
-        boolean requireRemote = repository.isRemote();
-        Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(),
-                requireRemote);
-        if (defaultKind.isEmpty()) {
-            showNoAgentAvailable();
-            return;
-        }
-        Optional<Path> worktreeRoot = session.worktreeRoot();
-        Path checkoutPath = worktreeRoot.orElseGet(repository::root);
-        // Resolve the branch label the same way the session row does, so the
-        // modal's "◫ <branch> · <path>" chip matches what the sidebar already
-        // shows for this row.
-        GitStatus status = worktreeRoot
-                .map(root -> viewModel.worktreeStatus(root).orElse(null))
-                .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
-        String branch = status != null ? UiFormats.branchText(status)
-                : (worktreeRoot.isPresent() ? session.displayName() : repository.displayName());
-        StartSessionModal modal = new StartSessionModal(branch, checkoutPath, agentRegistry, defaultKind.get(),
-                requireRemote, remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
-                (task, agent, model, eval) -> {
-            if (worktreeRoot.isPresent()) {
-                openNewWorktreeSession(repository, branch, worktreeRoot.get(), task,
-                        session.branchCreatedHere(), agent, model, eval);
-            } else {
-                openNewSession(repository, task, agent, model, eval);
-            }
-        });
-        modalLayer.show(modal);
-    }
-
-    /**
-     * Opens the create-worktree modal pre-seeded with {@code session}'s
-     * branch, so a second agent can work in a fresh worktree on the same
-     * branch rather than sharing the session's own checkout. Mirrors
-     * {@link #startParallelSession}'s repository/branch resolution, then
-     * hands off to {@link #promptNewWorktree} with a preseed branch.
-     */
-    @Override
-    public void startParallelWorktreeSession(ManagedAgentSession session) {
-        Optional<Repository> owner = repositoryFor(session);
-        if (owner.isEmpty()) {
+        if (owner.isEmpty() || modalLayer == null) {
             return;
         }
         Repository repository = owner.get();
         if (repository.isRemote()) {
-            // No local checkout to `git worktree add` against.
-            return;
-        }
-        if (modalLayer == null) {
+            // No local checkout to fork a sub-branch worktree against, and a
+            // remote checkout's session cannot host a parallel local one.
             return;
         }
         Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), false);
@@ -1096,30 +1039,92 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .orElseGet(() -> viewModel.repoStatus(repository.id()).orElse(null));
         String branch = status != null ? UiFormats.branchText(status)
                 : (worktreeRoot.isPresent() ? session.displayName() : repository.displayName());
-        NewWorktreeModal[] holder = new NewWorktreeModal[1];
-        openWorktreeModal = null;
-        holder[0] = new NewWorktreeModal(repository, gitStatusService, worktreeService, agentRegistry,
-                defaultKind.get(), false, lastUsedModelOf(repository), modalLayer::close,
-                (mode, outcome, branchName, base, directory, task, agent, model, eval) -> {
-                    holder[0].showCreating();
-                    CompletableFuture<Path> creation = mode == NewWorktreeState.Mode.EXISTING
-                            ? gitStatusService.addWorktreeForBranch(repository.root(), directory,
-                                    ((BranchCheckout.Outcome.Ready) outcome).ref(), branchName)
-                            : gitStatusService.createWorktree(
-                                    repository.root(), directory, branchName, Optional.of(base));
-                    creation.whenComplete((created, ex) -> Platform.runLater(() -> {
-                        if (ex != null) {
-                            holder[0].showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
-                            return;
-                        }
-                        modalLayer.close();
-                        openNewWorktreeSession(repository, branchName, created, task,
-                                mode == NewWorktreeState.Mode.NEW, agent, model, eval);
-                    }));
-                }, branch);
-        openWorktreeModal = holder[0];
+        // The fork-from seed and the relation copy both name the parent's
+        // branch; a detached checkout has none, and the dialog then offers no
+        // sub-branch placement at all.
+        String parentBranch = status != null && status.branch() instanceof GitBranchState.OnBranch onBranch
+                ? onBranch.name() : null;
+        NewTaskModal[] holder = new NewTaskModal[1];
+        holder[0] = new NewTaskModal(repository, gitStatusService, worktreeService, agentRegistry,
+                defaultKind.get(), false, remoteOf(repository), lastUsedModelOf(repository),
+                this::claimedWorktreePaths, modalLayer::close,
+                (launch, onSuccess) -> handleTaskFromSessionLaunch(session, repository, branch, launch,
+                        holder[0], onSuccess),
+                session, parentBranch);
         modalLayer.show(holder[0]);
     }
+
+    /** Acts on a from-session dialog launch; see {@link #promptTaskFromSession}. */
+    private void handleTaskFromSessionLaunch(ManagedAgentSession session, Repository repository, String branch,
+                                             NewTaskModal.NewTaskLaunch launch, NewTaskModal modal,
+                                             Runnable onSuccess) {
+        switch (launch.placement()) {
+            case SAME_CHECKOUT -> {
+                // A parallel session, exactly as the old "Same worktree (this
+                // branch)" entry: no relation, branch ownership copied so the
+                // row's later delete offer matches the original's.
+                if (session.worktreeRoot().isPresent()) {
+                    openNewWorktreeSession(repository, branch, session.worktreeRoot().orElseThrow(),
+                            launch.task(), session.branchCreatedHere(), launch.agent(), launch.model(),
+                            launch.eval());
+                } else {
+                    openNewSession(repository, launch.task(), launch.agent(), launch.model(), launch.eval());
+                }
+            }
+            case NEW_WORKTREE -> {
+                CompletableFuture<Path> creation = createFromSessionWorktree(gitStatusService, repository, launch);
+                creation.whenComplete((created, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        modal.showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
+                        return;
+                    }
+                    onSuccess.run();
+                    openSubBranchTaskSession(repository, launch.newWorktreeBranch(), created, launch.task(),
+                            branchCreatedHere(launch), launch.agent(), launch.model(), launch.eval(),
+                            launch.parent().orElseThrow(), launch.relation().orElseThrow());
+                }));
+            }
+            default -> throw new IllegalStateException(
+                    "A from-session launch cannot target " + launch.placement());
+        }
+    }
+
+    static CompletableFuture<Path> createFromSessionWorktree(GitStatusService gitStatusService,
+                                                               Repository repository,
+                                                               NewTaskModal.NewTaskLaunch launch) {
+        if (launch.newWorktreeMode() == NewWorktreeState.Mode.EXISTING) {
+            BranchCheckout.Outcome.Ready ready =
+                    (BranchCheckout.Outcome.Ready) launch.newWorktreeOutcome().orElseThrow();
+            return gitStatusService.addWorktreeForBranch(repository.root(), launch.newWorktreeDirectory(),
+                    ready.ref(), launch.newWorktreeBranch());
+        }
+        // The launch's base is the fork-from field: the parent's branch
+        // preseeded, editable in the dialog.
+        return gitStatusService.createWorktree(repository.root(), launch.newWorktreeDirectory(),
+                launch.newWorktreeBranch(), Optional.of(launch.newWorktreeBase()));
+    }
+
+    static boolean branchCreatedHere(NewTaskModal.NewTaskLaunch launch) {
+        return launch.newWorktreeMode() == NewWorktreeState.Mode.NEW;
+    }
+
+    /**
+     * As {@link #openNewWorktreeSession}, stamping the task relation to the
+     * session the task was started from. The relation is stamped before the
+     * launch so it persists with the first state save -- a sidebar rendered
+     * before the stamp lands must already see the relation.
+     */
+    private void openSubBranchTaskSession(Repository repository, String branch, Path worktreeRoot,
+                                          Optional<String> task, boolean branchCreatedHere, AgentKind agent,
+                                          Optional<String> model, boolean eval, ManagedAgentSession parent,
+                                          TaskRelation relation) {
+        ManagedAgentSession prepared = sessionManager
+                .prepareWorktreeSession(repository, branch, worktreeRoot, branchCreatedHere, agent)
+                .withEvalMode(eval)
+                .withTaskRelation(Optional.of(parent.id()), Optional.of(relation));
+        openPreparedSession(prepared, branch, task, Spawn.ALLOWED, repository, model);
+    }
+
     public void setThemeProvider(Supplier<UiTheme> provider) {
         this.themeProvider = provider == null ? () -> UiTheme.DARK : provider;
     }
@@ -3694,17 +3699,15 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
     // ---- Opening ------------------------------------------------------------
 
     /**
-     * Plan section 11.1 / 12 "New Claude session": this is the plain,
-     * no-worktree-context entry point (sidebar "+" menu, ⌘N) -- it never
-     * had a modal before this task, but a session now always needs a
-     * chosen {@link AgentKind}, so it shows a compact agent-picker modal
-     * (the same {@link StartSessionModal} the worktree-handoff flow uses,
-     * targeted at the repository's main checkout) before launching. If no
-     * agent CLI is available at all, launching is blocked with a message
-     * instead of showing a picker with every option disabled.
+     * The plain, no-worktree-context entry point (sidebar "+" menu, ⌘N, the
+     * tab "+" menu): shows the unified {@link NewTaskModal}, where the
+     * destination -- main checkout, a new worktree, or an existing unclaimed
+     * worktree -- is chosen inside the dialog rather than by which menu item
+     * was clicked. If no agent CLI is available at all, launching is blocked
+     * with a message instead of showing a picker with every option disabled.
      */
     @Override
-    public void openNewSession(Repository repository) {
+    public void promptNewTask(Repository repository) {
         boolean requireRemote = repository.isRemote();
         Optional<AgentKind> defaultKind = agentRegistry.resolveDefault(repository.settings().lastUsedAgent(), requireRemote);
         if (defaultKind.isEmpty()) {
@@ -3718,10 +3721,70 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
             openNewSession(repository, Optional.empty(), defaultKind.get());
             return;
         }
-        StartSessionModal modal = new StartSessionModal(repository.displayName(), repository.root(), agentRegistry,
-                defaultKind.get(), requireRemote, remoteOf(repository), lastUsedModelOf(repository), modalLayer::close,
-                (task, agent, model, eval) -> openNewSession(repository, task, agent, model, eval));
-        modalLayer.show(modal);
+        NewTaskModal[] holder = new NewTaskModal[1];
+        holder[0] = new NewTaskModal(repository, gitStatusService, worktreeService, agentRegistry,
+                defaultKind.get(), requireRemote, remoteOf(repository), lastUsedModelOf(repository),
+                this::claimedWorktreePaths, modalLayer::close,
+                (launch, onSuccess) -> handleNewTaskLaunch(repository, launch, holder[0], onSuccess));
+        modalLayer.show(holder[0]);
+    }
+
+    /** Worktree paths that already host a session: the unified dialog's "existing worktree" picker hides them. */
+    private java.util.Set<Path> claimedWorktreePaths() {
+        return sessionManager.sessions().stream()
+                .map(ManagedAgentSession::worktreeRoot)
+                .flatMap(Optional::stream)
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    /**
+     * Acts on a unified-dialog launch: the fixed-checkout placements register
+     * a session on the checkout they name; the new-worktree placement first
+     * runs the same {@code git worktree add} creation the dedicated
+     * worktree modal runs, reporting a failure back into the dialog.
+     */
+    private void handleNewTaskLaunch(Repository repository, NewTaskModal.NewTaskLaunch launch,
+                                     NewTaskModal modal, Runnable onSuccess) {
+        switch (launch.placement()) {
+            case MAIN_CHECKOUT -> openNewSession(repository, launch.task(), launch.agent(), launch.model(),
+                    launch.eval());
+            case EXISTING_WORKTREE -> {
+                WorktreeService.Worktree worktree = launch.existingWorktree().orElseThrow();
+                if (worktree.mainCheckout()) {
+                    openNewSession(repository, launch.task(), launch.agent(), launch.model(), launch.eval());
+                } else {
+                    // Discovered on disk: drydock did not create this branch,
+                    // so removing the worktree must never force-delete it.
+                    openNewWorktreeSession(repository, worktree.branch().orElse(worktree.path().toString()),
+                            worktree.path(), launch.task(), false, launch.agent(), launch.model(), launch.eval());
+                }
+            }
+            case NEW_WORKTREE -> {
+                // Same creation the dedicated worktree modal runs; the launch
+                // record carries the mode and the outcome it last derived, so
+                // nothing is re-resolved at press time.
+                CompletableFuture<Path> creation = launch.newWorktreeMode() == NewWorktreeState.Mode.EXISTING
+                        ? gitStatusService.addWorktreeForBranch(repository.root(), launch.newWorktreeDirectory(),
+                                ((BranchCheckout.Outcome.Ready) launch.newWorktreeOutcome().orElseThrow()).ref(),
+                                launch.newWorktreeBranch())
+                        : gitStatusService.createWorktree(repository.root(), launch.newWorktreeDirectory(),
+                                launch.newWorktreeBranch(), Optional.of(launch.newWorktreeBase()));
+                creation.whenComplete((created, ex) -> Platform.runLater(() -> {
+                    if (ex != null) {
+                        modal.showError(String.valueOf(UiErrors.unwrap(ex).getMessage()));
+                        return;
+                    }
+                    onSuccess.run();
+                    // Adopting a remote-only branch does mint a local ref,
+                    // but it tracks a remote somebody else owns -- removing
+                    // the worktree must not offer to delete it.
+                    openNewWorktreeSession(repository, launch.newWorktreeBranch(), created, launch.task(),
+                            branchCreatedHere(launch), launch.agent(), launch.model(), launch.eval());
+                }));
+            }
+            case SAME_CHECKOUT -> throw new IllegalStateException(
+                    "SAME_CHECKOUT launches only from a session row, not from " + launch.placement());
+        }
     }
 
     /**

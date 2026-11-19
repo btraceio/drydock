@@ -377,6 +377,14 @@ public final class DrydockApplication extends Application {
         // IntelliJ plugin's changes to it; off the FX thread.
         repositoryManager.start();
         sessionManager = new SessionManager(stateRepository, agentRegistry);
+        // A deleted parent-waits task releases its parent's finish gate; the
+        // human must hear that the task ended without its work being merged.
+        sessionManager.setWaitChildReleaseObserver((parent, deletedChild) -> UiErrors.showNotice(
+                "Waiting task ended",
+                "'" + deletedChild.displayName() + "' was deleted without finishing",
+                "Its work was not merged into '" + parent.displayName()
+                        + "'s branch, so that session can now finish without it. The task's branch still"
+                        + " exists if you want its work."));
         ChangedLineService changedLineService = new ChangedLineService(diffService);
         annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateRepository.stateFile()));
         tourStore = new TourStore(TourStore.siblingOf(stateRepository.stateFile()));
@@ -1247,7 +1255,7 @@ public final class DrydockApplication extends Application {
                 sidebar.focusFilter();
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.N) {
-                activeOrFirstRepository().ifPresent(mainWorkspace::openNewSession);
+                activeOrFirstRepository().ifPresent(mainWorkspace::promptNewTask);
                 event.consume();
             } else if (cmd && event.getCode() == KeyCode.DIGIT1) {
                 mainWorkspace.showClaudeSubTab();
