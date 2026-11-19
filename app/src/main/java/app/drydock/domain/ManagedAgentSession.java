@@ -114,7 +114,9 @@ public record ManagedAgentSession(
         Optional<ManagedSessionId> forkedFrom,
         boolean evalMode,
         Optional<WorkflowId> workflowId,
-        boolean startedWithTask
+        boolean startedWithTask,
+        Optional<ManagedSessionId> taskParent,
+        Optional<TaskRelation> taskRelation
 ) {
 
     /** Maximum number of secondary pull-request links retained for one session. */
@@ -172,6 +174,14 @@ public record ManagedAgentSession(
             }
         }
         additionalPrs = links;
+
+        // A task relation without the parent it relates to (or the reverse)
+        // is a half-written edge: the sidebar could not render it and the
+        // finish flow could not resolve a base branch for it.
+        if (taskParent.isEmpty() != taskRelation.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "ManagedAgentSession task relation must be present with its parent, or absent with it");
+        }
     }
     /**
      * As the canonical constructor with {@code evalMode = false} and
@@ -183,7 +193,8 @@ public record ManagedAgentSession(
                                Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, List.of(), namePinned, forkedFrom, false, Optional.empty(), false);
+                pr, List.of(), namePinned, forkedFrom, false, Optional.empty(), false,
+                Optional.empty(), Optional.empty());
     }
 
     /**
@@ -197,7 +208,8 @@ public record ManagedAgentSession(
                                PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
                                boolean evalMode) {
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
-                pr, List.of(), namePinned, forkedFrom, evalMode, Optional.empty(), false);
+                pr, List.of(), namePinned, forkedFrom, evalMode, Optional.empty(), false,
+                Optional.empty(), Optional.empty());
     }
 
     // ---- leaf accessors, delegating into the groups --------------------------
@@ -381,6 +393,26 @@ public record ManagedAgentSession(
     }
 
     /**
+     * Sets this session's task relation to the session it was started from
+     * (the "New task…" dialog on a session row). Both halves travel
+     * together -- see the canonical-constructor invariant.
+     */
+    public ManagedAgentSession withTaskRelation(Optional<ManagedSessionId> newTaskParent,
+                                                Optional<TaskRelation> newTaskRelation) {
+        return toBuilder().taskParent(newTaskParent).taskRelation(newTaskRelation).build();
+    }
+
+    /** The session this task was started from, when it has one. */
+    public Optional<ManagedSessionId> taskParent() {
+        return taskParent;
+    }
+
+    /** How this task relates to its {@link #taskParent()}; present exactly when the parent is. */
+    public Optional<TaskRelation> taskRelation() {
+        return taskRelation;
+    }
+
+    /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
      * reason it exists.
@@ -403,6 +435,8 @@ public record ManagedAgentSession(
         private boolean evalMode;
         private Optional<WorkflowId> workflowId;
         private boolean startedWithTask;
+        private Optional<ManagedSessionId> taskParent = Optional.empty();
+        private Optional<TaskRelation> taskRelation = Optional.empty();
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -421,6 +455,8 @@ public record ManagedAgentSession(
             this.evalMode = from.evalMode;
             this.workflowId = from.workflowId;
             this.startedWithTask = from.startedWithTask;
+            this.taskParent = from.taskParent;
+            this.taskRelation = from.taskRelation;
         }
 
         /**
@@ -529,10 +565,20 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder taskParent(Optional<ManagedSessionId> value) {
+            this.taskParent = Objects.requireNonNull(value);
+            return this;
+        }
+
+        public Builder taskRelation(Optional<TaskRelation> value) {
+            this.taskRelation = Objects.requireNonNull(value);
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
                     createdAt, lastOpenedAt, lastExitCode, pr, additionalPrs, namePinned, forkedFrom,
-                    evalMode, workflowId, startedWithTask);
+                    evalMode, workflowId, startedWithTask, taskParent, taskRelation);
         }
     }
 }

@@ -10,6 +10,7 @@ import app.drydock.domain.PrLink;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.TaskRelation;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
@@ -80,7 +81,9 @@ import java.util.Set;
  *       "forkedFrom": "<uuid>" | null,
  *       "evalMode": <boolean>,
  *       "workflowId": "<uuid>" | null,
- *       "startedWithTask": <boolean>
+ *       "startedWithTask": <boolean>,
+ *       "taskParent": "<uuid>" | null,
+ *       "taskRelation": "FOLLOW_UP" | "PARENT_WAITS" | null
  *     }
  *   ],
  *   "handoffBriefs": [
@@ -305,6 +308,12 @@ public final class ApplicationStateCodec {
                 .<JsonValue>map(w -> new JsonString(w.value().toString()))
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("startedWithTask", new JsonBoolean(session.startedWithTask()));
+        obj.put("taskParent", session.taskParent()
+                .<JsonValue>map(parent -> new JsonString(parent.value().toString()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
+        obj.put("taskRelation", session.taskRelation()
+                .<JsonValue>map(relation -> new JsonString(relation.name()))
+                .orElse(JsonValue.JsonNull.INSTANCE));
         return obj;
     }
 
@@ -614,6 +623,21 @@ public final class ApplicationStateCodec {
             // existed was started without an injected task, and a malformed
             // value must not silently earn it the resume prompt. No schema bump.
             boolean startedWithTask = obj.get("startedWithTask") instanceof JsonBoolean st && st.value();
+            // Lenient like workflowId: a session persisted before these
+            // members existed was started without a task relation, and an
+            // unparseable parent id or unknown relation name must not
+            // discard the session -- but a HALF-written relation (one member
+            // without the other, enforced by the canonical constructor) is
+            // dropped to no-relation rather than failing the decode, because
+            // the edge is an annotation about the session, not the session.
+            Optional<ManagedSessionId> taskParent = optionalString(obj, "taskParent")
+                    .flatMap(ApplicationStateCodec::parseSessionId);
+            Optional<TaskRelation> taskRelation = optionalString(obj, "taskRelation")
+                    .flatMap(name -> parseEnum(name, TaskRelation.class));
+            if (taskParent.isEmpty() != taskRelation.isEmpty()) {
+                taskParent = Optional.empty();
+                taskRelation = Optional.empty();
+            }
             // The persisted shape stays FLAT: grouping is a Java-side change,
             // and schemaVersion must not move for it.
             return new ManagedAgentSession(id, repositoryId, displayName,
@@ -621,7 +645,7 @@ public final class ApplicationStateCodec {
                     new SessionWorkspace(workingDirectory, worktreeRoot, branchCreatedHere),
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), additionalPrs, namePinned, forkedFrom,
-                    evalMode, workflowId, startedWithTask);
+                    evalMode, workflowId, startedWithTask, taskParent, taskRelation);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }
@@ -676,6 +700,15 @@ public final class ApplicationStateCodec {
     private static Optional<WorkflowId> parseWorkflowId(String value) {
         try {
             return Optional.of(WorkflowId.of(value));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** The enum constant named {@code value}, or empty when it names none. */
+    private static <E extends Enum<E>> Optional<E> parseEnum(String value, Class<E> type) {
+        try {
+            return Optional.of(Enum.valueOf(type, value));
         } catch (IllegalArgumentException e) {
             return Optional.empty();
         }

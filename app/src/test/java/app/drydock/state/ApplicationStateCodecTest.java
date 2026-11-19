@@ -12,6 +12,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.TaskRelation;
 import app.drydock.domain.RepositorySettings;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
@@ -927,7 +928,8 @@ class ApplicationStateCodecTest {
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
                 PrLink.none(), java.util.List.of(), false, java.util.Optional.empty(), false,
-                java.util.Optional.of(workflowId), false);
+                java.util.Optional.of(workflowId), false,
+                java.util.Optional.empty(), java.util.Optional.empty());
 
         ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
                 WorkspaceUiState.empty(), List.of());
@@ -947,7 +949,8 @@ class ApplicationStateCodecTest {
                 SessionStatus.INACTIVE, Instant.parse("2026-08-28T10:00:00Z"),
                 Instant.parse("2026-08-28T10:00:00Z"), java.util.Optional.empty(),
                 PrLink.none(), java.util.List.of(), false, java.util.Optional.empty(), false,
-                java.util.Optional.empty(), true);
+                java.util.Optional.empty(), true,
+                java.util.Optional.empty(), java.util.Optional.empty());
 
         ApplicationState state = new ApplicationState(List.of(), List.of(session), List.of(),
                 WorkspaceUiState.empty(), List.of());
@@ -1058,7 +1061,7 @@ class ApplicationStateCodecTest {
                 new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
                 SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
                 PrLink.of(PrState.OPEN, Optional.of(7)), List.of(), false, Optional.empty(),
-                false, Optional.empty(), false);
+                false, Optional.empty(), false, Optional.empty(), Optional.empty());
         ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
 
         JsonValue json = ApplicationStateCodec.toJson(state);
@@ -1122,5 +1125,82 @@ class ApplicationStateCodecTest {
         assertEquals(1, decoded.sessions().size());
         assertTrue(decoded.sessions().get(0).additionalPrs().isEmpty());
         assertEquals(PrState.NONE, decoded.sessions().get(0).prState());
+    }
+
+    private static String sessionWithTaskRelationMembers(String taskParent, String taskRelation) {
+        String parent = taskParent == null ? "null" : '"' + taskParent + '"';
+        String relation = taskRelation == null ? "null" : '"' + taskRelation + '"';
+        return sessionDocument("""
+                {
+                  "id": "22222222-3333-4444-5555-666666666666",
+                  "repositoryId": "%s",
+                  "displayName": "s",
+                  "workingDirectory": "%s",
+                  "status": "INACTIVE",
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "lastOpenedAt": "2026-01-02T00:00:00Z",
+                  "taskParent": %s,
+                  "taskRelation": %s
+                }
+                """.formatted(REPO_ID, REPO_ROOT, parent, relation));
+    }
+
+    @Test
+    void aTaskRelationRoundTrips() {
+        ManagedAgentSession session = new ManagedAgentSession(
+                ManagedSessionId.of("22222222-3333-4444-5555-666666666666"), RepositoryId.of(REPO_ID), "s",
+                new AgentBinding(AgentKind.CLAUDE, Optional.empty(), Optional.empty()),
+                new SessionWorkspace(TestPaths.abs("/tmp"), Optional.empty(), true),
+                SessionStatus.INACTIVE, Instant.EPOCH, Instant.EPOCH, Optional.empty(),
+                PrLink.none(), List.of(), false, Optional.empty(), false,
+                Optional.empty(), false,
+                Optional.of(ManagedSessionId.newId()), Optional.of(TaskRelation.FOLLOW_UP));
+        ApplicationState state = ApplicationState.empty().withSessions(List.of(session));
+
+        ApplicationState decoded = ApplicationStateCodec.fromJson(ApplicationStateCodec.toJson(state));
+
+        assertEquals(session.taskParent(), decoded.sessions().get(0).taskParent());
+        assertEquals(Optional.of(TaskRelation.FOLLOW_UP), decoded.sessions().get(0).taskRelation());
+    }
+
+    @Test
+    void aSessionWithoutTaskRelationMembersDecodesWithoutOne() {
+        // Added leniently within schemaVersion 2: a session persisted before
+        // task relations existed was started without one, and no schema bump.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(
+                JsonParser.parse(sessionWithTaskRelationMembers(null, null)));
+
+        assertTrue(decoded.sessions().get(0).taskParent().isEmpty());
+        assertTrue(decoded.sessions().get(0).taskRelation().isEmpty());
+    }
+
+    @Test
+    void aHalfWrittenTaskRelationDecodesToNoRelationRatherThanFailingTheDecode() {
+        // One member without the other would fail the canonical constructor's
+        // invariant; the edge is an annotation about the session, not the
+        // session, so the pair is dropped to no-relation.
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(
+                sessionWithTaskRelationMembers("33333333-3333-4444-5555-666666666666", null)));
+
+        assertTrue(decoded.sessions().get(0).taskParent().isEmpty());
+        assertTrue(decoded.sessions().get(0).taskRelation().isEmpty());
+    }
+
+    @Test
+    void anUnparseableTaskParentDecodesToNoRelation() {
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(
+                sessionWithTaskRelationMembers("not-a-uuid", "FOLLOW_UP")));
+
+        assertTrue(decoded.sessions().get(0).taskParent().isEmpty());
+        assertTrue(decoded.sessions().get(0).taskRelation().isEmpty());
+    }
+
+    @Test
+    void anUnknownTaskRelationNameDecodesToNoRelation() {
+        ApplicationState decoded = ApplicationStateCodec.fromJson(JsonParser.parse(
+                sessionWithTaskRelationMembers("33333333-3333-4444-5555-666666666666", "BLOCKS")));
+
+        assertTrue(decoded.sessions().get(0).taskParent().isEmpty());
+        assertTrue(decoded.sessions().get(0).taskRelation().isEmpty());
     }
 }

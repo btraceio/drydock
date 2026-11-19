@@ -1,6 +1,7 @@
 package app.drydock.domain;
 
 import app.drydock.testing.TestPaths;
+import app.drydock.domain.TaskRelation;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.PrLink;
 import app.drydock.domain.AgentBinding;
@@ -317,7 +318,8 @@ class ManagedAgentSessionTest {
                 SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
                 PrLink.none(),
                 List.of(PrLink.of(PrState.OPEN, Optional.of(42))),
-                false, Optional.empty(), false, Optional.empty(), false));
+                false, Optional.empty(), false, Optional.empty(), false,
+                Optional.empty(), Optional.empty()));
     }
 
     @Test
@@ -329,7 +331,8 @@ class ManagedAgentSessionTest {
                 SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
                 PrLink.of(PrState.OPEN, Optional.empty()),
                 List.of(PrLink.of(PrState.OPEN, Optional.empty())),
-                false, Optional.empty(), false, Optional.empty(), false));
+                false, Optional.empty(), false, Optional.empty(), false,
+                Optional.empty(), Optional.empty()));
     }
 
     @Test
@@ -341,7 +344,8 @@ class ManagedAgentSessionTest {
                 SessionStatus.INACTIVE, Instant.now(), Instant.now(), Optional.empty(),
                 PrLink.of(PrState.OPEN, Optional.of(42)),
                 List.of(PrLink.of(PrState.OPEN, Optional.of(42))),
-                false, Optional.empty(), false, Optional.empty(), false));
+                false, Optional.empty(), false, Optional.empty(), false,
+                Optional.empty(), Optional.empty()));
     }
 
     @Test
@@ -355,6 +359,29 @@ class ManagedAgentSessionTest {
                 List.of(
                         PrLink.of(PrState.OPEN, Optional.of(43)),
                         PrLink.of(PrState.OPEN, Optional.of(43))),
-                false, Optional.empty(), false, Optional.empty(), false));
+                false, Optional.empty(), false, Optional.empty(), false,
+                Optional.empty(), Optional.empty()));
+    }
+
+    @Test
+    void taskRelationTravelsWithItsParentOrNotAtAll() {
+        ManagedAgentSession parent = sessionAt(tempDir);
+        ManagedAgentSession related = sessionAt(tempDir).withTaskRelation(
+                Optional.of(parent.id()), Optional.of(TaskRelation.PARENT_WAITS));
+        assertEquals(Optional.of(parent.id()), related.taskParent());
+        assertEquals(Optional.of(TaskRelation.PARENT_WAITS), related.taskRelation());
+
+        assertThrows(IllegalArgumentException.class, () -> sessionAt(tempDir).withTaskRelation(
+                Optional.of(parent.id()), Optional.empty()));
+        assertThrows(IllegalArgumentException.class, () -> sessionAt(tempDir).withTaskRelation(
+                Optional.empty(), Optional.of(TaskRelation.FOLLOW_UP)));
+    }
+
+    @Test
+    void toBuilderKeepsTheTaskRelation() {
+        ManagedAgentSession parent = sessionAt(tempDir);
+        ManagedAgentSession related = sessionAt(tempDir).withTaskRelation(
+                Optional.of(parent.id()), Optional.of(TaskRelation.FOLLOW_UP));
+        assertSame(related.taskRelation(), related.toBuilder().build().taskRelation());
     }
 }
