@@ -105,8 +105,8 @@ public final class AgentCloseConfirmation implements ProjectCloseHandler {
     /** The close decision for a window, set here and read once by {@link AgentWindowCloseListener}. */
     static final Key<CloseWindowPlan.Decision> DECISION = Key.create("drydock.closeWindow.decision");
 
-    /** Whether the close under way belongs to an IDE quit. */
-    static boolean isQuitting() {
+    /** Whether the close under way belongs to an IDE quit (also read by the babysitting detach at dispose). */
+    public static boolean isQuitting() {
         return quitting();
     }
 

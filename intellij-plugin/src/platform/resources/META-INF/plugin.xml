@@ -134,6 +134,9 @@
         <!-- "PR #n merged/closed - done with <session>?": the session Done
              offer (PullRequestDoneOffers). -->
         <notificationGroup id="Drydock pull requests" displayType="BALLOON"/>
+        <!-- "PR #n needs you: ...": a babysitter escalated to the session it
+             watches (BabysitEscalations). -->
+        <notificationGroup id="Drydock babysitting" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
@@ -208,6 +211,10 @@
              refreshed when its turn ends: no window watches its worktree. -->
         <listener class="app.drydock.intellij.agent.HostedFileRefresher"
                   topic="app.drydock.intellij.agent.SessionActivityListener"/>
+        <!-- Every catalog change, so a babysitter's escalation raises its
+             balloon once, whether or not a Drydock tool window is open. -->
+        <listener class="app.drydock.intellij.tasks.BabysitEscalations"
+                  topic="app.drydock.intellij.DrydockSessionsListener"/>
     </applicationListeners>
     <actions>
         <!-- The review diff's selection actions (ReviewSelectionAction): the
@@ -351,6 +358,14 @@
         <action id="Drydock.AgentTab.Done"
                 class="app.drydock.intellij.agent.AgentTabActions$Done"
                 text="Done…"/>
+        <!-- Babysitting's jump between a babysitter and the session it
+             watches (Go to Watched Session / Go to Babysitter): the tab
+             popup and the strip's overflow only. No header shortcut, which
+             would add a fourth icon to every babysitter tab, and no keyboard
+             shortcut: the tab commands carry none to extend. -->
+        <action id="Drydock.AgentTab.Babysit"
+                class="app.drydock.intellij.agent.AgentTabActions$Babysit"
+                text="Go to Babysitting Counterpart"/>
         <!-- The tab-header shortcut group: own-project window, the lifecycle
              and Done — the compact supplement to the ribbon's full labels
              (A7). anchor="first" keeps it ahead of the stock actions the

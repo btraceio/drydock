@@ -8,8 +8,15 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.app.LoginShellEnvironment;
+import app.drydock.babysit.BabysitDelta;
+import app.drydock.babysit.BabysitHandover;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.BabysitStateFile;
+import app.drydock.babysit.BabysitWatcherProcess;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.intellij.agent.AgentExecution;
+import app.drydock.intellij.agent.AgentCloseConfirmation;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.QuitConfirmation;
 import app.drydock.intellij.agent.SessionActivityMonitor;
@@ -26,9 +33,14 @@ import app.drydock.intellij.workspace.WorkspaceRevalidation;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.mcp.McpSessionContext;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.mcp.BabysitToolContext;
 import app.drydock.mcp.TaskTools;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.SessionMcpAccess;
+import app.drydock.intellij.session.BabysitMonitorService;
+import app.drydock.intellij.session.PluginBabysitToolContext;
+import app.drydock.intellij.tasks.BabysitEscalations;
+import app.drydock.intellij.tasks.SessionPullRequestLookup;
 import app.drydock.projects.SharedProject;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.projects.SharedProjectsSeed;
@@ -47,16 +59,21 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -108,7 +125,14 @@ public final class DrydockPluginService implements Disposable {
         public ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                                    Supplier<List<Repository>> repositories, AgentRegistry registry,
                                    TaskTools taskTools) {
-            return productionBackend(baseDir, sessions, repositories, registry, taskTools);
+            return create(baseDir, sessions, repositories, registry, taskTools, null);
+        }
+
+        @Override
+        public ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                   Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                   TaskTools taskTools, BabysitToolContext babysitContext) {
+            return productionBackend(baseDir, sessions, repositories, registry, taskTools, babysitContext);
         }
     };
 
@@ -165,6 +189,17 @@ public final class DrydockPluginService implements Disposable {
                                      TaskTools taskTools) {
             return create(baseDir, sessions, repositories, registry);
         }
+
+        /**
+         * As above, with the babysitting delegate: the production factory
+         * adds the three babysitting tools from it; a factory that does not
+         * know it ignores it, exactly as with the task delegate.
+         */
+        default ReviewBackend create(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                     Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                     TaskTools taskTools, BabysitToolContext babysitContext) {
+            return create(baseDir, sessions, repositories, registry, taskTools);
+        }
     }
 
     private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed,
@@ -200,6 +235,13 @@ public final class DrydockPluginService implements Disposable {
                 () -> sharedProjects.projects());
         Disposer.register(this, taskService::close);
         this.initialization = CompletableFuture.runAsync(this::initialize, executor);
+        if (backends == PRODUCTION_BACKEND) {
+            // Once initialized, one escalation scan: an unresolved escalation
+            // restored (or re-attached) at startup raises its balloon even if
+            // no further change event ever comes; the init's own events were
+            // dropped because initialization had not completed yet.
+            this.initialization.thenRunAsync(() -> BabysitEscalations.scan(this), executor);
+        }
     }
 
     private final Path baseDir;
@@ -223,6 +265,8 @@ public final class DrydockPluginService implements Disposable {
     private volatile SessionActivityWatcher watcher;
     private volatile SessionActivityMonitor activityMonitor;
     private volatile ReviewBackend reviewBackend;
+    /** The babysitting monitor; production only, null until initialization reaches it. */
+    private volatile BabysitMonitorService babysitMonitor;
     /** The thread initialization ran on; read by tests to prove init is off the EDT. */
     private volatile Thread initializationThread;
 
@@ -235,13 +279,14 @@ public final class DrydockPluginService implements Disposable {
      * #useOwnTreeSitterLibraries}). The backend is what parses, so no
      * library loads before this runs. {@code taskTools} is the task
      * delegate (T14a) when the task service is up; without it the backend
-     * degrades to the review+rename surface.
+     * degrades to the review+rename surface. {@code babysitContext}, when
+     * present, adds the babysitting tools.
      */
     private static ReviewBackend productionBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                                                    Supplier<List<Repository>> repositories, AgentRegistry registry,
-                                                   TaskTools taskTools) {
+                                                   TaskTools taskTools, BabysitToolContext babysitContext) {
         useOwnTreeSitterLibraries(Path.of(PathManager.getSystemPath()).resolve("drydock").resolve("tree-sitter"));
-        return buildBackend(baseDir, sessions, repositories, registry, taskTools);
+        return buildBackend(baseDir, sessions, repositories, registry, taskTools, babysitContext);
     }
 
     /**
@@ -255,6 +300,21 @@ public final class DrydockPluginService implements Disposable {
     static ReviewBackend buildBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                                       Supplier<List<Repository>> repositories, AgentRegistry registry,
                                       TaskTools taskTools) {
+        return buildBackend(baseDir, sessions, repositories, registry, taskTools, null);
+    }
+
+    /**
+     * As above, plus the three babysitting tools when {@code babysitContext}
+     * is present (with or without the task delegate). Building it constructs
+     * nothing IDE-bound; the context is only invoked on a babysitting call.
+     */
+    static ReviewBackend buildBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                                      Supplier<List<Repository>> repositories, AgentRegistry registry,
+                                      TaskTools taskTools, BabysitToolContext babysitContext) {
+        if (babysitContext != null) {
+            return new ReviewBackend(baseDir, sessions, repositories, registry,
+                    DrydockPluginService::renameFromAgent, taskTools, babysitContext);
+        }
         return taskTools == null
                 ? new ReviewBackend(baseDir, sessions, repositories, registry,
                         DrydockPluginService::renameFromAgent)
@@ -483,7 +543,12 @@ public final class DrydockPluginService implements Disposable {
         }
     }
 
-    Path baseDir() {
+    /**
+     * The plugin's data directory ({@code state.json}, {@code projects.json},
+     * the {@code babysit/} files). Public for the UI's babysitter start,
+     * which names the instructions file there exactly as the MCP start does.
+     */
+    public Path baseDir() {
         return baseDir;
     }
 
@@ -525,6 +590,19 @@ public final class DrydockPluginService implements Disposable {
         // which is exactly why it lives here and not in the constructor.
         stateStore = ApplicationStateStore.forRepository(repository);
         stateStore.update(DrydockPluginService::normalizeOnLoad);
+        boolean production = backends == PRODUCTION_BACKEND;
+        if (production) {
+            // Babysitting: restored (dangling pairings ended, stale ACTING
+            // marks reverted) here, once the store is loaded and before the
+            // review backend serves babysit_start -- so no start can race the
+            // restore -- and disposed before that backend closes.
+            startBabysitMonitor(BabysitMonitorService.create(this, baseDir, executor, sharedProjects::projects));
+            // Then take back what a detached watcher carried while the IDE
+            // was closed (its escalations, the engagements that ended), and
+            // ask a watcher still finishing a run to stop. The monitor's
+            // first tick is seconds away and reads the result.
+            reattachBabysitting();
+        }
         registry = AgentRegistry.create(
                 new AgentContext(baseDir, baseDir.resolve("activity"), executor),
                 DrydockPluginService.class.getClassLoader());
@@ -534,9 +612,12 @@ public final class DrydockPluginService implements Disposable {
             // backend without it, keeping the review+rename surface); an
             // injected factory keeps receiving exactly the four arguments it
             // always did, so its behavior is unchanged.
+            // The babysitting delegate rides the same production-only rule.
             ReviewBackend backend = backends.create(baseDir,
                     () -> stateStore.state().sessions(), () -> stateStore.state().repositories(), registry,
-                    backends == PRODUCTION_BACKEND ? taskDelegate(taskService) : null);
+                    production ? taskDelegate(taskService) : null,
+                    production ? new PluginBabysitToolContext(() -> stateStore, executor, baseDir,
+                            sharedProjects::projects) : null);
             backend.start();
             publishOrClose(backend);
         } catch (RuntimeException e) {
@@ -547,6 +628,158 @@ public final class DrydockPluginService implements Disposable {
         activityMonitor = new SessionActivityMonitor(this::stateStore, this::watcher, executor);
         activityMonitor.start();
         sharedProjects.start();
+    }
+
+    /** Publishes and starts {@code monitor} unless {@link #dispose()} has started (the publishOrClose handshake). */
+    private void startBabysitMonitor(BabysitMonitorService monitor) {
+        babysitMonitor = monitor;
+        if (disposed.get()) {
+            monitor.dispose();
+            return;
+        }
+        try {
+            monitor.start();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "The babysitting monitor could not start; engagements are not watched", e);
+        }
+    }
+
+    /** How long a re-attach that could not finish waits before it tries again. */
+    private static final Duration REATTACH_RETRY = Duration.ofSeconds(60);
+
+    /**
+     * The re-attach half of detached babysitting ({@link BabysitHandover#reattach}):
+     * publishes what it changed, cleans the files of engagements that ended
+     * while detached, and -- when a watcher still lives (it may be finishing
+     * one headless run before it honours the revocation) -- drains it once
+     * that process exits ({@link #followUpBabysitting}).
+     *
+     * <p><b>Fail closed.</b> The monitor's wakes are held for every
+     * babysitter before the re-attach runs, and released only for what the
+     * re-attach confirmed is no longer a detached watcher's to run: a
+     * state file that cannot be read, or a revocation that cannot be
+     * written, keeps the affected babysitters' wakes held. A re-attach that
+     * is held or could not acknowledge what it took is retried every
+     * {@link #REATTACH_RETRY} until it succeeds or the plugin is disposed.
+     * Never throws.</p>
+     */
+    private void reattachBabysitting() {
+        if (disposed.get()) {
+            return;
+        }
+        BabysitMonitorService monitor = babysitMonitor;
+        if (monitor != null) {
+            monitor.holdWakes(id -> true);
+        }
+        ApplicationStateStore store = stateStore;
+        boolean retry = true;
+        try {
+            BabysitHandover.Reattached result = BabysitHandover.reattach(store,
+                    new BabysitStateFile(BabysitStateFile.defaultFile(baseDir)), baseDir, Instant.now());
+            if (monitor != null) {
+                monitor.holdWakes(result.hold().<Predicate<ManagedSessionId>>map(hold -> hold::covers)
+                        .orElse(id -> false));
+            }
+            afterReattach(store, result);
+            retry = result.hold().isPresent() || !result.complete();
+            if (result.hold().isEmpty() && result.liveWatcher().isPresent() && result.generation().isPresent()) {
+                follow(result.liveWatcher().get(), result.generation().get());
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Re-attaching detached babysitting failed; babysitters are not woken until a"
+                    + " retry succeeds", e);
+        }
+        if (retry && !disposed.get()) {
+            try {
+                CompletableFuture.delayedExecutor(REATTACH_RETRY.toMillis(), TimeUnit.MILLISECONDS, executor)
+                        .execute(this::reattachBabysitting);
+            } catch (RejectedExecutionException e) {
+                LOG.log(Level.DEBUG, "The executor is shut down; no re-attach retry");
+            }
+        }
+    }
+
+    /** Follows a live watcher this re-attach revoked: drains it once its process exits, never anything newer. */
+    private void follow(BabysitStateFile.Owner owner, UUID generation) {
+        ProcessHandle.of(owner.pid())
+                .filter(handle -> BabysitHandover.isOwnerProcess(owner, handle.info().startInstant()))
+                .ifPresentOrElse(handle -> {
+                    LOG.log(Level.INFO, "The detached babysitting watcher " + owner.pid() + " is asked to stop;"
+                            + " its last run's requests are taken when it exits");
+                    handle.onExit().thenRunAsync(() -> followUpBabysitting(owner, generation), executor);
+                }, () -> LOG.log(Level.INFO, "A detached babysitting watcher still holds its lock but"
+                        + " cannot be followed; its requests are taken at the next start"));
+    }
+
+    /**
+     * Drain-only follow-up for the exited watcher {@code owner} of the
+     * revoked {@code generation} ({@link BabysitHandover#followUp}): it
+     * revokes nothing and clears neither a newer detachment (a quit that
+     * raced this callback) nor a newer watcher's marker. Never throws.
+     */
+    private void followUpBabysitting(BabysitStateFile.Owner owner, UUID generation) {
+        if (disposed.get()) {
+            return;
+        }
+        ApplicationStateStore store = stateStore;
+        try {
+            afterReattach(store, BabysitHandover.followUp(store,
+                    new BabysitStateFile(BabysitStateFile.defaultFile(baseDir)), baseDir, Instant.now(), generation,
+                    owner));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Taking the exited babysitting watcher's last requests failed; they are taken"
+                    + " at the next start", e);
+        }
+    }
+
+    private void afterReattach(ApplicationStateStore store, BabysitHandover.Reattached result) {
+        if (result.stateChanged()) {
+            DrydockSessionsListener.publishChanged();
+        }
+        cleanEndedEngagements(store.state(), result.ended());
+    }
+
+    /** Deletes the delta and instructions files of engagements that ended while detached, unless still shared. */
+    private void cleanEndedEngagements(ApplicationState state, Set<ManagedSessionId> ended) {
+        for (BabysitPairing pairing : state.pairings()) {
+            if (!ended.contains(pairing.babysitterId()) || pairing.state() != BabysitState.STOPPED) {
+                continue;
+            }
+            boolean shared = state.pairings().stream().anyMatch(other -> other.state() != BabysitState.STOPPED
+                    && other.watchedId().equals(pairing.watchedId()) && other.prNumber() == pairing.prNumber());
+            if (!shared) {
+                try {
+                    BabysitDelta.deleteAll(baseDir, pairing.watchedId(), pairing.prNumber());
+                } catch (IOException e) {
+                    LOG.log(Level.DEBUG, () -> "Could not clean up the babysitting files of PR #"
+                            + pairing.prNumber() + ": " + e);
+                }
+            }
+        }
+    }
+
+    /**
+     * The detach half ({@link BabysitHandover#detach}): at an IDE quit only
+     * -- a plugin unload or a window close is no reason for a process to
+     * outlive the IDE -- hands the active engagements to a detached watcher
+     * ({@link BabysitWatcherProcess}, the documented spawn exception) with
+     * this IDE's login-shell PATH. Called after the monitor stopped and
+     * before the final state flush. Never throws.
+     */
+    private void detachBabysitting() {
+        ApplicationStateStore store = stateStore;
+        if (store == null || !AgentCloseConfirmation.isQuitting()) {
+            return;
+        }
+        try {
+            List<SharedProject> projects = sharedProjects.projects();
+            String path = LoginShellEnvironment.currentRealPath();
+            BabysitHandover.detach(store.state(), new BabysitStateFile(BabysitStateFile.defaultFile(baseDir)),
+                    root -> SessionPullRequestLookup.repositoryOf(root, projects), Instant.now(),
+                    generation -> BabysitWatcherProcess.spawn(baseDir, generation, path));
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Detaching babysitting failed; it resumes when the IDE starts again", e);
+        }
     }
 
     private void installActivityReporters() {
@@ -604,6 +837,20 @@ public final class DrydockPluginService implements Disposable {
             Thread.currentThread().interrupt();
         } catch (ExecutionException | TimeoutException e) {
             LOG.log(Level.WARNING, "Drydock initialization did not complete before disposal", e);
+        }
+        BabysitMonitorService theBabysitMonitor = babysitMonitor;
+        if (theBabysitMonitor != null) {
+            // First: a tick wakes babysitters through the activity monitor and
+            // the review backend's credentials, and writes through the store
+            // flushed below; it must be over before any of them goes away.
+            try {
+                theBabysitMonitor.dispose();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Could not stop the babysitting monitor", e);
+            }
+            // Once no tick runs and before the flush below: an IDE quit hands
+            // the active engagements to a detached watcher.
+            detachBabysitting();
         }
         SessionActivityMonitor theMonitor = activityMonitor;
         if (theMonitor != null) {

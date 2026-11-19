@@ -1,6 +1,10 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
+import app.drydock.intellij.tasks.SessionBabysit;
 
 import com.intellij.openapi.actionSystem.ActionPlaces;
 
@@ -310,5 +314,28 @@ class AgentTabCommandsTest {
         assertEquals(Optional.of(foreignSession), AgentTabCommands.lastFocusedAttached(foreign, true));
         assertEquals(Optional.empty(), AgentTabCommands.lastFocusedAttached(layout(null, null, null), true),
                 "a foreign project's idle host does not borrow this one's pane");
+    }
+
+    @Test
+    void theBabysittingJumpIsPopupOnlyAndNamesTheOtherSide() {
+        BabysitPairing pairing = new BabysitPairing(ManagedSessionId.newId(), ManagedSessionId.newId(),
+                RepositoryId.newId(), 12, BabysitState.WATCHING);
+        Optional<SessionBabysit> babysitter = Optional.of(
+                new SessionBabysit(SessionBabysit.Role.BABYSITTER, pairing, Optional.empty()));
+        Optional<SessionBabysit> watched = Optional.of(
+                new SessionBabysit(SessionBabysit.Role.WATCHED, pairing, Optional.empty()));
+
+        assertFalse(AgentTabCommands.babysit(Optional.empty(), NAME, true).visible(), "no engagement, no jump");
+        assertFalse(AgentTabCommands.babysit(babysitter, NAME, false).visible(), "never a header icon");
+        AgentTabCommands.Shown toWatched = AgentTabCommands.babysit(babysitter, NAME, true);
+        assertTrue(toWatched.visible() && toWatched.enabled());
+        assertEquals("Go to Watched Session", toWatched.text());
+        AgentTabCommands.Shown toBabysitter = AgentTabCommands.babysit(watched, NAME, true);
+        assertEquals("Go to Babysitter", toBabysitter.text());
+        assertEquals("Switch to the babysitter of " + NAME + "'s PR #12", toBabysitter.tooltip());
+        SessionBabysit stopped = new SessionBabysit(SessionBabysit.Role.BABYSITTER,
+                pairing.withState(BabysitState.STOPPED), Optional.empty());
+        assertTrue(AgentTabCommands.babysit(Optional.of(stopped), NAME, true).visible(),
+                "a stopped babysitter keeps its way back to the session it watched");
     }
 }

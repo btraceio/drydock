@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
+import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
@@ -457,7 +458,11 @@ final class TaskTreeInputs implements AutoCloseable {
 
         List<ManagedAgentSession> sessions = new ArrayList<>();
         Map<ManagedSessionId, Optional<SessionActivity>> activity = new HashMap<>();
-        for (ManagedAgentSession session : plugin.stateStore().state().sessions()) {
+        // One snapshot for the rows and their babysitting part, so a row and
+        // its pairing can never come from two different states.
+        ApplicationState state = plugin.stateStore().state();
+        Map<ManagedSessionId, SessionBabysit> babysit = SessionBabysit.join(state.pairings(), state.escalations());
+        for (ManagedAgentSession session : state.sessions()) {
             sessions.add(session.withWorkingDirectory(RepositoryCatalog.canonicalize(session.workingDirectory())));
             activity.put(session.id(), plugin.activityMonitor().current(session.id()));
         }
@@ -548,7 +553,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
                 filter, List.of(), List.of(), Optional.empty(), resumable, sessionPullRequests,
-                Map.of(), Map.of(), pendingIssues, pendingJiraGroups);
+                Map.of(), Map.of(), pendingIssues, pendingJiraGroups, babysit);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */

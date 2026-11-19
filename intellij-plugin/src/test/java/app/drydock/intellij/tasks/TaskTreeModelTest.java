@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -97,6 +99,7 @@ class TaskTreeModelTest {
         String filter = "";
         final Set<Path> pendingIssueRoots = new HashSet<>();
         final Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
+        final Map<ManagedSessionId, SessionBabysit> babysit = new HashMap<>();
 
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
@@ -150,7 +153,7 @@ class TaskTreeModelTest {
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter,
                     List.of(), List.of(), Optional.empty(),
                     resumable, pullRequestsBySession, Map.of(), Map.of(),
-                    pendingIssueRoots, pendingJiraGroups);
+                    pendingIssueRoots, pendingJiraGroups, babysit);
         }
     }
 
@@ -1138,6 +1141,31 @@ class TaskTreeModelTest {
                 "same branch and number in another root: its own answer, no contamination");
         assertEquals(Optional.empty(), sessionRow(nodes, BTRACE, unjoined.id()).branchPullRequest(),
                 "a session the join did not match carries nothing");
+    }
+
+    @Test
+    void sessionRowsCarryTheirBabysittingPartAndTheScopedInputsKeepIt() {
+        Path watchedWt = Path.of("/wt/btrace-watched");
+        Path babysitterWt = Path.of("/wt/btrace--babysit-pr12");
+        In in = new In().project(BTRACE).worktree(BTRACE, watchedWt, "feature/watched")
+                .worktree(BTRACE, babysitterWt, "HEAD");
+        ManagedAgentSession watched = session("Watched", watchedWt);
+        ManagedAgentSession babysitter = session("babysit PR #12", babysitterWt);
+        ManagedAgentSession plain = session("Plain", BTRACE);
+        in.sessions.addAll(List.of(watched, babysitter, plain));
+        in.babysit.putAll(SessionBabysit.join(List.of(new BabysitPairing(babysitter.id(),
+                watched.id(), watched.repositoryId(), 12, BabysitState.WATCHING)), List.of()));
+
+        for (TaskTreeModel.Inputs inputs : List.of(in.build(),
+                in.build().withScope("", List.of(), List.of(), Optional.empty()),
+                in.build().withMatchRefs(Map.of(), Map.of()))) {
+            List<TaskNode> nodes = TaskTreeModel.build(inputs);
+            assertEquals(Optional.of(SessionBabysit.Role.WATCHED),
+                    sessionRow(nodes, BTRACE, watched.id()).babysit().map(SessionBabysit::role));
+            assertEquals(Optional.of(SessionBabysit.Role.BABYSITTER),
+                    sessionRow(nodes, BTRACE, babysitter.id()).babysit().map(SessionBabysit::role));
+            assertEquals(Optional.empty(), sessionRow(nodes, BTRACE, plain.id()).babysit());
+        }
     }
 
     @Test

@@ -3,9 +3,13 @@ package app.drydock.git;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorktreeNamingTest {
 
@@ -47,5 +51,21 @@ class WorktreeNamingTest {
         Path home = Path.of("/Users/dev");
         assertEquals(Path.of("/Users/dev/dev/wt/drydock-sidebar-resize"),
                 WorktreeNaming.defaultDirectory(home, Optional.empty(), "drydock", "feat/sidebar-resize"));
+    }
+
+    @Test
+    void babysitterDirectoryIsDoubleDashedSoNoBranchSlugCanReachIt() {
+        Path base = Path.of("/wt");
+        assertEquals(Path.of("/wt/drydock--babysit-pr42"),
+                WorktreeNaming.babysitterDirectory(base, "drydock", 42));
+        // A watched branch spelled exactly like the suffix still lands on a
+        // single-dash directory: the default naming can never emit "--".
+        for (String branch : List.of("babysit-pr42", "-babysit-pr42", "x/--babysit-pr42", "Babysit PR42")) {
+            Path watched = WorktreeNaming.defaultDirectory(Path.of("/home"), Optional.of(base), "drydock", branch);
+            assertNotEquals(WorktreeNaming.babysitterDirectory(base, "drydock", 42), watched, branch);
+            assertFalse(watched.getFileName().toString().contains("--"), watched.toString());
+        }
+        assertEquals(Path.of("/wt/repo--babysit-pr7"), WorktreeNaming.babysitterDirectory(base, " ", 7));
+        assertThrows(IllegalArgumentException.class, () -> WorktreeNaming.babysitterDirectory(base, "r", 0));
     }
 }

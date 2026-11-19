@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentConsoles;
@@ -67,6 +68,24 @@ public final class TaskNavigator {
      */
     public static void switchTo(ManagedAgentSession session) {
         switchTo(session, target -> { });
+    }
+
+    /**
+     * EDT. Switches to the session {@code id} names, as the catalog has it
+     * now -- the babysitting jumps' target, which is the other side of a
+     * pairing rather than the row the user is on. A session no longer in the
+     * catalog says so instead. Memory-only read of the state snapshot.
+     */
+    public static void switchTo(ManagedSessionId id) {
+        Optional<ManagedAgentSession> session = DrydockPluginService.getInstance().stateStore().state().sessions()
+                .stream()
+                .filter(candidate -> candidate.id().equals(id))
+                .findFirst();
+        if (session.isEmpty()) {
+            Messages.showInfoMessage("That session is no longer in Drydock.", "Drydock");
+            return;
+        }
+        switchTo(session.get());
     }
 
     /** As {@link #switchTo(ManagedAgentSession)}, then {@code then} with the task's window, on the EDT. */

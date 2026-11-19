@@ -2,7 +2,10 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.SessionBabysit;
 
+import com.intellij.icons.AllIcons;
 import com.intellij.ide.DataManager;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnActionEvent;
@@ -283,6 +286,37 @@ final class AgentTabCommands {
         }
         return new Shown(true, true, "Rename…", null, null);
     }
+
+    /**
+     * The tab's session's part in a babysitting engagement, from the state
+     * snapshot -- a memory-only scan of the (few) pairings. {@code resolve}
+     * already proved the plugin initialized.
+     */
+    static Optional<SessionBabysit> babysitOf(Target target) {
+        return SessionBabysit.of(DrydockPluginService.getInstance().stateStore().state(), target.session().id());
+    }
+
+    /**
+     * The babysitting jump, in the tab popup only: a babysitter's tab goes
+     * to the session it watches (its engagement on or stopped), a watched
+     * session's tab to its babysitter. Never gated by an in-flight
+     * operation: it starts nothing, it only switches windows and tabs.
+     */
+    static Shown babysit(Optional<SessionBabysit> part, String name, boolean popup) {
+        if (!popup || part.isEmpty()) {
+            return Shown.HIDDEN;
+        }
+        boolean babysitter = part.get().role() == SessionBabysit.Role.BABYSITTER;
+        return new Shown(true, true,
+                babysitter ? BABYSIT_WATCHED_LABEL : BABYSIT_BABYSITTER_LABEL,
+                babysitter ? "Switch to the session " + name + " babysits"
+                        : "Switch to the babysitter of " + name + "'s PR #" + part.get().pairing().prNumber(),
+                babysitter ? AllIcons.Actions.Back : AllIcons.Actions.Forward);
+    }
+
+    /** The jump's two labels, shared with the strip's overflow menu. */
+    static final String BABYSIT_WATCHED_LABEL = "Go to Watched Session";
+    static final String BABYSIT_BABYSITTER_LABEL = "Go to Babysitter";
 
     /** Done: offered on every agent tab, header and popup, guarded by the busy rule. */
     static Shown done(SessionCommands.State state, String name, boolean popup) {

@@ -53,6 +53,18 @@ class SearchTermsTest {
     }
 
     @Test
+    void isBabysitNarrowsToTheBabysittingSectionAndBabysitterIsPlainText() {
+        SearchTerms<InboxModel.GroupKind> terms = parse("IS:babysit is:needs is:babysitter");
+        assertEquals(Set.of(InboxModel.GroupKind.BABYSITTING, InboxModel.GroupKind.NEEDS_YOU), terms.groupKinds());
+        assertEquals("is:babysitter", terms.plainText());
+        // Every group's token parses back to its group: a new group cannot
+        // ship without a working is: word.
+        for (InboxModel.GroupKind kind : InboxModel.GroupKind.values()) {
+            assertEquals(Set.of(kind), parse("is:" + kind.token()).groupKinds(), kind.name());
+        }
+    }
+
+    @Test
     void plainQuotedPhraseIsDequotedAndEmptyQuotedTokensAreDropped() {
         assertEquals("dark mode fix", parse("\"dark mode\" fix").plainText());
         assertTrue(parse("\"\"").isEmpty());

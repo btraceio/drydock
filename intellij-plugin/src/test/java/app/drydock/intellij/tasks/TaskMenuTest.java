@@ -1,6 +1,8 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitState;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -28,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -722,5 +725,91 @@ class TaskMenuTest {
                             .noneMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)),
                     "only a project row may offer the workspace-box settings: " + row.getClass().getSimpleName());
         }
+    }
+
+    // -- babysitting ------------------------------------------------------
+
+    /** The same row with its part in a babysitting engagement. */
+    private static TaskRow withBabysit(TaskRow row, SessionBabysit part) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest(), Optional.of(part));
+    }
+
+    /** The same row carrying a branch pull request in {@code state}. */
+    private static TaskRow withBranchPr(TaskRow row, GhCliService.PrInfo.PrLifecycle state, String head) {
+        return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
+                row.readOnly(), row.folderMissing(), row.resumable(),
+                Optional.of(new GhCliService.BranchPullRequest(9, state, false, head, "Fix allocation profile",
+                        Optional.empty())));
+    }
+
+    @Test
+    void anIdleSessionWithAnOpenBranchPrOffersBabysitAfterItsManagement() {
+        TaskRow open = withBranchPr(task(false, new TaskPlacement.Idle(true)),
+                GhCliService.PrInfo.PrLifecycle.OPEN, "fix-allocation-profile");
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.BABYSIT_PR),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                sectionsOf(open));
+        assertEquals("Babysit PR #9", BabysitActions.startText(open));
+    }
+
+    @Test
+    void babysitIsOfferedOnlyForALocalUnpairedSessionWithAnOpenPrOnAPlainBranch() {
+        TaskRow base = task(false, new TaskPlacement.Idle(true));
+        assertTrue(BabysitActions.offersStart(withBranchPr(base, GhCliService.PrInfo.PrLifecycle.OPEN, "feature/x")));
+        assertFalse(BabysitActions.offersStart(base), "no PR the badge join resolved");
+        for (GhCliService.PrInfo.PrLifecycle state : List.of(GhCliService.PrInfo.PrLifecycle.MERGED,
+                GhCliService.PrInfo.PrLifecycle.CLOSED, GhCliService.PrInfo.PrLifecycle.UNKNOWN)) {
+            assertFalse(BabysitActions.offersStart(withBranchPr(base, state, "feature/x")), state.name());
+        }
+        assertFalse(BabysitActions.offersStart(withBranchPr(base, GhCliService.PrInfo.PrLifecycle.OPEN, "")),
+                "a PR with no head branch has nothing to check out");
+        assertFalse(BabysitActions.offersStart(withBranchPr(base, GhCliService.PrInfo.PrLifecycle.OPEN, "-x")),
+                "an option-like head branch is refused before it reaches git");
+        TaskRow targeted = withBranchPr(rowWithTarget(base, "https://github.com/DataDog/profiling-backend/pull/9"),
+                GhCliService.PrInfo.PrLifecycle.OPEN, "feature/x");
+        assertFalse(BabysitActions.offersStart(targeted), "an explicit target is not the branch's own PR");
+        TaskRow watched = withBranchPr(base, GhCliService.PrInfo.PrLifecycle.OPEN, "feature/x");
+        ManagedSessionId babysitter = ManagedSessionId.newId();
+        SessionBabysit part = SessionBabysit.join(List.of(new BabysitPairing(babysitter, watched.session().id(),
+                watched.session().repositoryId(), 9, BabysitState.WATCHING)), List.of()).get(watched.session().id());
+        assertFalse(BabysitActions.offersStart(withBabysit(watched, part)), "one babysitter per watched session");
+    }
+
+    @Test
+    void bothSidesOfAnEngagementOfferTheJumpFirstAndStopWithTheManagement() {
+        TaskRow watched = task(false, new TaskPlacement.Idle(true));
+        TaskRow babysitter = task(true, new TaskPlacement.Here());
+        Map<ManagedSessionId, SessionBabysit> parts = SessionBabysit.join(List.of(new BabysitPairing(
+                babysitter.session().id(), watched.session().id(), watched.session().repositoryId(), 9,
+                BabysitState.ESCALATED)), List.of());
+
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.SHOW_BABYSITTER),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.RESUME),
+                List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.STOP_BABYSITTING),
+                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
+                List.of(TaskMenu.Item.DONE_WITH_TASK)),
+                sectionsOf(withBabysit(watched, parts.get(watched.session().id()))));
+        List<List<TaskMenu.Item>> babysitterMenu = sectionsOf(withBabysit(babysitter,
+                parts.get(babysitter.session().id())));
+        assertEquals(List.of(TaskMenu.Item.SHOW_WATCHED), babysitterMenu.get(0));
+        assertTrue(babysitterMenu.contains(List.of(TaskMenu.Item.STOP_BABYSITTING)));
+
+        // A stopped engagement: the babysitter keeps its way back, nothing stops twice.
+        SessionBabysit stopped = SessionBabysit.join(List.of(new BabysitPairing(babysitter.session().id(),
+                watched.session().id(), watched.session().repositoryId(), 9, BabysitState.STOPPED)), List.of())
+                .get(babysitter.session().id());
+        List<List<TaskMenu.Item>> afterStop = sectionsOf(withBabysit(babysitter, stopped));
+        assertEquals(List.of(TaskMenu.Item.SHOW_WATCHED), afterStop.get(0));
+        assertTrue(afterStop.stream().noneMatch(section -> section.contains(TaskMenu.Item.STOP_BABYSITTING)
+                || section.contains(TaskMenu.Item.BABYSIT_PR)));
     }
 }
