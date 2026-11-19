@@ -27,6 +27,12 @@ import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.app.LoginShellEnvironment;
+import app.drydock.babysit.BabysitInstructions;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitStartRefusal;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.BabysitStateTransforms;
+import app.drydock.babysit.BabysitWriteGuard;
 import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
@@ -40,6 +46,11 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.git.GitCommandFailedException;
+import app.drydock.git.GitExecutableNotFoundException;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.WorktreeDirectoryExistsException;
+import app.drydock.git.WorktreeNaming;
 import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
@@ -80,6 +91,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -569,6 +581,21 @@ class DrydockSessionServiceTest {
                     },
                     mcpAccess, new LaunchClaims(id -> liveExecution.test(id)), resources, flag,
                     new BoxShell(runner), new WorkspacesCli(boxBinary(), runner), liveness, confirm, clientEnds);
+        }
+
+        /** A local service whose babysitting git seam is {@code babysitGit}. */
+        DrydockSessionService babysitService(BabysitGit babysitGit, AgentProvider... providers) {
+            AgentRegistry registry = new AgentRegistry(List.of(providers),
+                    new AgentContext(base, base.resolve("activity"), executor));
+            SessionActivityWatcher watcher = new SessionActivityWatcher(base.resolve("activity"), executor);
+            Function<Path, CompletableFuture<RepositoryId>> resolver =
+                    path -> CompletableFuture.completedFuture(repository.id());
+            return new DrydockSessionService(CompletableFuture.completedFuture(null),
+                    () -> store, () -> registry, () -> watcher, resolver, consoles, executor, path -> List.of(),
+                    SessionMcpAccess.none(), new LaunchClaims(id -> liveExecution.test(id)), null, () -> false,
+                    new BoxShell(CommandRunner.PRODUCTION), new WorkspacesCli(CommandRunner.PRODUCTION),
+                    new RemoteSessionLiveness(), question -> CompletableFuture.completedFuture(false), clientEnds,
+                    babysitGit);
         }
     }
 
@@ -4139,6 +4166,549 @@ class DrydockSessionServiceTest {
                 base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
         assertEquals(Optional.empty(), service.doneFlowRefusal(local.id()),
                 "a local row passes the gate untouched");
+        harness.store.flush();
+    }
+
+    // ---- babysitting -------------------------------------------------------------
+
+    private static final String BABYSIT_BRANCH = "feature/x";
+    private static final String BABYSIT_BASE = "1111111111111111111111111111111111111111";
+
+    /** A babysitting git seam that never runs git: it records, and creates directories for real. */
+    static final class FakeBabysitGit implements BabysitGit {
+
+        private final Path base;
+        final List<List<Object>> adds = new CopyOnWriteArrayList<>();
+        final List<Path> removed = new CopyOnWriteArrayList<>();
+        final List<Path> pruned = new CopyOnWriteArrayList<>();
+        final List<String> tipsAsked = new CopyOnWriteArrayList<>();
+        volatile RuntimeException addFailure;
+        volatile RuntimeException tipFailure;
+        /** Runs inside the worktree add, before it completes: what lands while git works. */
+        volatile Runnable duringAdd = () -> { };
+        volatile GitStatusService.RemoteBranchTip tip =
+                new GitStatusService.RemoteBranchTip(Optional.of(BABYSIT_BASE), Optional.empty());
+
+        FakeBabysitGit(Path base) {
+            this.base = base;
+        }
+
+        @Override public Path directoryFor(String repositoryName, int prNumber) {
+            return WorktreeNaming.babysitterDirectory(base.resolve("wt"), repositoryName, prNumber);
+        }
+
+        @Override public GitStatusService.DetachedWorktree addDetached(Path repositoryRoot, Path directory,
+                                                                     String branch) {
+            adds.add(List.of(repositoryRoot, directory, branch));
+            duringAdd.run();
+            if (addFailure != null) {
+                throw addFailure;
+            }
+            try {
+                Files.createDirectories(directory);
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+            return new GitStatusService.DetachedWorktree(directory, BABYSIT_BASE, Optional.empty());
+        }
+
+        @Override public void removeQuietly(Path repositoryRoot, Path directory) {
+            removed.add(directory);
+        }
+
+        @Override public void pruneQuietly(Path repositoryRoot) {
+            pruned.add(repositoryRoot);
+        }
+
+        @Override public GitStatusService.RemoteBranchTip remoteTip(Path repositoryRoot, String branch) {
+            tipsAsked.add(branch);
+            if (tipFailure != null) {
+                throw tipFailure;
+            }
+            return tip;
+        }
+    }
+
+    private static ManagedAgentSession persistWatched(Harness harness) {
+        return persistSession(harness, AgentKind.CLAUDE, "Watched \"work\"\nline two",
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-watched"), Optional.empty()),
+                harness.base, SessionStatus.INACTIVE, Instant.parse("2026-08-12T10:00:00Z"));
+    }
+
+    private static Throwable rootCause(Throwable failure) {
+        Throwable cause = failure;
+        while ((cause instanceof ExecutionException || cause instanceof CompletionException)
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
+    }
+
+    private static BabysitStartRefusal refusalOf(CompletableFuture<?> future) {
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        Throwable cause = rootCause(failure);
+        assertTrue(cause instanceof DrydockSessionService.BabysitStartRefusedException, String.valueOf(cause));
+        return ((DrydockSessionService.BabysitStartRefusedException) cause).reason();
+    }
+
+    @Test
+    void aBabysitterIsPairedThenLaunchedAsTheWatchedKindInItsOwnDetachedWorktree(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        Path instructions = base.resolve("babysit").resolve("instructions.md");
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                instructions).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        DrydockSessionService.BabysitStarted started = launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        Path directory = WorktreeNaming.babysitterDirectory(base.resolve("wt"), "repo", 42).toAbsolutePath().normalize();
+        assertEquals(List.of(new BabysitPairing(started.babysitter().id(), watched.id(), watched.repositoryId(), 42,
+                BabysitState.WATCHING)), harness.store.state().pairings());
+        assertEquals(launch.pairing(), harness.store.state().pairings().get(0));
+        assertEquals(List.of(List.of(base, directory, BABYSIT_BRANCH)), git.adds,
+                "the worktree is cut from the watched session's main checkout");
+        assertEquals(BABYSIT_BASE, started.worktree().baseCommit());
+        ManagedAgentSession row = persisted(harness, started.babysitter().id());
+        assertEquals(SessionStatus.RUNNING, row.status());
+        assertEquals(AgentKind.CLAUDE, row.agentKind());
+        assertEquals(SessionMode.WRITES, row.mode());
+        assertEquals(directory, row.workingDirectory());
+        assertEquals(Optional.of(directory), row.worktreeRoot());
+        assertFalse(row.branchCreatedHere(), "the babysitter owns no branch");
+        assertEquals("babysit PR #42", row.displayName());
+        assertEquals(harness.repository.id(), row.repositoryId());
+        assertEquals(directory, harness.consoles.opens.get(0).workingDirectory());
+        String prompt = provider.createContexts.get(0).initialPrompt().orElseThrow();
+        assertTrue(prompt.contains("#42"), prompt);
+        assertTrue(prompt.contains(instructions.toAbsolutePath().normalize().toString()), prompt);
+        assertTrue(prompt.contains(watched.id().toString()), prompt);
+        assertFalse(prompt.contains("\n"), "the pointer is one paragraph: " + prompt);
+        assertTrue(prompt.contains("Watched work line two"), "the name is flattened: " + prompt);
+        assertEquals(BabysitInstructions.baseline(42, BABYSIT_BRANCH), Files.readString(instructions),
+                "the start writes the baseline instructions the first prompt points at");
+        harness.store.flush();
+    }
+
+    @Test
+    void aSecondBabysitterForTheSameSessionIsRefusedAndChangesNothing(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH, base.resolve("i.md"))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS).started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        int sessions = harness.store.state().sessions().size();
+
+        assertEquals(BabysitStartRefusal.ALREADY_BABYSAT,
+                refusalOf(service.startBabysitter(watched.id(), 43, BABYSIT_BRANCH, base.resolve("i.md"))));
+
+        assertEquals(1, harness.store.state().pairings().size());
+        assertEquals(sessions, harness.store.state().sessions().size());
+        assertEquals(1, git.adds.size());
+        assertEquals(1, provider.createContexts.size());
+        harness.store.flush();
+    }
+
+    @Test
+    void eachRefusalIsNamedAndTouchesNothing(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        ManagedAgentSession remote = persistRemoteSession(harness,
+                new AgentBinding(AgentKind.CLAUDE, Optional.of("conv-7"), Optional.empty()),
+                SessionStatus.IDLE, false);
+        ManagedAgentSession otherWatched = persistWatched(harness);
+        ManagedAgentSession babysitter = persistWatched(harness);
+        harness.store.update(state -> state.withPairings(List.of(new BabysitPairing(babysitter.id(),
+                otherWatched.id(), harness.repository.id(), 9, BabysitState.WATCHING))));
+
+        ManagedAgentSession terminal = persistSession(harness, AgentKind.TERMINAL, "shell",
+                AgentBinding.unlaunched(AgentKind.TERMINAL), harness.base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+        Path instructions = base.resolve("babysit").resolve("refused-instructions.md");
+
+        assertEquals(BabysitStartRefusal.WATCHED_UNKNOWN,
+                refusalOf(service.startBabysitter(ManagedSessionId.newId(), 42, BABYSIT_BRANCH, instructions)));
+        assertEquals(BabysitStartRefusal.WATCHED_REMOTE,
+                refusalOf(service.startBabysitter(remote.id(), 42, BABYSIT_BRANCH, instructions)));
+        assertEquals(BabysitStartRefusal.WATCHED_IS_TERMINAL,
+                refusalOf(service.startBabysitter(terminal.id(), 42, BABYSIT_BRANCH, instructions)));
+        assertEquals(BabysitStartRefusal.WATCHED_IS_BABYSITTER,
+                refusalOf(service.startBabysitter(babysitter.id(), 42, BABYSIT_BRANCH, instructions)));
+        assertEquals(BabysitStartRefusal.INVALID_PR_BRANCH,
+                refusalOf(service.startBabysitter(watched.id(), 42, "--upload-pack=evil", instructions)));
+        Files.createDirectories(git.directoryFor("repo", 42));
+        assertEquals(BabysitStartRefusal.WORKTREE_EXISTS,
+                refusalOf(service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH, instructions)));
+
+        assertFalse(Files.exists(instructions), "a refused start leaves no instructions file behind");
+        assertEquals(1, harness.store.state().pairings().size(), "only the seeded pairing");
+        assertTrue(git.adds.isEmpty());
+        assertTrue(provider.createContexts.isEmpty());
+        assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
+    }
+
+    @Test
+    void aWorktreeAddKilledMidwayRollsBackThePairingAndRemovesWhatItMayHaveLeft(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        git.addFailure = new GitCommandFailedException(List.of("git", "worktree", "add"), -1, "timed out",
+                GitCommandFailedException.Outcome.UNKNOWN);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        int sessions = harness.store.state().sessions().size();
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(rootCause(failure) instanceof GitCommandFailedException, String.valueOf(failure));
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(sessions, harness.store.state().sessions().size(), "no babysitter row was ever persisted");
+        assertEquals(List.of(git.directoryFor("repo", 42).toAbsolutePath().normalize()), git.removed);
+        assertEquals(List.of(base), git.pruned, "a stale worktree entry is pruned after the interrupted add");
+        assertTrue(provider.createContexts.isEmpty());
+        // The engagement can be started again once the cause is gone.
+        git.addFailure = null;
+        service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH, base.resolve("i.md"))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS).started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(1, harness.store.state().pairings().size());
+        harness.store.flush();
+    }
+
+    @Test
+    void aWorktreeThatWasNotOursIsNeverRemovedOnRollBack(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        git.addFailure = new WorktreeDirectoryExistsException(base.resolve("raced"));
+        DrydockSessionService service = harness.babysitService(git, new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession watched = persistWatched(harness);
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertThrows(ExecutionException.class, () -> launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(List.of(), git.removed);
+        harness.store.flush();
+    }
+
+    @Test
+    void aFailedLaunchForgetsTheBabysitterRowItsPairingAndItsWorktree(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        // Unsupported: the row persists, then the plan is refused (AC11).
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, false, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        int sessions = harness.store.state().sessions().size();
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertThrows(ExecutionException.class, () -> launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(sessions, harness.store.state().sessions().size(), "the FAILED babysitter row is forgotten");
+        assertNull(persistedOrNull(harness, launch.pairing().babysitterId()));
+        assertEquals(List.of(git.directoryFor("repo", 42).toAbsolutePath().normalize()), git.removed);
+        assertEquals(List.of(), git.pruned, "an add that completed left no stale entry to prune");
+        assertTrue(harness.consoles.opens.isEmpty());
+        harness.store.flush();
+    }
+
+    /** Stop Babysitting's state write, alone: the Stop that found no agent to stop yet. */
+    private static void stopInStateOnly(Harness harness) {
+        harness.store.update(state -> state.withPairings(state.pairings().stream()
+                .map(pairing -> new BabysitPairing(pairing.babysitterId(), pairing.watchedId(), pairing.repositoryId(),
+                        pairing.prNumber(), BabysitState.STOPPED))
+                .toList()));
+    }
+
+    @Test
+    void aStopThatWinsDuringTheWorktreeAddCancelsTheLaunchAndRemovesTheWorktree(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        git.duringAdd = () -> stopInStateOnly(harness);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        int sessions = harness.store.state().sessions().size();
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(rootCause(failure) instanceof DrydockSessionService.BabysitStartCancelledException,
+                String.valueOf(failure));
+        assertTrue(harness.consoles.opens.isEmpty(), "no agent launched for a stopped engagement");
+        assertTrue(provider.createContexts.isEmpty());
+        assertEquals(List.of(git.directoryFor("repo", 42).toAbsolutePath().normalize()), git.removed,
+                "the worktree this start created is rolled back");
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(sessions, harness.store.state().sessions().size(), "no babysitter row");
+        harness.store.flush();
+    }
+
+    @Test
+    void deletingTheWatchedSessionDuringTheWorktreeAddCancelsTheLaunch(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        git.duringAdd = () -> harness.store.update(state -> BabysitStateTransforms.onSessionDeleted(state,
+                watched.id()));
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(rootCause(failure) instanceof DrydockSessionService.BabysitStartCancelledException,
+                String.valueOf(failure));
+        assertTrue(harness.consoles.opens.isEmpty());
+        assertEquals(1, git.removed.size());
+        harness.store.flush();
+    }
+
+    @Test
+    void aStopThatLandsWhileTheAgentLaunchesStopsItOnceRegistered(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        CompletableFuture<Void> opening = new CompletableFuture<>();
+        harness.consoles.pendingOpen = opening;
+
+        DrydockSessionService.BabysitLaunch launch = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
+        while (harness.consoles.opens.isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(1, harness.consoles.opens.size(), "the console is opening");
+        stopInStateOnly(harness);
+        opening.complete(null);
+        DrydockSessionService.BabysitStarted started = launch.started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(started.babysitter().id()), harness.consoles.stopped,
+                "the agent launched for a stopped engagement is stopped once registered");
+        assertEquals(List.of(), git.removed, "a launched babysitter keeps its worktree, as after any Stop");
+        harness.store.flush();
+    }
+
+    @Test
+    void forgettingTheWatchedSessionEndsTheEngagementAndStopsTheBabysitter(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.babysitService(new FakeBabysitGit(base), provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        ManagedAgentSession babysitter = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                        base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).babysitter();
+
+        service.deleteSession(watched.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(List.of(babysitter.id()), harness.consoles.stopped,
+                "the babysitter's agent is stopped, not forgotten");
+        assertEquals(List.of(watched.id()), harness.consoles.forgotten);
+        assertNotNull(persistedOrNull(harness, babysitter.id()), "the babysitter's row stays for the human");
+        harness.store.flush();
+    }
+
+    @Test
+    void forgettingTheBabysitterEndsTheEngagementAndLeavesTheWatchedSessionAlone(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.babysitService(new FakeBabysitGit(base), provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        ManagedAgentSession babysitter = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                        base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).babysitter();
+
+        service.deleteSession(babysitter.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(List.of(), harness.store.state().pairings());
+        assertEquals(List.of(), harness.consoles.stopped);
+        assertNotNull(persistedOrNull(harness, watched.id()));
+        harness.store.flush();
+    }
+
+    @Test
+    void stoppingBabysittingFromEitherSideEndsTheEngagementAndStopsOnlyTheBabysitter(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events);
+        DrydockSessionService service = harness.babysitService(new FakeBabysitGit(base), provider);
+        ManagedAgentSession watched = persistWatched(harness);
+        ManagedAgentSession babysitter = service.startBabysitter(watched.id(), 42, BABYSIT_BRANCH,
+                        base.resolve("i.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).babysitter();
+
+        Optional<BabysitPairing> stopped = service.stopBabysitting(watched.id())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(Optional.of(babysitter.id()), stopped.map(BabysitPairing::babysitterId));
+        assertEquals(List.of(BabysitState.STOPPED),
+                harness.store.state().pairings().stream().map(BabysitPairing::state).toList(),
+                "the pairing stays, for history, and is inactive");
+        assertEquals(List.of(babysitter.id()), harness.consoles.stopped, "the babysitter's agent is stopped");
+        assertNotNull(persistedOrNull(harness, babysitter.id()), "its row stays for the human's Done");
+        assertNotNull(persistedOrNull(harness, watched.id()));
+
+        assertEquals(Optional.empty(), service.stopBabysitting(watched.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                "nothing active is left to stop");
+        assertEquals(Optional.empty(), service.stopBabysitting(babysitter.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals(List.of(babysitter.id()), harness.consoles.stopped, "no second stop");
+
+        // A fresh engagement, stopped from the babysitter's side this time.
+        ManagedAgentSession second = service.startBabysitter(watched.id(), 43, BABYSIT_BRANCH,
+                        base.resolve("j.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .started().get(TIMEOUT_SECONDS, TimeUnit.SECONDS).babysitter();
+        assertEquals(Optional.of(second.id()), service.stopBabysitting(second.id())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS).map(BabysitPairing::babysitterId));
+        assertTrue(harness.store.state().pairings().stream().allMatch(p -> p.state() == BabysitState.STOPPED));
+        assertEquals(List.of(babysitter.id(), second.id()), harness.consoles.stopped);
+        harness.store.flush();
+    }
+
+    @Test
+    void aResumePromptOverrideReplacesTheFixedTaskPrompt(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Task",
+                new AgentBinding(AgentKind.PI, Optional.of("pi-conv-1"), Optional.empty()),
+                base, SessionStatus.EXITED, Instant.parse("2026-08-12T10:00:00Z"));
+        harness.store.update(state -> DrydockSessionService.withReplacedSession(state,
+                stored.withStartedWithTask(true)));
+
+        service.resumeSession(stored.id(), Optional.of("Read /tmp/delta-1.md")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        harness.consoles.stopped.add(stored.id());
+        service.resumeSession(stored.id(), Optional.of("   ")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        harness.consoles.stopped.add(stored.id());
+        service.resumeOrStartSession(stored.id(), Optional.of("Read /tmp/delta-2.md"))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        assertEquals(3, provider.resumeContexts.size());
+        assertEquals(Optional.of("Read /tmp/delta-1.md"), provider.resumeContexts.get(0).resumePrompt());
+        assertTrue(provider.resumeContexts.get(1).resumePrompt().orElseThrow().startsWith("You are resuming"),
+                "a blank override is no override: " + provider.resumeContexts.get(1).resumePrompt());
+        assertEquals(Optional.of("Read /tmp/delta-2.md"), provider.resumeContexts.get(2).resumePrompt());
+        harness.store.flush();
+    }
+
+    @Test
+    void aPromptedResumeOfAnUnboundConversationIsRefusedNeverAPickerNorAFreshStart(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        RecordingProvider provider = new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events);
+        DrydockSessionService service = harness.service(provider);
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Unbound babysitter",
+                AgentBinding.unlaunched(AgentKind.PI), base, SessionStatus.INACTIVE,
+                Instant.parse("2026-08-12T10:00:00Z"));
+
+        for (CompletableFuture<ManagedAgentSession> attempt : List.of(
+                service.resumeSession(stored.id(), Optional.of("Read /tmp/delta.md")),
+                service.resumeOrStartSession(stored.id(), Optional.of("Read /tmp/delta.md")))) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> attempt.get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            assertTrue(rootCause(failure) instanceof DrydockSessionService.UnboundConversationException,
+                    String.valueOf(failure));
+        }
+
+        assertTrue(provider.resumeContexts.isEmpty(), "no picker resume was built");
+        assertTrue(provider.createContexts.isEmpty(), "no fresh conversation was started");
+        assertTrue(harness.consoles.opens.isEmpty());
+        assertEquals(SessionStatus.INACTIVE, persisted(harness, stored.id()).status(), "nothing was persisted");
+        // The claim was released: an unprompted resume still goes through.
+        service.resumeSession(stored.id()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals(1, provider.resumeContexts.size());
+        harness.store.flush();
+    }
+
+    @Test
+    void aBusyResumeIsASessionBusyException(@TempDir Path base) throws Exception {
+        Harness harness = harness(base);
+        DrydockSessionService service = harness.service(new RecordingProvider(
+                AgentKind.PI, SessionIdStrategy.DISCOVERED, null, true, false, null, harness.events));
+        ManagedAgentSession stored = persistSession(harness, AgentKind.PI, "Live",
+                new AgentBinding(AgentKind.PI, Optional.of("pi-conv-1"), Optional.empty()),
+                base, SessionStatus.RUNNING, Instant.parse("2026-08-12T10:00:00Z"));
+        harness.liveExecution = id -> id.equals(stored.id());
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> service.resumeSession(stored.id(), Optional.of("Read x")).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        assertTrue(rootCause(failure) instanceof DrydockSessionService.SessionBusyException, String.valueOf(failure));
+        harness.store.flush();
+    }
+
+    @Test
+    void theWriteGuardChecksTheWatchedSessionsLivenessFirstThenTheFetchedTip(@TempDir Path base)
+            throws Exception {
+        Harness harness = harness(base);
+        FakeBabysitGit git = new FakeBabysitGit(base);
+        DrydockSessionService service = harness.babysitService(git, new RecordingProvider(
+                AgentKind.CLAUDE, SessionIdStrategy.PRESET, null, true, true, null, harness.events));
+        ManagedAgentSession watched = persistWatched(harness);
+        BabysitPairing pairing = new BabysitPairing(ManagedSessionId.newId(), watched.id(),
+                harness.repository.id(), 42, BabysitState.WATCHING);
+
+        harness.liveExecution = id -> id.equals(watched.id());
+        assertEquals(new BabysitWriteGuard.Verdict.WatchedBusy(),
+                service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertTrue(git.tipsAsked.isEmpty(), "a busy watched session costs no fetch");
+
+        harness.liveExecution = id -> false;
+        assertEquals(new BabysitWriteGuard.Verdict.Allowed(BABYSIT_BASE),
+                service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals(List.of(BABYSIT_BRANCH), git.tipsAsked);
+
+        String moved = "2222222222222222222222222222222222222222";
+        git.tip = new GitStatusService.RemoteBranchTip(Optional.of(moved), Optional.empty());
+        assertEquals(new BabysitWriteGuard.Verdict.HeadMoved(moved, BABYSIT_BASE),
+                service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+        git.tipFailure = new GitExecutableNotFoundException("PATH");
+        assertTrue(service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS) instanceof BabysitWriteGuard.Verdict.GitFailed);
+
+        BabysitPairing elsewhere = new BabysitPairing(pairing.babysitterId(), watched.id(), RepositoryId.newId(), 42,
+                BabysitState.WATCHING);
+        assertTrue(service.babysitterMayWrite(elsewhere, BABYSIT_BRANCH, BABYSIT_BASE)
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS) instanceof BabysitWriteGuard.Verdict.GitFailed);
         harness.store.flush();
     }
 }

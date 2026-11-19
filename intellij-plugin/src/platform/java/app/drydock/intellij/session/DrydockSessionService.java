@@ -16,6 +16,12 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.babysit.BabysitInstructions;
+import app.drydock.babysit.BabysitPairing;
+import app.drydock.babysit.BabysitStartRefusal;
+import app.drydock.babysit.BabysitState;
+import app.drydock.babysit.BabysitStateTransforms;
+import app.drydock.babysit.BabysitWriteGuard;
 import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
@@ -32,6 +38,11 @@ import app.drydock.domain.SessionStatusFacet;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
+import app.drydock.git.GitCommandFailedException;
+import app.drydock.git.GitException;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.GitStatusService.DetachedWorktree;
+import app.drydock.git.GitStatusService.RemoteBranchTip;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentConsoleHost;
@@ -82,6 +93,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -217,6 +229,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /** The detached-remote liveness map a refused resume records its verdict in. */
     private final RemoteSessionLiveness remoteLiveness;
 
+    /** The git and filesystem half of babysitting: worktree placement, creation, undo, remote tips. */
+    private final BabysitGit babysitGit;
+
     /**
      * Asks the user one Yes/No question about a remote row — the Forget
      * confirm a kill-session could not settle. Production hops to the EDT
@@ -312,6 +327,26 @@ public final class DrydockSessionService implements AgentExecutionListener {
             RemoteSessionLiveness remoteLiveness,
             Function<String, CompletableFuture<Boolean>> remoteConfirm,
             AgentExecutionRegistry.RemoteClientEnds clientEnds) {
+        this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor, stdioMcpServers,
+                mcpAccess, claims, taskLaunchResources, workspaceSessionsEnabled, boxShell, workspacesCli,
+                remoteLiveness, remoteConfirm, clientEnds, BabysitGit.PRODUCTION);
+    }
+
+    /**
+     * As the full seam above, with the babysitting git seam: tests answer the
+     * worktree placement, the detached checkout and the remote-tip fetch
+     * without a network; every other construction site gets the real git.
+     */
+    DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
+            Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
+            Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor,
+            AgentConsoleHost consoles, ExecutorService executor,
+            Function<Path, List<StdioMcpServer>> stdioMcpServers, SessionMcpAccess mcpAccess,
+            LaunchClaims claims, TaskLaunchResources taskLaunchResources,
+            BooleanSupplier workspaceSessionsEnabled, BoxShell boxShell, WorkspacesCli workspacesCli,
+            RemoteSessionLiveness remoteLiveness,
+            Function<String, CompletableFuture<Boolean>> remoteConfirm,
+            AgentExecutionRegistry.RemoteClientEnds clientEnds, BabysitGit babysitGit) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -329,6 +364,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.remoteLiveness = Objects.requireNonNull(remoteLiveness, "remoteLiveness");
         this.remoteConfirm = Objects.requireNonNull(remoteConfirm, "remoteConfirm");
         this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
+        this.babysitGit = Objects.requireNonNull(babysitGit, "babysitGit");
         this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims, boxShell,
                 () -> remoteLiveness, clientEnds);
     }
@@ -792,7 +828,35 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     private static IllegalStateException launchRefused(ManagedSessionId id) {
-        return new IllegalStateException("Session " + id + " already has a running agent or a launch in progress");
+        return new SessionBusyException(id);
+    }
+
+    /**
+     * A launch or resume refused because the session has a running agent or
+     * another launch in flight; nothing was persisted or minted. Its own type
+     * so a caller that retries later (the babysitter wake) can tell "busy"
+     * from a failure.
+     */
+    public static final class SessionBusyException extends IllegalStateException {
+        SessionBusyException(ManagedSessionId id) {
+            super("Session " + id + " already has a running agent or a launch in progress");
+        }
+    }
+
+    /**
+     * A resume with a custom prompt refused because the session has no bound
+     * conversation id (or nothing is recorded under the one it has), so no
+     * provider would carry the prompt: Claude, Codex and Pi render a resume
+     * prompt only next to a pinned id, and without one the resume is the
+     * provider's interactive picker -- which ignores the prompt and, for an
+     * unattended caller, hangs. Starting a fresh conversation instead would
+     * silently drop what the conversation knew. Nothing was persisted or
+     * minted; a later attempt, once the id is bound, can succeed.
+     */
+    public static final class UnboundConversationException extends IllegalStateException {
+        UnboundConversationException(ManagedSessionId id, String why) {
+            super("Session " + id + " cannot be resumed with a prompt: " + why);
+        }
     }
 
     /**
@@ -1254,10 +1318,23 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * session has a running agent or another launch in flight.</p>
      */
     public CompletableFuture<ManagedAgentSession> resumeSession(ManagedSessionId sessionId) {
+        return resumeSession(sessionId, Optional.empty());
+    }
+
+    /**
+     * As {@link #resumeSession(ManagedSessionId)}, carrying {@code prompt} as
+     * the resumed conversation's first message instead of the fixed resume
+     * prompt a task session otherwise gets (a blank prompt is no prompt).
+     * With a prompt present, a session that still has no conversation id
+     * after the late bind completes exceptionally with
+     * {@link UnboundConversationException}, launching nothing.
+     */
+    public CompletableFuture<ManagedAgentSession> resumeSession(ManagedSessionId sessionId, Optional<String> prompt) {
         Objects.requireNonNull(sessionId, "sessionId");
+        Optional<String> override = Objects.requireNonNull(prompt, "prompt").filter(p -> !p.isBlank());
         return initialization
                 .thenApplyAsync(unused -> requireSession(sessionId), executor)
-                .thenComposeAsync(this::resumePrepared, executor);
+                .thenComposeAsync(session -> resumePrepared(session, override), executor);
     }
 
     /**
@@ -1272,7 +1349,21 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * backstop as {@link #resumeSession}.</p>
      */
     public CompletableFuture<ManagedAgentSession> resumeOrStartSession(ManagedSessionId sessionId) {
+        return resumeOrStartSession(sessionId, Optional.empty());
+    }
+
+    /**
+     * As {@link #resumeOrStartSession(ManagedSessionId)}, carrying {@code
+     * prompt} as the resumed conversation's first message. With a prompt
+     * present there is no fresh start: a row with no conversation id, or with
+     * nothing recorded under it, completes exceptionally with
+     * {@link UnboundConversationException} -- a fresh conversation would
+     * neither carry the prompt's context nor keep what the old one knew.
+     */
+    public CompletableFuture<ManagedAgentSession> resumeOrStartSession(ManagedSessionId sessionId,
+                                                                       Optional<String> prompt) {
         Objects.requireNonNull(sessionId, "sessionId");
+        Optional<String> override = Objects.requireNonNull(prompt, "prompt").filter(p -> !p.isBlank());
         return initialization
                 .thenApplyAsync(unused -> {
                     ends.seedClaimedIdsOnce();
@@ -1295,11 +1386,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 }, executor)
                 .thenComposeAsync(session -> {
                     if (session.workspaceBox().isPresent() || remoteFor(session).isPresent()) {
-                        return resumePrepared(session);
+                        return resumePrepared(session, override);
                     }
-                    return session.agentSessionId().isPresent() && !nothingRecordedUnder(session)
-                            ? resumePrepared(session)
-                            : launchFreshOnExistingRow(session);
+                    boolean resumable = session.agentSessionId().isPresent() && !nothingRecordedUnder(session);
+                    if (resumable) {
+                        return resumePrepared(session, override);
+                    }
+                    if (override.isPresent()) {
+                        throw new UnboundConversationException(session.id(), session.agentSessionId().isEmpty()
+                                ? "no conversation id is bound yet"
+                                : "nothing is recorded under its conversation id");
+                    }
+                    return launchFreshOnExistingRow(session);
                 }, executor);
     }
 
@@ -1401,10 +1499,17 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Objects.requireNonNull(displayName, "displayName");
         return initialization
                 .thenApplyAsync(unused -> adoptConversation(repository, kind, conversation, displayName), executor)
-                .thenComposeAsync(this::resumePrepared, executor);
+                .thenComposeAsync(session -> resumePrepared(session, Optional.empty()), executor);
     }
 
-    private CompletableFuture<ManagedAgentSession> resumePrepared(ManagedAgentSession prepared) {
+    /**
+     * @param promptOverride the first message for the resumed conversation in
+     *                       place of the fixed task resume prompt; empty keeps
+     *                       today's choice ({@link #RESUME_PROMPT} for a task
+     *                       session, nothing otherwise)
+     */
+    private CompletableFuture<ManagedAgentSession> resumePrepared(ManagedAgentSession prepared,
+                                                                  Optional<String> promptOverride) {
         // A persisted agent kind the plugin's providers do not know decodes
         // to this status with a placeholder kind; launching it would silently
         // run the wrong agent (the app's checkResumeBlocked guard).
@@ -1415,7 +1520,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // resume below -- the working-directory probe, the late bind, the
         // MCP mint -- never runs for it.
         if (prepared.workspaceBox().isPresent()) {
-            return resumeRemotePrepared(prepared);
+            return resumeRemotePrepared(prepared, promptOverride);
         }
         // The ssh-remote arm's resume: the conversation lives on the remote
         // host, so the same local-only probes are skipped; the provider's
@@ -1433,7 +1538,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         CompletableFuture<ManagedAgentSession> resumed;
         try {
-            resumed = resumeClaimed(prepared);
+            resumed = resumeClaimed(prepared, promptOverride);
         } catch (RuntimeException | Error e) {
             endClaim(prepared.id());
             throw e;
@@ -1443,7 +1548,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return resumed.whenComplete((ignored, ex) -> endClaim(prepared.id()));
     }
 
-    private CompletableFuture<ManagedAgentSession> resumeClaimed(ManagedAgentSession prepared) {
+    private CompletableFuture<ManagedAgentSession> resumeClaimed(ManagedAgentSession prepared,
+                                                                 Optional<String> promptOverride) {
         // Backstop for the binding that normally happens at termination: an
         // IDE killed outright, or a crash, never ran that, and without this
         // the session would resume into the provider's picker forever. Only
@@ -1451,6 +1557,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
         ManagedAgentSession session = prepared.agentSessionId().isPresent()
                 ? prepared
                 : Optional.ofNullable(ends.lateBindAgentSessionId(prepared.id())).orElse(prepared);
+        // A custom prompt only renders next to a pinned id; without one the
+        // resume would be the provider's picker, which drops the prompt.
+        // Refused before anything is persisted or minted.
+        if (promptOverride.isPresent() && session.agentSessionId().isEmpty()) {
+            throw new UnboundConversationException(session.id(), "no conversation id is bound yet");
+        }
         // The working directory is probed on disk (possibly a network
         // volume): this runs on the executor, never the caller's thread.
         if (Files.notExists(session.workingDirectory())) {
@@ -1487,7 +1599,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
                     session.workingDirectory(), Optional.empty(), access, session.evalMode(), session.readOnly(),
                     List.of(),
-                    session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
+                    resumePromptFor(session, promptOverride))
                     .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
             if (resources.isPresent()) {
                 ctx = ctx.withLaunchResources(resources.get());
@@ -1526,7 +1638,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * box or fall through to a local launch -- and everything else mirrors
      * {@link #resumePrepared}'s claim lifetime.
      */
-    private CompletableFuture<ManagedAgentSession> resumeRemotePrepared(ManagedAgentSession prepared) {
+    private CompletableFuture<ManagedAgentSession> resumeRemotePrepared(ManagedAgentSession prepared,
+                                                                        Optional<String> promptOverride) {
         if (!workspaceSessionsEnabled.getAsBoolean()) {
             throw new IllegalStateException(
                     "Workspace sessions are turned off in Settings › Tools › Drydock");
@@ -1536,7 +1649,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
         CompletableFuture<ManagedAgentSession> resumed;
         try {
-            resumed = resumeRemoteClaimed(prepared);
+            resumed = resumeRemoteClaimed(prepared, promptOverride);
         } catch (RuntimeException | Error e) {
             endClaim(prepared.id());
             throw e;
@@ -1640,7 +1753,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * is legal because this IDE owns the live ssh execution (INV-4), and an
      * attach re-runs no create side effect (INV-23).</p>
      */
-    private CompletableFuture<ManagedAgentSession> resumeRemoteClaimed(ManagedAgentSession session) {
+    private CompletableFuture<ManagedAgentSession> resumeRemoteClaimed(ManagedAgentSession session,
+                                                                       Optional<String> promptOverride) {
         // The row was read before this claim was taken (the resume's first
         // executor stage); a Forget that finished in between removed it, and
         // attaching here would resurrect the forgotten row's box session
@@ -1648,6 +1762,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // create path's rowMustExist guard closes.
         if (findIn(stateStore.get().state(), session.id()) == null) {
             throw new IllegalStateException("Session " + session.id() + " was forgotten before it resumed");
+        }
+        // The same rule as the local resume: the prompt rides only a pinned id.
+        if (promptOverride.isPresent() && session.agentSessionId().isEmpty()) {
+            throw new UnboundConversationException(session.id(), "no conversation id is bound yet");
         }
         WorkspaceBoxBinding box = session.workspaceBox().orElseThrow();
         BoxShell.BoxResult probe;
@@ -1669,7 +1787,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
                     session.workingDirectory(), Optional.of(box.sshRemote()), Optional.empty(), false,
                     session.readOnly(), List.of(),
-                    session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty())
+                    resumePromptFor(session, promptOverride))
                     .withPersistence(new RemotePersistence(session.id(), BOX_AGENT_ENV));
             plan = provider.buildResumeCommand(ctx);
         } catch (RuntimeException failure) {
@@ -1850,6 +1968,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * confirm removes nothing and completes normally. The detached liveness
      * entry leaves with the row.</p>
      *
+     * <p>Babysitting ends with the row: every pairing it took part in, as the
+     * watched session or as the babysitter, is removed in the same state
+     * transform, and the agent of a babysitter watching it is stopped
+     * (best-effort; the babysitter's row stays, for the human to remove with
+     * its worktree).</p>
+     *
      * <p>The agent's own conversation history on disk is never touched. The
      * row is drydock's bookkeeping; the transcript is the user's record of
      * what the agent did, and deleting that is not something a session row's
@@ -1877,6 +2001,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
                             return CompletableFuture.completedFuture(null);
                         }
                         consoles.forgetConsole(sessionId);
+                        // A babysitter has nothing left to watch once its
+                        // watched session is forgotten: its agent is stopped
+                        // here and its pairing leaves with the row below.
+                        stopBabysittersOf(sessionId);
                         // The row's eval marking dies with the session; the
                         // mark is keyed on the agent session id the row bound.
                         unmarkEvalAsync(session);
@@ -1886,10 +2014,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         // watcher.forget runs on the watcher's own executor; hop
                         // back here before mutating the state.
                         removed = forgotten.thenRunAsync(() -> {
-                            stateStore.get().update(state ->
+                            // One transform: the row and every babysitting
+                            // pairing it took part in, on either side, leave
+                            // together.
+                            stateStore.get().update(state -> BabysitStateTransforms.onSessionDeleted(
                                     state.withSessions(state.sessions().stream()
                                             .filter(existing -> !existing.id().equals(sessionId))
-                                            .toList()));
+                                            .toList()),
+                                    sessionId));
                             // A remote row's liveness entry must not outlive
                             // its row; remove() publishes only when one was
                             // actually there.
@@ -2466,6 +2598,432 @@ public final class DrydockSessionService implements AgentExecutionListener {
         }
     }
 
+    // ---- babysitting ------------------------------------------------------------
+
+    /** The display name every babysitter row gets; the UI tells babysitters apart by pairing, not by name. */
+    static String babysitterName(int prNumber) {
+        return "babysit PR #" + prNumber;
+    }
+
+    /**
+     * A babysitter start that passed its refusals: {@link #pairing()} is
+     * already persisted (state {@link BabysitState#WATCHING}), and {@link
+     * #started()} completes once the detached worktree exists and the agent
+     * is RUNNING, or exceptionally after the start was rolled back -- the
+     * pairing removed, the babysitter row forgotten if it had been
+     * persisted, and the worktree removed if this start created it.
+     */
+    public record BabysitLaunch(BabysitPairing pairing, CompletableFuture<BabysitStarted> started) {
+        public BabysitLaunch {
+            Objects.requireNonNull(pairing, "pairing");
+            Objects.requireNonNull(started, "started");
+        }
+    }
+
+    /**
+     * A babysitter that is running: its row, and the worktree it runs in.
+     * {@code worktree.baseCommit()} is the PR branch's remote tip the
+     * worktree was checked out at -- the known base the write guard compares
+     * the remote against until the monitor records a newer one.
+     */
+    public record BabysitStarted(ManagedAgentSession babysitter, DetachedWorktree worktree) {
+        public BabysitStarted {
+            Objects.requireNonNull(babysitter, "babysitter");
+            Objects.requireNonNull(worktree, "worktree");
+        }
+    }
+
+    /** A babysitter start refused before anything was persisted, created or launched. */
+    public static final class BabysitStartRefusedException extends IllegalStateException {
+
+        private final BabysitStartRefusal reason;
+
+        BabysitStartRefusedException(BabysitStartRefusal reason) {
+            super(reason.message());
+            this.reason = reason;
+        }
+
+        public BabysitStartRefusal reason() {
+            return reason;
+        }
+    }
+
+    /**
+     * A babysitter start whose engagement was stopped -- by Stop Babysitting
+     * or by deleting the watched session -- after its pairing was reserved
+     * and before its agent launched: the launch is cancelled and rolled back
+     * (the worktree it created removed, the pairing dropped).
+     */
+    public static final class BabysitStartCancelledException extends IllegalStateException {
+        BabysitStartCancelledException(int prNumber) {
+            super("Babysitting PR #" + prNumber + " was stopped before its babysitter launched; nothing was started");
+        }
+    }
+
+    /** What the refusal checks resolved, carried to the reservation. */
+    private record BabysitTarget(ManagedAgentSession watched, Repository repository, Path directory) {
+    }
+
+    /**
+     * Starts a babysitter for {@code watchedId}'s pull request {@code
+     * prNumber}, whose head branch is {@code prBranch} -- both already
+     * resolved by the caller's PR join; this method does not look the PR up.
+     *
+     * <p>On the executor, in order: the cheap refusals against a snapshot
+     * (the PR branch must be a plain ref name, the watched row must exist,
+     * be local, be an agent session (not TERMINAL), not be a babysitter and
+     * not be babysat already, its repository must be known, and the worktree
+     * directory must not exist);
+     * the babysitter row's metadata is minted (nothing persisted); then ONE
+     * store update re-checks the pairing refusals against the state it
+     * transforms and inserts the {@link BabysitPairing} -- so two concurrent
+     * starts cannot both pass. The returned future completes there, with the
+     * pairing and the still-running start, or exceptionally with a {@link
+     * BabysitStartRefusedException} naming the reason.</p>
+     *
+     * <p>The start then creates a detached worktree at the PR branch's
+     * freshly fetched remote tip (a failed fetch falls back to the last-known
+     * remote-tracking ref and is logged), and launches the watched session's
+     * agent kind there in {@link SessionMode#WRITES}, recorded under the
+     * watched session's main checkout with that worktree as its worktree
+     * root (no branch of its own, so {@code branchCreatedHere} stays false).
+     * Its first message points it at {@code instructionsFile}, whose
+     * baseline ({@link BabysitInstructions#baseline}) this start writes when
+     * the file is absent -- only after the reservation passed, never for a
+     * refused start; the monitor keeps it from then on. MCP access is minted like any launch's, with spawning
+     * forbidden.</p>
+     *
+     * <p>The launch is tied to the reservation: a Stop Babysitting or a
+     * deletion of the watched session that ends the pairing during the
+     * worktree add cancels the launch ({@link BabysitStartCancelledException};
+     * the new worktree is removed and the pairing dropped), and one that
+     * lands while the agent launches gets that agent stopped once it is
+     * registered.</p>
+     */
+    public CompletableFuture<BabysitLaunch> startBabysitter(ManagedSessionId watchedId, int prNumber,
+                                                            String prBranch, Path instructionsFile) {
+        Objects.requireNonNull(watchedId, "watchedId");
+        Objects.requireNonNull(prBranch, "prBranch");
+        Objects.requireNonNull(instructionsFile, "instructionsFile");
+        if (prNumber <= 0) {
+            throw new IllegalArgumentException("prNumber must be positive: " + prNumber);
+        }
+        return initialization
+                .thenApplyAsync(unused -> {
+                    ends.seedClaimedIdsOnce();
+                    return babysitTarget(watchedId, prNumber, prBranch);
+                }, executor)
+                .thenComposeAsync(target -> prepareSession(target.directory(), target.repository().root(),
+                                target.watched().agentKind(), babysitterName(prNumber), SessionMode.WRITES)
+                        .thenApplyAsync(prepared -> reserveBabysitter(target,
+                                prepared.withWorktreeRoot(Optional.of(target.directory())), prNumber, prBranch,
+                                instructionsFile), executor), executor);
+    }
+
+    /** The snapshot refusals; blocking (the config read, the directory probe), executor only. */
+    private BabysitTarget babysitTarget(ManagedSessionId watchedId, int prNumber, String prBranch) {
+        if (!GitStatusService.isRefComponent(prBranch)) {
+            throw new BabysitStartRefusedException(BabysitStartRefusal.INVALID_PR_BRANCH);
+        }
+        ApplicationState snapshot = stateStore.get().state();
+        Optional<BabysitStartRefusal> refusal = BabysitStateTransforms.startRefusal(snapshot, watchedId);
+        if (refusal.isPresent()) {
+            throw new BabysitStartRefusedException(refusal.get());
+        }
+        ManagedAgentSession watched = findIn(snapshot, watchedId);
+        Repository repository = snapshot.repositories().stream()
+                .filter(candidate -> candidate.id().equals(watched.repositoryId()))
+                .findFirst()
+                .orElseThrow(() -> new BabysitStartRefusedException(BabysitStartRefusal.REPOSITORY_UNKNOWN));
+        Path directory = babysitGit.directoryFor(repository.displayName(), prNumber).toAbsolutePath().normalize();
+        if (Files.exists(directory)) {
+            throw new BabysitStartRefusedException(BabysitStartRefusal.WORKTREE_EXISTS);
+        }
+        return new BabysitTarget(watched, repository, directory);
+    }
+
+    /** The authoritative refusal check and the pairing insert, as one transform; then the start. */
+    private BabysitLaunch reserveBabysitter(BabysitTarget target, ManagedAgentSession prepared, int prNumber,
+                                            String prBranch, Path instructionsFile) {
+        BabysitPairing pairing = new BabysitPairing(prepared.id(), target.watched().id(),
+                target.watched().repositoryId(), prNumber, BabysitState.WATCHING);
+        AtomicReference<BabysitStartRefusal> refused = new AtomicReference<>();
+        stateStore.get().update(state -> {
+            Optional<BabysitStartRefusal> refusal = BabysitStateTransforms.startRefusal(state, pairing.watchedId());
+            refused.set(refusal.orElse(null));
+            return refusal.isPresent() ? state : BabysitStateTransforms.withPairingAdded(state, pairing);
+        });
+        if (refused.get() != null) {
+            throw new BabysitStartRefusedException(refused.get());
+        }
+        DrydockSessionsListener.publishChanged();
+        // Only now, with every refusal passed: a refused start leaves no
+        // file behind, and the baseline never carries an unchecked branch.
+        // Before the launch, so the first prompt's file is there to read; a
+        // failure is logged and the monitor writes it on first sight.
+        try {
+            BabysitInstructions.writeIfAbsent(instructionsFile, BabysitInstructions.baseline(prNumber, prBranch));
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Could not write the babysitter instructions " + instructionsFile + ": " + e);
+        }
+        String prompt = babysitterPrompt(prNumber, target.watched(), instructionsFile);
+        return new BabysitLaunch(pairing, launchReservedBabysitter(target, prepared, prNumber, prBranch, prompt));
+    }
+
+    private CompletableFuture<BabysitStarted> launchReservedBabysitter(BabysitTarget target,
+                                                                       ManagedAgentSession prepared, int prNumber,
+                                                                       String prBranch, String prompt) {
+        Path root = target.repository().root();
+        AtomicBoolean worktreeCreated = new AtomicBoolean();
+        CompletableFuture<BabysitStarted> started;
+        try {
+            started = CompletableFuture.supplyAsync(() -> {
+                        DetachedWorktree worktree = babysitGit.addDetached(root, target.directory(), prBranch);
+                        worktreeCreated.set(true);
+                        worktree.fetchError().ifPresent(error -> LOG.log(Level.WARNING, () -> "Babysitter for "
+                                + target.watched().id() + " starts at the last-known tip of " + prBranch
+                                + "; the fetch failed: " + error));
+                        return worktree;
+                    }, executor)
+                    .thenComposeAsync(worktree -> {
+                        // The launch belongs to the reservation: a Stop or a deletion
+                        // that won since then (during the worktree add) cancels it.
+                        if (!reservationActive(prepared.id())) {
+                            throw new BabysitStartCancelledException(prNumber);
+                        }
+                        return launchSession(prepared, Optional.of(prompt))
+                                .thenApply(babysitter -> stopIfCancelled(babysitter, worktree));
+                    }, executor);
+        } catch (RejectedExecutionException e) {
+            started = CompletableFuture.failedFuture(e);
+        }
+        CompletableFuture<BabysitStarted> result = new CompletableFuture<>();
+        started.whenComplete((value, failure) -> {
+            if (failure == null) {
+                result.complete(value);
+                return;
+            }
+            Throwable cause = unwrap(failure);
+            LOG.log(Level.WARNING, () -> "Babysitter for " + target.watched().id() + " did not start: " + cause);
+            boolean addInterrupted = addMayHaveLeftDirectory(cause);
+            boolean removeWorktree = worktreeCreated.get() || addInterrupted;
+            rollBackBabysitter(prepared.id(), root, target.directory(), removeWorktree, addInterrupted)
+                    .whenComplete((ignored, rollbackFailure) -> {
+                        if (rollbackFailure != null) {
+                            LOG.log(Level.WARNING, () -> "Rolling back babysitter " + prepared.id()
+                                    + " failed: " + unwrap(rollbackFailure));
+                        }
+                        result.completeExceptionally(cause);
+                    });
+        });
+        return result;
+    }
+
+    /** Whether {@code babysitterId}'s reserved pairing is still there and active. */
+    private boolean reservationActive(ManagedSessionId babysitterId) {
+        return BabysitStateTransforms.activePairingOf(stateStore.get().state(), babysitterId).isPresent();
+    }
+
+    /**
+     * The launch has registered its agent: a Stop or a deletion that ended
+     * the engagement while it launched found no agent to stop, so it is
+     * stopped here, as that Stop would have; the row and the worktree stay,
+     * as after any Stop. Either the Stop's state write precedes this check
+     * (seen here) or it follows the registration (the Stop's own stop finds
+     * the agent).
+     */
+    private BabysitStarted stopIfCancelled(ManagedAgentSession babysitter, DetachedWorktree worktree) {
+        if (!reservationActive(babysitter.id())) {
+            LOG.log(Level.INFO, () -> "Babysitting by " + babysitter.id() + " stopped while it launched;"
+                    + " its agent is stopped");
+            try {
+                consoles.stopConsole(babysitter.id());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Could not stop babysitter " + babysitter.id()
+                        + " whose engagement stopped while it launched: " + e);
+            }
+        }
+        return new BabysitStarted(babysitter, worktree);
+    }
+
+    /** A worktree add killed mid-way may have created the directory (and git's admin entry) already. */
+    private static boolean addMayHaveLeftDirectory(Throwable cause) {
+        return cause instanceof GitCommandFailedException failed
+                && failed.outcome() == GitCommandFailedException.Outcome.UNKNOWN;
+    }
+
+    /**
+     * Undoes a babysitter start that failed after its pairing was persisted:
+     * a persisted row is forgotten through {@link #deleteSession} (which ends
+     * any execution and, by the cascade, the pairing); the pairing is then
+     * dropped directly as well, in case there was no row or the delete was
+     * refused. The worktree is removed only when this start created it and
+     * no row is left pointing at it; after an add that was killed mid-way
+     * ({@code pruneAfter}) git's worktree entries are pruned too, so a stale
+     * entry for a directory that is gone cannot block the next start.
+     */
+    private CompletableFuture<Void> rollBackBabysitter(ManagedSessionId babysitterId, Path root, Path directory,
+                                                       boolean removeWorktree, boolean pruneAfter) {
+        CompletableFuture<Void> forgotten = findIn(stateStore.get().state(), babysitterId) == null
+                ? CompletableFuture.completedFuture(null)
+                : deleteSession(babysitterId);
+        return forgotten
+                .handle((ignored, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, () -> "Could not forget the failed babysitter " + babysitterId
+                                + ": " + unwrap(failure));
+                    }
+                    return null;
+                })
+                .thenRunAsync(() -> {
+                    stateStore.get().update(state -> BabysitStateTransforms.onSessionDeleted(state, babysitterId));
+                    DrydockSessionsListener.publishChanged();
+                    if (removeWorktree && findIn(stateStore.get().state(), babysitterId) == null) {
+                        babysitGit.removeQuietly(root, directory);
+                        if (pruneAfter) {
+                            babysitGit.pruneQuietly(root);
+                        }
+                    }
+                }, executor);
+    }
+
+    /**
+     * The babysitter's first message: a pointer, not the instructions. The
+     * instructions live in a file the caller keeps current, so they can grow
+     * and change without a relaunch and stay out of the command line.
+     */
+    static String babysitterPrompt(int prNumber, ManagedAgentSession watched, Path instructionsFile) {
+        return "You are the Drydock babysitter for pull request #" + prNumber + " of the session \""
+                + oneLineName(watched.displayName()) + "\" (" + watched.id() + "). This worktree is a "
+                + "detached checkout of that pull request's branch. Read your full instructions now from "
+                + instructionsFile.toAbsolutePath().normalize() + "; Drydock keeps that file current. "
+                + "After that, do nothing on your own initiative: act only when a new prompt tells you that "
+                + "something changed, and then only as the instructions allow.";
+    }
+
+    /** A display name fit for a one-paragraph prompt: control characters dropped, whitespace collapsed, capped. */
+    private static String oneLineName(String name) {
+        StringBuilder out = new StringBuilder(Math.min(name.length(), 80));
+        for (int i = 0; i < name.length() && out.length() < 80; i++) {
+            char c = name.charAt(i);
+            if (Character.isISOControl(c) || Character.isWhitespace(c)) {
+                if (!out.isEmpty() && out.charAt(out.length() - 1) != ' ') {
+                    out.append(' ');
+                }
+            } else if (c != '"') {
+                out.append(c);
+            }
+        }
+        return out.toString().strip();
+    }
+
+    /**
+     * Stops the agent of every babysitter watching {@code watchedId},
+     * wherever it is shown; best-effort, a failure is logged. The rows stay:
+     * the human removes a babysitter (and its worktree) the way any session
+     * is removed.
+     */
+    private void stopBabysittersOf(ManagedSessionId watchedId) {
+        for (BabysitPairing pairing : stateStore.get().state().pairings()) {
+            if (!pairing.watchedId().equals(watchedId)) {
+                continue;
+            }
+            try {
+                consoles.stopConsole(pairing.babysitterId());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Could not stop babysitter " + pairing.babysitterId()
+                        + " of the forgotten session " + watchedId + ": " + e);
+            }
+        }
+    }
+
+    /**
+     * The human's Stop Babysitting: ends the active engagement {@code
+     * sessionId} takes part in, on either side -- the watched session or its
+     * babysitter. One store transform re-resolves the active pairing in the
+     * state it transforms and sets it {@link BabysitState#STOPPED} (kept for
+     * history, inactive from then on, as the monitor ends one); then the
+     * change is published and the babysitter's agent is stopped wherever it
+     * is shown, like the delete cascade does. The babysitter's row stays, for
+     * the human to remove through Done. Completes with the pairing as it was
+     * before the stop, or empty when no active engagement involves {@code
+     * sessionId} (already stopped, or never babysat) -- nothing is written
+     * or stopped then.
+     */
+    public CompletableFuture<Optional<BabysitPairing>> stopBabysitting(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return initialization.thenApplyAsync(unused -> {
+            AtomicReference<BabysitPairing> stopped = new AtomicReference<>();
+            stateStore.get().update(state -> {
+                Optional<BabysitPairing> active = activeEngagementOf(state, sessionId);
+                stopped.set(active.orElse(null));
+                return active.map(pairing -> BabysitStateTransforms.withPairingState(state, pairing.babysitterId(),
+                        BabysitState.STOPPED)).orElse(state);
+            });
+            BabysitPairing pairing = stopped.get();
+            if (pairing == null) {
+                return Optional.<BabysitPairing>empty();
+            }
+            DrydockSessionsListener.publishChanged();
+            try {
+                consoles.stopConsole(pairing.babysitterId());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, () -> "Could not stop babysitter " + pairing.babysitterId()
+                        + " after its engagement was stopped: " + e);
+            }
+            return Optional.of(pairing);
+        }, executor);
+    }
+
+    /** Pure: the active (not STOPPED) pairing {@code sessionId} is the babysitter or the watched session of. */
+    static Optional<BabysitPairing> activeEngagementOf(ApplicationState state, ManagedSessionId sessionId) {
+        return state.pairings().stream()
+                .filter(pairing -> pairing.state() != BabysitState.STOPPED && pairing.involves(sessionId))
+                .findFirst();
+    }
+
+    /**
+     * Whether {@code pairing}'s babysitter may write the PR branch {@code
+     * prBranch} now (see {@link BabysitWriteGuard}): the watched session
+     * must have neither a live agent in this IDE nor a launch, resume or
+     * removal in flight -- the in-memory truth, never the persisted status,
+     * which survives a crash as whatever it last was -- and, after a fresh
+     * one-branch fetch in the main checkout, the remote tip must equal
+     * {@code knownBase}, the commit the babysitter's worktree was checked out
+     * at or last synced to. Liveness is checked before the fetch (no network
+     * round trip for a busy watched session) and again after it (the fetch
+     * can take minutes). On the executor; never fails: git problems are a
+     * {@link BabysitWriteGuard.Verdict.GitFailed}.
+     */
+    public CompletableFuture<BabysitWriteGuard.Verdict> babysitterMayWrite(BabysitPairing pairing, String prBranch,
+                                                                           String knownBase) {
+        Objects.requireNonNull(pairing, "pairing");
+        Objects.requireNonNull(prBranch, "prBranch");
+        Objects.requireNonNull(knownBase, "knownBase");
+        return initialization.thenApplyAsync(unused -> {
+            if (claims.isClaimedOrLive(pairing.watchedId())) {
+                return new BabysitWriteGuard.Verdict.WatchedBusy();
+            }
+            Optional<Path> root = stateStore.get().state().repositories().stream()
+                    .filter(repository -> repository.id().equals(pairing.repositoryId()))
+                    .findFirst()
+                    .map(Repository::root);
+            if (root.isEmpty()) {
+                return new BabysitWriteGuard.Verdict.GitFailed("The pull request's repository is no longer known");
+            }
+            RemoteBranchTip tip;
+            try {
+                tip = babysitGit.remoteTip(root.get(), prBranch);
+            } catch (GitException | IllegalArgumentException e) {
+                return new BabysitWriteGuard.Verdict.GitFailed(e.getMessage() == null ? e.toString() : e.getMessage());
+            }
+            if (claims.isClaimedOrLive(pairing.watchedId())) {
+                return new BabysitWriteGuard.Verdict.WatchedBusy();
+            }
+            return BabysitWriteGuard.verdictFor(tip, knownBase);
+        }, executor);
+    }
+
     // ---- persistence helpers (all through the single writer, C4) -------------
 
     private ManagedAgentSession requireSession(ManagedSessionId sessionId) {
@@ -2607,6 +3165,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
             }
         }, ModalityState.any());
         return answer;
+    }
+
+    /**
+     * The prompt a resume carries: the caller's override when present, else
+     * the fixed {@link #RESUME_PROMPT} for a session that started with a task,
+     * else none.
+     */
+    private static Optional<String> resumePromptFor(ManagedAgentSession session, Optional<String> override) {
+        return override.or(() -> session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty());
     }
 
     private static String kindName(AgentKind kind) {
