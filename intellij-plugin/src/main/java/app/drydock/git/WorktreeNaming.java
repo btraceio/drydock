@@ -46,13 +46,34 @@ public final class WorktreeNaming {
      */
     public static Path defaultDirectory(Path home, Optional<Path> worktreesDirectory, String repositoryName,
                                  String branch) {
+        Path base = worktreesDirectory.orElseGet(() -> home.resolve("dev").resolve("wt"));
+        return base.resolve(repositorySlug(repositoryName) + "-" + slug(branch));
+    }
+
+    /**
+     * The directory a babysitter session's detached worktree for pull request
+     * {@code prNumber} lives in: {@code <base>/<repo>--babysit-pr<n>}.
+     *
+     * <p>The double dash is what keeps it apart from every
+     * {@link #defaultDirectory} name, including the watched session's own
+     * worktree: both slugs collapse runs of non-alphanumerics to one dash and
+     * trim them at the ends, so {@code <repo>-<slug>} never contains
+     * {@code --}. A branch literally named {@code babysit-pr12} still gets
+     * {@code <repo>-babysit-pr12}, never this directory. A hand-picked folder
+     * can still be anything, so the creator probes for an existing
+     * directory before {@code git worktree add}.</p>
+     */
+    public static Path babysitterDirectory(Path base, String repositoryName, int prNumber) {
+        if (prNumber <= 0) {
+            throw new IllegalArgumentException("prNumber must be positive: " + prNumber);
+        }
+        return base.resolve(repositorySlug(repositoryName) + "--babysit-pr" + prNumber);
+    }
+
+    private static String repositorySlug(String repositoryName) {
         String repoSlug = repositoryName == null ? "" : repositoryName.strip().toLowerCase(Locale.ROOT)
                 .replaceAll("[^a-z0-9]+", "-")
                 .replaceAll("^-+|-+$", "");
-        if (repoSlug.isEmpty()) {
-            repoSlug = "repo";
-        }
-        Path base = worktreesDirectory.orElseGet(() -> home.resolve("dev").resolve("wt"));
-        return base.resolve(repoSlug + "-" + slug(branch));
+        return repoSlug.isEmpty() ? "repo" : repoSlug;
     }
 }
