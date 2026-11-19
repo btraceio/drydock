@@ -8,6 +8,7 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -145,7 +146,8 @@ public final class CodexAgentProvider implements AgentProvider {
         // the CLI as a local process (evalMode only marks the session, it
         // does not relocate it), so the CLI can see any host path.
         String command = codexCommand(c.mcp(), c.readOnly()) + modelFlag(c.model())
-                + stdioOverrides(c.stdioMcpServers()) + addDirFlags(c.launchResources());
+                + stdioOverrides(c.stdioMcpServers()) + addDirFlags(c.launchResources())
+                + workflowReadRootFlags(c.workflowAccess(), c.launchResources());
         if (c.initialPrompt().isPresent()) {
             command += " -- " + AgentCommands.shellQuote(c.initialPrompt().get());
         }
@@ -176,6 +178,31 @@ public final class CodexAgentProvider implements AgentProvider {
     }
 
     /**
+     * The local workflow read roots as {@code --add-dir} options, rendered
+     * through this separate typed path: they are never part of {@link
+     * LaunchResources}, so task-resource rendering is unchanged. They follow
+     * the {@code launchResources} options in the same global-option slot; a
+     * root already rendered there is not repeated. Eval sessions are local
+     * processes here, so they get the roots too. Empty for no access and for
+     * an access carrying only an eval namespace (no Codex flag mounts it).
+     * Remote builders return before this point.
+     */
+    private static String workflowReadRootFlags(Optional<LocalWorkflowAccess> access,
+            Optional<LaunchResources> resources) {
+        if (access.isEmpty()) {
+            return "";
+        }
+        List<Path> already = resources.map(LaunchResources::extraDirectories).orElse(List.of());
+        StringBuilder flags = new StringBuilder();
+        for (Path root : access.get().readRoots()) {
+            if (!already.contains(root)) {
+                flags.append(" --add-dir ").append(AgentCommands.shellQuote(root.toString()));
+            }
+        }
+        return flags.toString();
+    }
+
+    /**
      * {@code -m <m>} for a picked starting model; empty for the harness's own
      * default. Codex has no model-listing command and its catalog lives in
      * the user's config, so there are no curated aliases: {@code
@@ -194,7 +221,8 @@ public final class CodexAgentProvider implements AgentProvider {
             return LaunchPlan.unsupported();
         }
         String codex = codexCommand(r.mcp(), r.readOnly()) + stdioOverrides(r.stdioMcpServers())
-                + addDirFlags(r.launchResources());
+                + addDirFlags(r.launchResources())
+                + workflowReadRootFlags(r.workflowAccess(), r.launchResources());
         if (r.agentSessionId().isPresent()) {
             // codex resume [SESSION_ID] [PROMPT] — the prompt is a documented
             // positional (verified against `codex resume --help`), rendered

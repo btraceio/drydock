@@ -5,6 +5,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
@@ -602,5 +603,51 @@ class CodexAgentProviderTest {
         assertTrue(resumed.supported());
         assertEquals(CODEX_ENV + "codex --sandbox danger-full-access --add-dir '/wt/prereq'"
                 + " resume '019f9072-abc'", resumed.command());
+    }
+
+    // ---- local workflow access (typed read roots) --------------------------
+
+    private static final LocalWorkflowAccess ACCESS = new LocalWorkflowAccess(
+            List.of(Path.of("/stage/wf one"), Path.of("/wt/prereq")), Optional.of("ns-1"));
+
+    private static CreateContext create() {
+        return new CreateContext("s", "x", Path.of("/repo"), Optional.empty(), Optional.empty());
+    }
+
+    private static ResumeContext resume() {
+        return new ResumeContext(Optional.of("019f9072-abc"), Optional.empty(), Path.of("/repo"),
+                Optional.empty(), Optional.empty());
+    }
+
+    @Test
+    void createAndResumeRenderWorkflowReadRootsAfterTaskDirsWithoutRepeats() {
+        String createBase = CODEX_ENV + "codex --sandbox danger-full-access";
+        assertEquals(createBase + " --add-dir '/wt/prereq' --add-dir '/stage/wf one'",
+                provider().buildCreateCommand(create().withLaunchResources(ONE_DIR)
+                        .withWorkflowAccess(ACCESS)).command());
+        assertEquals(createBase + " --add-dir '/stage/wf one' --add-dir '/wt/prereq'",
+                provider().buildCreateCommand(create().withWorkflowAccess(ACCESS)).command());
+        assertEquals(createBase + " --add-dir '/stage/wf one' --add-dir '/wt/prereq' resume '019f9072-abc'",
+                provider().buildResumeCommand(resume().withWorkflowAccess(ACCESS)).command());
+    }
+
+    @Test
+    void absentOrNamespaceOnlyAccessAndTaskResourcesStayUnchanged() {
+        String bare = provider().buildCreateCommand(create()).command();
+        assertEquals(bare, provider().buildCreateCommand(create().withWorkflowAccess(
+                new LocalWorkflowAccess(List.of(), Optional.of("ns-1")))).command());
+        assertEquals(provider().buildResumeCommand(resume()).command(), provider().buildResumeCommand(
+                resume().withWorkflowAccess(new LocalWorkflowAccess(List.of(), Optional.of("ns-1")))).command());
+        assertEquals(CODEX_ENV + "codex --sandbox danger-full-access" + NASTY_ADD_DIRS,
+                provider().buildCreateCommand(create().withLaunchResources(NASTY_DIRS)).command());
+    }
+
+    @Test
+    void remoteStaysRefusedWithWorkflowAccess() {
+        assertFalse(provider().buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.of(new SshRemote("host", "/r")), Optional.empty()).withWorkflowAccess(ACCESS)).supported());
+        assertFalse(provider().buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.of(new SshRemote("host", "/r")), Optional.empty())
+                .withWorkflowAccess(ACCESS)).supported());
     }
 }

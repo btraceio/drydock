@@ -6,6 +6,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
+import app.drydock.app.AgentRenameMutation;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.app.LoginShellEnvironment;
 import app.drydock.babysit.BabysitDelta;
@@ -15,6 +16,7 @@ import app.drydock.babysit.BabysitState;
 import app.drydock.babysit.BabysitStateFile;
 import app.drydock.babysit.BabysitWatcherProcess;
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.domain.SshRemote;
 import app.drydock.intellij.agent.AgentExecution;
 import app.drydock.intellij.agent.AgentCloseConfirmation;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
@@ -28,12 +30,18 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.projects.SharedProjectsService;
 import app.drydock.intellij.startup.DrydockStartupActivity;
+import app.drydock.intellij.remote.RemoteCredentialGenerations;
+import app.drydock.intellij.remote.RemoteForwardOwner;
+import app.drydock.intellij.remote.RemoteReviewService;
+import app.drydock.intellij.review.RemoteMcpComposition.RemoteRenamer;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.intellij.workspace.WorkspaceRevalidation;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.mcp.McpSessionContext;
+import app.drydock.mcp.McpSessionContext.RenameKind;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.BabysitToolContext;
+import app.drydock.mcp.RemoteAuthorizationPermit;
 import app.drydock.mcp.TaskTools;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.SessionMcpAccess;
@@ -42,6 +50,12 @@ import app.drydock.intellij.session.PluginBabysitToolContext;
 import app.drydock.intellij.tasks.BabysitEscalations;
 import app.drydock.intellij.tasks.SessionPullRequestLookup;
 import app.drydock.projects.SharedProject;
+import app.drydock.review.RemoteReviewDataSource;
+import app.drydock.review.RemoteSnapshotCache;
+import app.drydock.sdlc.LocalWorkflowMaterializer;
+import app.drydock.sdlc.ResourceManifestJournal;
+import app.drydock.sdlc.SessionWorkflowResourceOwner;
+import app.drydock.sdlc.WorkflowStagingLayout;
 import app.drydock.projects.SharedProjectsFile;
 import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.state.JsonApplicationStateRepository;
@@ -57,14 +71,21 @@ import com.intellij.openapi.util.Disposer;
 import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -234,6 +255,14 @@ public final class DrydockPluginService implements Disposable {
                 () -> catalogState().sessions(), () -> catalogState().repositories(),
                 () -> sharedProjects.projects());
         Disposer.register(this, taskService::close);
+        // The ONE retained-workflow-resource owner (INV-32): constructed here (no I/O: the journal is only
+        // opened), recovered in initialize() off the EDT once the state store has loaded, flushed in dispose().
+        // Its journal is plugin-owned and never touches ApplicationState (INV-37).
+        Path sdlc = baseDir.resolve("sdlc");
+        this.workflowJournalFile = sdlc.resolve("manifest.rmj");
+        this.workflowJournal = ResourceManifestJournal.open(workflowJournalFile);
+        this.workflowResources = new SessionWorkflowResourceOwner(workflowJournal,
+                executor, new LocalCleaner(sdlc.resolve("staging")));
         this.initialization = CompletableFuture.runAsync(this::initialize, executor);
         if (backends == PRODUCTION_BACKEND) {
             // Once initialized, one escalation scan: an unresolved escalation
@@ -241,6 +270,30 @@ public final class DrydockPluginService implements Disposable {
             // no further change event ever comes; the init's own events were
             // dropped because initialization had not completed yet.
             this.initialization.thenRunAsync(() -> BabysitEscalations.scan(this), executor);
+        }
+    }
+
+    /**
+     * Cleanup for recovered (no in-memory lease) local resources: the staged namespace under the session
+     * directory. Remote cleanup has no connection in this service, so it fails and the owner keeps the debt
+     * recorded for {@code retryDebts()} on a later authorized connection; it is never treated as deleted.
+     */
+    private record LocalCleaner(Path stagingRoot) implements SessionWorkflowResourceOwner.Cleaner {
+        @Override
+        public CompletableFuture<Void> deleteLocal(ResourceManifestJournal.Lease lease) {
+            try {
+                WorkflowStagingLayout.remove(stagingRoot
+                        .resolve(URLEncoder.encode(lease.session(), StandardCharsets.UTF_8))
+                        .resolve(lease.bundleId()));
+                return CompletableFuture.completedFuture(null);
+            } catch (IOException | RuntimeException e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+
+        @Override
+        public CompletableFuture<Void> deleteRemote(ResourceManifestJournal.Debt target) {
+            return CompletableFuture.failedFuture(new IOException("no authorized connection for remote cleanup"));
         }
     }
 
@@ -253,6 +306,13 @@ public final class DrydockPluginService implements Disposable {
     private final DelayedTaskService taskService;
     private final AtomicBoolean disposed = new AtomicBoolean();
     private final CompletableFuture<Void> initialization;
+    private final Path workflowJournalFile;
+    private final ResourceManifestJournal workflowJournal;
+    private final SessionWorkflowResourceOwner workflowResources;
+    /** Completes when startup recovery's cleanup of abandoned pending resources has finished. */
+    private volatile CompletableFuture<Void> workflowRecovery = CompletableFuture.completedFuture(null);
+    /** The thread startup recovery ran on; read by tests to prove it is off the EDT. */
+    private volatile Thread recoveryThread;
 
     /** The detached-remote liveness map (workspace boxes); memory-only, never persisted, resource-free. */
     private final RemoteSessionLiveness remoteLiveness = new RemoteSessionLiveness();
@@ -267,6 +327,10 @@ public final class DrydockPluginService implements Disposable {
     private volatile ReviewBackend reviewBackend;
     /** The babysitting monitor; production only, null until initialization reaches it. */
     private volatile BabysitMonitorService babysitMonitor;
+    /** The application-scoped remote transport owner; built once the review backend exists (T61). */
+    private volatile RemoteReviewService remoteReview;
+    private volatile RemoteReviewDataSource remoteDataSource;
+    private volatile RemoteSnapshotCache remoteCache;
     /** The thread initialization ran on; read by tests to prove init is off the EDT. */
     private volatile Thread initializationThread;
 
@@ -365,6 +429,44 @@ public final class DrydockPluginService implements Disposable {
     }
 
     /**
+     * The detached remote {@code session_rename} write: application-owned, so it
+     * needs no running execution, project session service or console. Applies
+     * {@link AgentRenameMutation} to the authoritative {@link #stateStore()}.
+     * The authenticated {@code permit} (which must name {@code id}) travels
+     * explicitly into the queued closure; the executing callback rechecks it
+     * and holds its fence around the WHOLE synchronous state update (permit
+     * fence, then state lock). Listener publication runs after the guard and
+     * only for a real rename; a revoked, foreign, stale or absent permit fails
+     * closed with {@link RemoteAuthorizationPermit.StaleAuthorizationException}.
+     */
+    public CompletableFuture<RenameOutcome> renameRemoteFromAgent(ManagedSessionId id, String validatedTitle,
+                                                                  RemoteAuthorizationPermit permit) {
+        return renameRemoteFromAgent(id, validatedTitle, permit, initialization,
+                DrydockSessionsListener::publishChanged);
+    }
+
+    /** Test seam: {@code ready} gates the executing callback (production passes the initialization). */
+    CompletableFuture<RenameOutcome> renameRemoteFromAgent(ManagedSessionId id, String validatedTitle,
+                                                           RemoteAuthorizationPermit permit,
+                                                           CompletableFuture<?> ready, Runnable publisher) {
+        if (id == null || validatedTitle == null || permit == null || !id.equals(permit.sessionId())) {
+            return CompletableFuture.failedFuture(new RemoteAuthorizationPermit.StaleAuthorizationException());
+        }
+        return ready.thenApplyAsync(unused -> {
+            if (!permit.isCurrent()) {
+                throw new RemoteAuthorizationPermit.StaleAuthorizationException();
+            }
+            RenameOutcome outcome = permit.commitIfCurrent(
+                    () -> AgentRenameMutation.apply(stateStore(), id, validatedTitle));
+            // Outside the fence and the state lock.
+            if (outcome.kind() == RenameKind.RENAMED) {
+                publisher.run();
+            }
+            return outcome;
+        }, executor);
+    }
+
+    /**
      * Sets {@link #TREE_SITTER_LIB_PROPERTY} to {@code directory} unless it is
      * already set. Without it the binding extracts to {@code ~/.tree-sitter},
      * which the standalone app uses too, and it rewrites a library file in
@@ -406,6 +508,35 @@ public final class DrydockPluginService implements Disposable {
         return requireInitialized(stateStore, "state store");
     }
 
+    /**
+     * The one retained workflow-resource owner. Usable at once, but callers must await
+     * {@link #initialization()} before accepting leases: startup recovery adopts the persisted journal then.
+     */
+    public SessionWorkflowResourceOwner workflowResources() {
+        return workflowResources;
+    }
+
+    /**
+     * T18's coordinator-granted construction path (Recovery-T18): the ONE journal writer stays here
+     * (INV-32/37 — callers never open {@code manifest.rmj} themselves). The wiring's namespace key stands
+     * in for the post-launch session until the owner re-key follow-up lands; the generation supplier comes
+     * from the launch wiring, and the eval mount is this staging namespace itself (eval containers mount
+     * host paths at their absolute location).
+     */
+    public LocalWorkflowMaterializer localWorkflowMaterializer(String namespaceKey, LongSupplier generation) {
+        return new LocalWorkflowMaterializer(baseDir.resolve("sdlc").resolve("staging"), namespaceKey,
+                workflowJournal, baseDir.resolve("sdlc").resolve("staging").resolve(namespaceKey),
+                generation, executor);
+    }
+
+    CompletableFuture<Void> workflowRecovery() {
+        return workflowRecovery;
+    }
+
+    Thread recoveryThread() {
+        return recoveryThread;
+    }
+
     /** The discovered agent registry. Callers must await {@link #initialization()} first. */
     public AgentRegistry registry() {
         return requireInitialized(registry, "agent registry");
@@ -434,6 +565,25 @@ public final class DrydockPluginService implements Disposable {
      */
     public Optional<ReviewBackend> reviewBackend() {
         return Optional.ofNullable(reviewBackend);
+    }
+
+    /**
+     * The application-scoped remote review transport owner (INV-41): empty until initialization has built
+     * the review backend it composes over, and when that backend is unavailable. Never owned by a project or
+     * console; closed (forwards, credentials, readers) by {@link #dispose()}, never killing tmux.
+     */
+    public Optional<RemoteReviewService> remoteReview() {
+        return Optional.ofNullable(remoteReview);
+    }
+
+    /** For tests: the production data source the remote service was composed with. */
+    RemoteReviewDataSource remoteDataSource() {
+        return remoteDataSource;
+    }
+
+    /** For tests: the one snapshot cache shared by the data source and the remote service. */
+    RemoteSnapshotCache remoteCache() {
+        return remoteCache;
     }
 
     /**
@@ -603,6 +753,7 @@ public final class DrydockPluginService implements Disposable {
             // first tick is seconds away and reads the result.
             reattachBabysitting();
         }
+        recoverWorkflowResources();
         registry = AgentRegistry.create(
                 new AgentContext(baseDir, baseDir.resolve("activity"), executor),
                 DrydockPluginService.class.getClassLoader());
@@ -620,6 +771,9 @@ public final class DrydockPluginService implements Disposable {
                             sharedProjects::projects) : null);
             backend.start();
             publishOrClose(backend);
+            if (reviewBackend == backend) {
+                startRemoteReview(backend);
+            }
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Drydock review backend unavailable; sessions launch without Drydock tools", e);
         }
@@ -695,6 +849,51 @@ public final class DrydockPluginService implements Disposable {
                         .execute(this::reattachBabysitting);
             } catch (RejectedExecutionException e) {
                 LOG.log(Level.DEBUG, "The executor is shut down; no re-attach retry");
+            }
+        }
+    }
+
+    /**
+     * Builds the production remote transport owner over {@code backend}'s shared stores. The data source is
+     * a placeholder identity (unbound sentinel remote, checkout "unbound", generation 0): per-session
+     * rebinding and the real helper deployment are follow-ups. The forward owner's port and readiness probes
+     * are FAIL-CLOSED (their production implementations are follow-ups), so {@code ensure} refuses with a
+     * ForwardException and never presumes a transport ready. A failure is isolated: initialization goes on
+     * without remote review.
+     */
+    private void startRemoteReview(ReviewBackend backend) {
+        RemoteReviewService service = null;
+        try {
+            RemoteSnapshotCache cache = new RemoteSnapshotCache();
+            RemoteReviewDataSource data = new RemoteReviewDataSource(new SshRemote("unbound.invalid", "/"),
+                    CommandRunner.PRODUCTION, backend.scopeRegistry(), cache,
+                    new RemoteReviewDataSource.Helpers("drydock/remote/review_git.py",
+                            "drydock/remote/review_data.py"), "unbound", 0, executor);
+            RemoteForwardOwner forwards = new RemoteForwardOwner(RemoteForwardOwner.sshStarter(),
+                    (host, exclude) -> { throw new IOException("remote port probe not wired"); },
+                    (id, host, port) -> false, System::nanoTime, d -> Thread.sleep(d));
+            Path credentials = baseDir.resolve("remote-credentials");
+            Files.createDirectories(credentials, PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwx------")));
+            RemoteCredentialGenerations generations =
+                    new RemoteCredentialGenerations(CommandRunner.PRODUCTION, credentials, Clock.systemUTC());
+            RemoteRenamer renamer = this::renameRemoteFromAgent;
+            service = new RemoteReviewService(backend, new RemoteReviewService.Wiring(
+                    () -> stateStore.state().sessions(), () -> stateStore.state().repositories(), registry, renamer),
+                    data, cache, forwards, generations);
+            service.start();
+            remoteDataSource = data;
+            remoteCache = cache;
+            remoteReview = service;
+            if (disposed.get()) {
+                // dispose() read remoteReview before this write: close it here instead.
+                remoteReview = null;
+                closeRemote(service);
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.WARNING, "Drydock remote review unavailable; remote sessions launch without review tools", e);
+            if (service != null) {
+                closeRemote(service);
             }
         }
     }
@@ -782,6 +981,40 @@ public final class DrydockPluginService implements Disposable {
         }
     }
 
+    private static void closeRemote(RemoteReviewService service) {
+        isolated("flush the remote review stores", service::flush);
+        isolated("close the remote review transports", service::close);
+    }
+
+    /**
+     * Startup recovery of retained workflow resources, after the state store has loaded: adopts the journal,
+     * and cleans only provably abandoned pending resources in the background. A failure is isolated: it never
+     * fails initialization (the journal keeps its entries; nothing is deleted on a corrupt journal).
+     */
+    private void recoverWorkflowResources() {
+        recoveryThread = Thread.currentThread();
+        try {
+            ResourceManifestJournal.Recovery recovery = ResourceManifestJournal.recover(workflowJournalFile);
+            if (recovery.corrupt()) {
+                LOG.log(Level.WARNING, "Drydock workflow resource journal is unreadable; retained resources are not adopted");
+            }
+            workflowRecovery = workflowResources.recover(recovery).exceptionally(e -> {
+                LOG.log(Level.WARNING, "Drydock could not clean abandoned workflow resources", e);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Drydock workflow resource recovery failed", e);
+        }
+    }
+
+    private static void isolated(String what, Runnable close) {
+        try {
+            close.run();
+        } catch (RuntimeException | Error e) {
+            LOG.log(Level.WARNING, "Could not " + what, e);
+        }
+    }
+
     private void installActivityReporters() {
         for (Agent agent : registry.agents()) {
             if (!agent.isAvailable()) {
@@ -856,26 +1089,37 @@ public final class DrydockPluginService implements Disposable {
         if (theMonitor != null) {
             // Before the watcher close: a tick in flight would otherwise poll
             // a watcher that is going away.
-            theMonitor.dispose();
+            isolated("dispose the activity monitor", theMonitor::dispose);
         }
         SessionActivityWatcher theWatcher = watcher;
         if (theWatcher != null) {
             // The watcher shares this service's executor; close() only skips
             // an executor it owns, so this shuts nothing down here.
-            theWatcher.close();
+            isolated("close the activity watcher", theWatcher::close);
         }
-        sharedProjects.stop();
+        isolated("stop the shared projects list", sharedProjects::stop);
+        // Before the backend: the remote endpoint writes through the backend's shared stores. Tmux is never
+        // killed here; only this IDE's forwards, credentials and readers are settled.
+        RemoteReviewService theRemote = remoteReview;
+        if (theRemote != null) {
+            closeRemote(theRemote);
+        }
         ReviewBackend theBackend = reviewBackend;
         if (theBackend != null) {
-            try {
-                theBackend.close();
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "Could not close the Drydock review backend", e);
-            }
+            isolated("close the Drydock review backend", theBackend::close);
         }
+        // Every step is isolated: one failing close cannot skip the journal flush, the state flush or the
+        // executor shutdown after it.
+        isolated("flush the workflow resource journal", () -> {
+            try {
+                workflowResources.flush();
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
         ApplicationStateStore theStore = stateStore;
         if (theStore != null) {
-            theStore.flush();
+            isolated("flush the Drydock state", theStore::flush);
         }
         executor.shutdown();
     }

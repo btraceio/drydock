@@ -4,6 +4,7 @@ import app.drydock.intellij.review.workbench.model.FlowModel;
 import app.drydock.intellij.review.workbench.model.InboxModel;
 import app.drydock.intellij.review.workbench.model.WorkbenchState;
 import app.drydock.intellij.tasks.WorktreeReview;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.tour.ReviewTour;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI;
@@ -438,12 +439,13 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
         return new Host() {
             @Override
             public boolean canStartReview(Project project) {
-                return ReviewTabProvider.liveScope(project).isPresent() && project.getBasePath() != null;
+                return ReviewTabOpener.remoteContext(project).isEmpty()
+                        && ReviewTabProvider.liveScope(project).isPresent() && project.getBasePath() != null;
             }
 
             @Override
             public boolean sphinxReviewAvailable(Project project) {
-                return ReviewTabProvider.liveScope(project)
+                return ReviewTabOpener.remoteContext(project).isEmpty() && ReviewTabProvider.liveScope(project)
                         .map(scope -> WorktreeReview.sphinxAvailable(scope.repoRoot()))
                         .orElse(false);
             }
@@ -451,8 +453,10 @@ final class ReviewWorkbenchEditor extends UserDataHolderBase implements FileEdit
             @Override
             public void startReview(Project project, ReviewTabOpener.ReviewStart start) {
                 String base = project.getBasePath();
-                ReviewTabProvider.liveScope(project).filter(scope -> base != null).ifPresent(scope ->
-                        ReviewTabOpener.startReview(project, Path.of(base), scope, start));
+                ReviewTabProvider.liveScope(project).filter(scope -> base != null
+                                && ReviewTabOpener.remoteContext(project).isEmpty()).ifPresent(scope ->
+                        ReviewTabOpener.startReview(project, Path.of(base), scope, start,
+                                ReviewIntent.Origin.WORKBENCH));
             }
 
             @Override

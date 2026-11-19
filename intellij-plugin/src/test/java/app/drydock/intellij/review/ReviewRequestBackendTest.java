@@ -109,4 +109,16 @@ class ReviewRequestBackendTest {
         assertInstanceOf(Failed.class, request(Optional.of(backend)).request(session(id)));
         assertTrue(prompts.isEmpty());
     }
+
+    @Test
+    void anExistingSessionSendNeverDegradesToABareSessionWhateverTheIntegrationState() {
+        // The fresh-local-default compatibility exception lives in the launch prompt only: an existing-session
+        // request with no backend, a stopped backend or no tools is refused with zero sends.
+        ManagedSessionId id = ManagedSessionId.newId();
+        assertInstanceOf(NotReady.class, request(Optional.empty()).request(session(id)));
+        assertInstanceOf(NotReady.class, request(Optional.of(backend)).request(session(id)));
+        backend.start();
+        assertInstanceOf(NoTools.class, request(Optional.of(backend)).request(session(id)));
+        assertTrue(prompts.isEmpty());
+    }
 }

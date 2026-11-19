@@ -24,6 +24,7 @@ import app.drydock.git.WorktreeNotCleanException;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.review.AnnotationStore;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.RecheckAssessment;
 import app.drydock.git.DiffScope;
@@ -36,6 +37,7 @@ import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
 import app.drydock.review.tour.TourStore;
 
@@ -158,6 +160,10 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     private final WorktreeService worktreeService;
     private final Supplier<UserConfig> userConfig;
     private final BiFunction<Path, Optional<String>, CompletableFuture<ManagedSessionId>> sessionStarter;
+    private final ReviewInvocationBindings invocationBindings = new ReviewInvocationBindings();
+    private final Runnable unsubscribeScopes;
+    /** Non-null for the remote-serving context: data reads and write commits never touch host Path/Git. */
+    private volatile RemoteReviewContextDelegates remote;
     private final BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer;
     private final BiFunction<ManagedSessionId, String, CompletableFuture<Void>> sessionReclaimer;
     private final BiFunction<ManagedSessionId, HandoffDraft, CompletableFuture<HandoffBrief>> handoffWriter;
@@ -211,6 +217,56 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         this.sessionReclaimer = Objects.requireNonNull(sessionReclaimer, "sessionReclaimer");
         this.handoffWriter = Objects.requireNonNull(handoffWriter, "handoffWriter");
         this.workflowHandoffWriter = Objects.requireNonNull(workflowHandoffWriter, "workflowHandoffWriter");
+        this.unsubscribeScopes = reviewScopeRegistry.addChangeListener(this::scopeChanged);
+    }
+
+    /** Installs the remote delegates once at composition; every remote-sensitive method then uses only them. */
+    public WorkspaceMcpSessionContext remoteDelegates(RemoteReviewContextDelegates delegates) {
+        this.remote = Objects.requireNonNull(delegates, "delegates");
+        return this;
+    }
+
+    /** One store write: inside the request's permit guard when remote, directly otherwise; flushes stay outside. */
+    private <T> T guarded(Supplier<T> write) {
+        RemoteReviewContextDelegates delegates = remote;
+        return delegates == null ? write.get() : delegates.commit(write);
+    }
+
+    // ---- invocation-mode binding ---------------------------------------------
+
+    /** The presentation binding the workbench installs at commit; never an authorization. */
+    public ReviewInvocationBindings invocationBindings() {
+        return invocationBindings;
+    }
+
+    private void scopeChanged(String scopeId) {
+        Optional<ReviewScope> scope = reviewScopeRegistry.byId(scopeId);
+        if (scope.isEmpty()) {
+            invocationBindings.removeScope(scopeId);
+        } else {
+            invocationBindings.removeUnlessOwnedBy(scopeId, scope.get().sessionId());
+        }
+    }
+
+    /** A session was removed: its bindings go. */
+    public void forgetSession(ManagedSessionId sessionId) {
+        invocationBindings.removeSession(sessionId);
+    }
+
+    /** Backend close: stops listening to scope changes and drops every binding. */
+    public void close() {
+        unsubscribeScopes.run();
+        invocationBindings.clear();
+    }
+
+    @Override
+    public ReviewIntegration reviewIntegration(ReviewScope scope, ManagedSessionId caller) {
+        ReviewTour.Kind kind = invocationBindings.bindingOf(caller, scope.id()).map(ReviewInvocationBindings.Binding::kind)
+                .or(() -> tourOf(scope.id()).map(record -> record.tour().kind()))
+                .orElse(ReviewTour.Kind.TOUR);
+        boolean sections = kind == ReviewTour.Kind.SECTIONS;
+        return new ReviewIntegration(sections ? "sections" : "tour",
+                ReviewInstructions.forIntegration(scope.id(), sections));
     }
 
     // ---- caller lookup ------------------------------------------------------
@@ -239,6 +295,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     @Override
     public boolean sessionRunning(ManagedSessionId caller) {
+        if (remote != null) {
+            return remote.sessionRunning(caller);
+        }
         return sessionOf(caller).map(session -> session.status() == SessionStatus.RUNNING).orElse(false);
     }
 
@@ -254,6 +313,10 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     @Override
     public Optional<String> baseBranch(ManagedSessionId caller) {
+        if (remote != null) {
+            return remote.baseBranch(reviewScopeRegistry.scopes().stream()
+                    .filter(scope -> reviewScopeRegistry.isAddressableBy(scope.id(), caller)).findFirst());
+        }
         Optional<Repository> repository = repositoryOf(caller).filter(repo -> !repo.isRemote());
         if (repository.isEmpty()) {
             return Optional.empty();
@@ -323,6 +386,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
         // the PR's base -- a real diff of entirely the wrong thing, which is
         // the most misleading answer available. An agent asking over MCP must
         // get the refusal, not the fabrication.
+        if (remote != null) {
+            return remote.diff(scope);
+        }
         if (!scope.diffable()) {
             throw new McpToolException("Pull request #"
                     + scope.pr().map(pr -> String.valueOf(pr.number())).orElse("?")
@@ -352,20 +418,26 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     @Override
     public void putTour(TourRecord record) {
-        tourStore.put(record);
+        guarded(() -> {
+            tourStore.put(record);
+            return null;
+        });
         tourStore.flushPendingSaves();
     }
 
     @Override
     public Optional<TourRecord> updateTour(String scopeId, UnaryOperator<TourRecord> transform) {
-        Optional<TourRecord> updated = tourStore.mutate(scopeId, transform);
+        Optional<TourRecord> updated = guarded(() -> tourStore.mutate(scopeId, transform));
         tourStore.flushPendingSaves();
         return updated;
     }
 
     @Override
     public void upsertFindings(List<ReviewAnnotation> findings) {
-        findings.forEach(annotationStore::upsert);
+        guarded(() -> {
+            findings.forEach(annotationStore::upsert);
+            return null;
+        });
         annotationStore.flushPendingSaves();
     }
 
@@ -387,6 +459,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     @Override
     public Optional<String> currentReviewBase(ReviewScope scope) {
+        if (remote != null) {
+            return remote.baseCommit(scope);
+        }
         try {
             return gitStatusService.commitForRefBlocking(scope.diffRoot(), scope.base());
         } catch (GitException e) {
@@ -398,7 +473,10 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     @Override
     public void putAssessments(List<RecheckAssessment> assessments) {
-        assessments.forEach(annotationStore::putAssessment);
+        guarded(() -> {
+            assessments.forEach(annotationStore::putAssessment);
+            return null;
+        });
         annotationStore.flushPendingSaves();
     }
 
@@ -421,7 +499,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     @Override
     public Optional<ReviewAnnotation> mutateAnnotation(ReviewAnnotation.Key key,
                                                        UnaryOperator<ReviewAnnotation> transform) {
-        Optional<ReviewAnnotation> updated = annotationStore.mutate(key, transform);
+        Optional<ReviewAnnotation> updated = guarded(() -> annotationStore.mutate(key, transform));
         // The human's Review card refreshes off the store's change listener;
         // the flush is so the note survives a crash before the next autosave.
         updated.ifPresent(annotation -> annotationStore.flushPendingSaves());
@@ -437,6 +515,9 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      */
     @Override
     public Optional<String> excerpt(ManagedSessionId caller, String file, int line, int context) {
+        if (remote != null) {
+            return remote.excerpt(caller, file, line, context);
+        }
         Optional<Path> worktree = worktreePath(caller);
         if (worktree.isEmpty() || file == null || file.isBlank()) {
             return Optional.empty();

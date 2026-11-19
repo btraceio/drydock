@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -184,6 +185,41 @@ class ClaudeEvalContainerTest {
         // The shared data volume backs XDG_DATA_HOME, so plugin installs persist.
         assertTrue(cmd.contains(" -v drydock-claude-eval-data:/var/lib/drydock-eval-data "
                 + "-e XDG_DATA_HOME=/var/lib/drydock-eval-data "), () -> "shared data volume: " + cmd);
+    }
+
+    @Test
+    void wrapMountsOnlyTheWorkflowNamespaceReadOnlyAndCreatesItEmpty() throws Exception {
+        ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
+        ClaudeEvalContainer.EvalSetup setup = c.mark("sess").orElseThrow();
+        Path worktree = Files.createDirectories(tmp.resolve("wt"));
+        Path hooksDir = Files.createDirectories(tmp.resolve("hooks"));
+        Path activityDir = Files.createDirectories(tmp.resolve("activity"));
+        String without = c.wrap(setup, "claude", worktree, Optional.empty(), hooksDir, activityDir);
+
+        String cmd = c.wrap(setup, "claude", worktree, Optional.empty(), hooksDir, activityDir,
+                Optional.of("ns-1"));
+
+        Path ns = tmp.resolve("workflow-namespaces").resolve("ns-1");
+        assertTrue(Files.isDirectory(ns), "namespace established empty at launch");
+        try (var entries = Files.list(ns)) {
+            assertEquals(0, entries.count());
+        }
+        String mount = " -v '" + ns + "':'" + ns + "':ro";
+        assertEquals(1, cmd.split(java.util.regex.Pattern.quote(mount), -1).length - 1, () -> cmd);
+        // The only difference from the plain wrap is that single mount.
+        assertEquals(without, cmd.replace(mount, ""));
+        assertFalse(without.contains("workflow-namespaces"));
+    }
+
+    @Test
+    void wrapRefusesNamespaceReferencesThatAreNotPlainNames() throws Exception {
+        ClaudeEvalContainer c = new ClaudeEvalContainer(tmp, fixedToken("tok", Instant.now().plusSeconds(60)));
+        ClaudeEvalContainer.EvalSetup setup = c.mark("sess").orElseThrow();
+        Path worktree = Files.createDirectories(tmp.resolve("wt"));
+        for (String bad : List.of("..", ".", "a/b", "/etc", "../x", "a b")) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> c.wrap(
+                    setup, "claude", worktree, Optional.empty(), tmp, tmp, Optional.of(bad)), bad);
+        }
     }
 
     @Test

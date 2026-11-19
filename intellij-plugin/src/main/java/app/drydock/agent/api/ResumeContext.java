@@ -48,12 +48,21 @@ import java.util.Optional;
  * session rather than a plain SSH launch. It is present only together
  * with {@code remote}; the constructor rejects persistence without a
  * remote. Empty means exactly the resumes of today.</p>
+ *
+ * <p>{@code workflowAccess} is as documented on {@link
+ * CreateContext#workflowAccess()}; like {@code launchResources} it is not
+ * inherited by a later resume — each resume carries what it is given.</p>
+ *
+ * <p>{@code remoteLaunchSupport} is as documented on {@link
+ * CreateContext#remoteLaunchSupport()}; it is likewise not inherited.</p>
  */
 public record ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
                             Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
                             boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
                             Optional<String> resumePrompt, Optional<LaunchResources> launchResources,
-                            Optional<RemotePersistence> persistence) {
+                            Optional<RemotePersistence> persistence,
+                            Optional<LocalWorkflowAccess> workflowAccess,
+                            Optional<RemoteLaunchSupport> remoteLaunchSupport) {
     public ResumeContext {
         Objects.requireNonNull(agentSessionId, "agentSessionId");
         Objects.requireNonNull(agentSessionName, "agentSessionName");
@@ -64,14 +73,47 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
         Objects.requireNonNull(resumePrompt, "resumePrompt");
         Objects.requireNonNull(launchResources, "launchResources");
         Objects.requireNonNull(persistence, "persistence");
+        Objects.requireNonNull(workflowAccess, "workflowAccess");
+        Objects.requireNonNull(remoteLaunchSupport, "remoteLaunchSupport");
         // A persistent session lives on a remote box; persistence without
         // a remote is a wiring mistake, never a launch mode.
         if (persistence.isPresent() && remote.isEmpty()) {
             throw new IllegalArgumentException("persistence requires a remote");
         }
+        if (remoteLaunchSupport.isPresent() && remote.isEmpty()) {
+            throw new IllegalArgumentException("remote launch support requires a remote");
+        }
         // A blank prompt is no prompt: rendering it would submit an empty
         // first message to the resumed conversation.
         resumePrompt = resumePrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no remote launch support. */
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
+                         Optional<String> resumePrompt, Optional<LaunchResources> launchResources,
+                         Optional<RemotePersistence> persistence,
+                         Optional<LocalWorkflowAccess> workflowAccess) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, readOnly,
+                stdioMcpServers, resumePrompt, launchResources, persistence, workflowAccess, Optional.empty());
+    }
+
+    /** As the canonical constructor with no workflow access. */
+    public ResumeContext(Optional<String> agentSessionId, Optional<String> agentSessionName,
+                         Path workingDirectory, Optional<SshRemote> remote, Optional<McpAccess> mcp,
+                         boolean evalMode, boolean readOnly, List<StdioMcpServer> stdioMcpServers,
+                         Optional<String> resumePrompt, Optional<LaunchResources> launchResources,
+                         Optional<RemotePersistence> persistence) {
+        this(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode, readOnly,
+                stdioMcpServers, resumePrompt, launchResources, persistence, Optional.empty());
+    }
+
+    /** This context, with {@code access} as the local workflow access. */
+    public ResumeContext withWorkflowAccess(LocalWorkflowAccess access) {
+        return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
+                readOnly, stdioMcpServers, resumePrompt, launchResources, persistence,
+                Optional.of(Objects.requireNonNull(access, "access")), remoteLaunchSupport);
     }
 
     /** As the canonical constructor with no persistence. */
@@ -108,21 +150,31 @@ public record ResumeContext(Optional<String> agentSessionId, Optional<String> ag
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public ResumeContext withStdioMcpServers(List<StdioMcpServer> servers) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
-                readOnly, servers, resumePrompt, launchResources, persistence);
+                readOnly, servers, resumePrompt, launchResources, persistence, workflowAccess,
+                remoteLaunchSupport);
     }
 
     /** This context, with {@code resources} as the launch resources. */
     public ResumeContext withLaunchResources(LaunchResources resources) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
                 readOnly, stdioMcpServers, resumePrompt,
-                Optional.of(Objects.requireNonNull(resources, "resources")), persistence);
+                Optional.of(Objects.requireNonNull(resources, "resources")), persistence, workflowAccess,
+                remoteLaunchSupport);
     }
 
     /** This context, with {@code persistence} as the remote box persistence. */
     public ResumeContext withPersistence(RemotePersistence persistence) {
         return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
                 readOnly, stdioMcpServers, resumePrompt, launchResources,
-                Optional.of(Objects.requireNonNull(persistence, "persistence")));
+                Optional.of(Objects.requireNonNull(persistence, "persistence")), workflowAccess,
+                remoteLaunchSupport);
+    }
+
+    /** This context, with {@code support} as the remote launch support. */
+    public ResumeContext withRemoteLaunchSupport(RemoteLaunchSupport support) {
+        return new ResumeContext(agentSessionId, agentSessionName, workingDirectory, remote, mcp, evalMode,
+                readOnly, stdioMcpServers, resumePrompt, launchResources, persistence, workflowAccess,
+                Optional.of(Objects.requireNonNull(support, "support")));
     }
 
     /** As the canonical constructor with {@code readOnly = false} (a writing resume). */

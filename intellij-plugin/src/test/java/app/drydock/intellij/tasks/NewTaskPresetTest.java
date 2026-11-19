@@ -4,6 +4,10 @@ import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
+import app.drydock.domain.RepositoryId;
+import app.drydock.sdlc.WorkflowTarget;
+import app.drydock.tasks.StartPlan;
+import app.drydock.tasks.TaskId;
 
 import org.junit.jupiter.api.Test;
 
@@ -270,5 +274,31 @@ class NewTaskPresetTest {
         assertTrue(prompt.contains("`git merge origin/release-1.x`"), "merges the PR's own base");
         assertTrue(prompt.contains("HEAD:alice/speed"), "pushes to the PR's head, not the pr-<n> name");
         assertFalse(prompt.contains("%"), "every format placeholder was filled");
+    }
+
+    @Test
+    void workflowApplicabilityIsExplicitPerPreset() {
+        OpenIssue gh = new OpenIssue(42, "T", Optional.empty(), List.of(), List.of(), Optional.empty());
+        JiraIssue jira = new JiraIssue("PROJ-1", "T", "https://acme.atlassian.net/browse/PROJ-1", List.of(),
+                Optional.empty());
+        OpenPullRequest pr = new OpenPullRequest(40, "T", "h", "b", false, Optional.empty(),
+                Optional.of("https://github.com/o/r/pull/40"), true);
+        StartPlan.Segment segment = new StartPlan.Segment(RepositoryId.newId(), "p", List.of());
+        StartPlan plan = new StartPlan(TaskId.of("t"), List.of(segment),
+                List.of(new StartPlan.Stage(1, List.of(segment))), List.of(), List.of(), List.of());
+
+        Optional<WorkflowTarget> free = Optional.of(WorkflowTarget.FREE_FORM_PRE_PROMPT);
+        assertEquals(free, NewTaskPreset.empty().workflowTarget());
+        assertEquals(free, NewTaskPreset.mainCheckout().workflowTarget());
+        assertEquals(free, NewTaskPreset.start(NewTaskPlan.OpenIn.OWN_WINDOW, SessionMode.READ_ONLY).workflowTarget());
+        assertEquals(Optional.of(WorkflowTarget.ISSUE_IMPLEMENT), NewTaskPreset.implement(gh).workflowTarget());
+        assertEquals(Optional.of(WorkflowTarget.ISSUE_IMPLEMENT), NewTaskPreset.implement(jira).workflowTarget());
+        assertEquals(Optional.of(WorkflowTarget.ISSUE_TRIAGE), NewTaskPreset.triage(gh).workflowTarget());
+        assertEquals(Optional.of(WorkflowTarget.ISSUE_TRIAGE), NewTaskPreset.triage(jira).workflowTarget());
+        assertEquals(Optional.empty(), NewTaskPreset.segmentStart("t", plan, segment).workflowTarget());
+        assertEquals(Optional.empty(), NewTaskPreset.resolveConflicts(pr).workflowTarget());
+        assertEquals(Optional.empty(), NewTaskPreset.resolveConflicts(pr).withPullRequest(pr).workflowTarget());
+        assertEquals(Optional.of(WorkflowTarget.ISSUE_TRIAGE),
+                NewTaskPreset.triage(gh).withPullRequest(pr).workflowTarget());
     }
 }

@@ -138,6 +138,12 @@ final class ModelField extends JPanel {
         }
     }
 
+    /** Diagnostic-only: types into the editor, through the real document listener. */
+    void diagType(String text) {
+        JTextComponent editor = (JTextComponent) combo.getEditor().getEditorComponent();
+        editor.setText(text);
+    }
+
     /** The model to launch with: the editor text, empty when the harness's own default is wanted. */
     Optional<String> selected() {
         String text = editorText();

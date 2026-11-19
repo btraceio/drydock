@@ -6,6 +6,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
 import app.drydock.app.ApplicationStateStore;
+import app.drydock.config.UserConfig;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
@@ -17,7 +18,25 @@ import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.git.DiffService;
 import app.drydock.git.GitStatusService;
+import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.git.WorktreeService;
+import app.drydock.mcp.McpActivityLog;
+import app.drydock.mcp.McpServer;
+import app.drydock.mcp.McpSessionRegistry;
+import app.drydock.mcp.McpToolRouter;
+import app.drydock.mcp.RemoteAuthorizationPermit;
+import app.drydock.mcp.RemoteMcpTransportPolicy;
+import app.drydock.mcp.RemoteReviewContextDelegates;
+import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.review.AnnotationStore;
+import app.drydock.review.PendingQuestions;
+import app.drydock.review.ReviewDataSnapshot;
+import app.drydock.review.ReviewDataSource;
+import app.drydock.review.ReviewDataSource.Backend;
+import app.drydock.review.ReviewDataSource.Result;
+import app.drydock.review.ReviewDataSources;
+import app.drydock.review.ReviewScopeRegistry;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.review.HunkIds;
@@ -49,7 +68,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -268,6 +292,235 @@ class ReviewBackendEndToEndTest {
         }
     }
 
+    // ---- remote variants: the same router over a remote context (T56) --------
+
+    /** Revocation fence of one remote session/generation; commits hold {@link #lock()}. */
+    private static final class Fence implements RemoteAuthorizationPermit.Fence {
+        private final Object lock = new Object();
+        private volatile boolean revoked;
+
+        @Override
+        public Object lock() {
+            return lock;
+        }
+
+        @Override
+        public boolean revoked() {
+            return revoked;
+        }
+
+        void revoke() {
+            synchronized (lock) {
+                revoked = true;
+            }
+        }
+    }
+
+    /** A REMOTE-only data source over a diff captured earlier; counts reads, never opens a path. */
+    private static final class FakeRemoteSource implements ReviewDataSource {
+        final AtomicInteger refreshes = new AtomicInteger();
+        final UnifiedDiff diff;
+        Runnable onRefresh = () -> { };
+
+        FakeRemoteSource(UnifiedDiff diff) {
+            this.diff = diff;
+        }
+
+        @Override
+        public Backend backend() {
+            return Backend.REMOTE;
+        }
+
+        @Override
+        public CompletableFuture<Result<ReviewScope>> resolve(ManagedSessionId session, String selection) {
+            return CompletableFuture.completedFuture(new Result.Refused<>("not used"));
+        }
+
+        @Override
+        public CompletableFuture<Result<ReviewDataSnapshot>> refresh(ReviewScope scope, BooleanSupplier cancelled) {
+            refreshes.incrementAndGet();
+            onRefresh.run();
+            return CompletableFuture.completedFuture(new Result.Ok<>(new ReviewDataSnapshot(scope.id(),
+                    Backend.REMOTE, "box-1:checkout", 1, scope.diffScope(),
+                    new ReviewBase("main", ReviewBase.Origin.FORKED_FROM), "b".repeat(40), "h".repeat(40),
+                    "b".repeat(40), "fp", diff, Map.of(), Instant.EPOCH)));
+        }
+
+        @Override
+        public CompletableFuture<Result<ReviewDataSnapshot.Content>> contents(
+                ReviewDataSnapshot snapshot, String file, Side side) {
+            return CompletableFuture.completedFuture(new Result.Unavailable<>("not used"));
+        }
+
+        @Override
+        public CompletableFuture<Result<Excerpt>> excerpt(ManagedSessionId session, String file, int line, int context) {
+            return CompletableFuture.completedFuture(new Result.Ok<>(new Excerpt(file, line, List.of("remote line"))));
+        }
+
+        @Override
+        public CompletableFuture<Result<ReviewDataSnapshot>> validateCurrent(ReviewDataSnapshot snapshot) {
+            return CompletableFuture.completedFuture(new Result.Ok<>(snapshot));
+        }
+    }
+
+    /** One remote-serving router/server whose repository and checkout are nonexistent placeholders. */
+    private final class RemoteStack implements AutoCloseable {
+        final Path placeholder = base.resolve("no-such-host-path");
+        final ManagedSessionId sessionId = ManagedSessionId.newId();
+        final Fence fence = new Fence();
+        final AnnotationStore annotations = new AnnotationStore(base.resolve("remote-annotations.json"));
+        final TourStore tours = new TourStore(base.resolve("remote-tours.json"));
+        final ReviewScopeRegistry scopes = new ReviewScopeRegistry();
+        final McpSessionRegistry tokens = new McpSessionRegistry();
+        final DiffService diffs = new DiffService();
+        final GitStatusService git = new GitStatusService();
+        final WorktreeService worktrees = new WorktreeService();
+        final FakeRemoteSource source;
+        final ReviewScope remoteScope;
+        final McpServer server;
+        volatile RemoteReviewContextDelegates.Evidence evidence = RemoteReviewContextDelegates.Evidence.ALIVE;
+
+        RemoteStack(SessionStatus status) throws Exception {
+            source = new FakeRemoteSource(backend.diffService()
+                    .diff(scope.diffRoot(), scope.diffScope(), scope.base(), DiffService.REVIEW_CONTEXT_LINES)
+                    .get(30, TimeUnit.SECONDS));
+            RepositoryId repositoryId = RepositoryId.newId();
+            Repository repository = new Repository(repositoryId, placeholder, "remote-repo", Instant.EPOCH,
+                    Instant.EPOCH, RepositorySettings.DEFAULT);
+            ManagedAgentSession session = new ManagedAgentSession.Builder(sessionId, repositoryId, "Remote",
+                    AgentBinding.unlaunched(AgentKind.PI, SessionMode.WRITES),
+                    SessionWorkspace.inRepository(placeholder.resolve("wt")), Instant.EPOCH).status(status).build();
+            remoteScope = scopes.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE, placeholder,
+                    Optional.of(placeholder.resolve("wt")), "main", "feat", Optional.empty(), Optional.of(sessionId)));
+            ReviewDataSources.Verifier verifier = new ReviewDataSources.Verifier() {
+                public Optional<Backend> backendOfSession(ManagedSessionId id) {
+                    return Optional.of(Backend.REMOTE);
+                }
+
+                public Optional<Backend> backendOfScope(ReviewScope s) {
+                    return Optional.of(Backend.REMOTE);
+                }
+
+                public Optional<Backend> backendOfScopeId(String id) {
+                    return Optional.of(Backend.REMOTE);
+                }
+            };
+            RemoteReviewContextDelegates delegates = new RemoteReviewContextDelegates(
+                    new ReviewDataSources(verifier, Map.of(Backend.REMOTE, source)),
+                    id -> evidence, id -> id.equals(sessionId), System::nanoTime);
+            WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(() -> List.of(session),
+                    () -> List.of(repository), annotations, tours, scopes,
+                    new AgentRegistry(List.of(), new AgentContext(base, base.resolve("activity"), executor)),
+                    diffs, git, worktrees, UserConfig::load,
+                    (wt, prompt) -> CompletableFuture.failedFuture(new IllegalStateException("remote")),
+                    (id, title) -> CompletableFuture.failedFuture(new IllegalStateException("remote")),
+                    (id, conversation) -> CompletableFuture.failedFuture(new IllegalStateException("remote")),
+                    (id, draft) -> CompletableFuture.failedFuture(new IllegalStateException("remote")),
+                    (id, draft) -> CompletableFuture.failedFuture(new IllegalStateException("remote")),
+                    new PendingQuestions(null)).remoteDelegates(delegates);
+            String token = tokens.mint(sessionId, McpSessionRegistry.Spawn.FORBIDDEN);
+            RemoteAuthorizationPermit.Source permits = id -> Optional.of(
+                    new RemoteAuthorizationPermit(sessionId, 1, fence)).filter(p -> p.sessionId().equals(id));
+            server = new McpServer(tokens, new McpToolRouter(context, tokens, McpToolRouter.REVIEW_TOOLS_AND_RENAME),
+                    new McpActivityLog(), RemoteMcpTransportPolicy.LOCAL,
+                    new RemoteAuthorizationPermit.Seams(permits, null));
+            server.start();
+            access = new McpAccess(server.endpointUrl(), token, Optional.empty());
+        }
+
+        JsonObject finding(String id) {
+            return JsonObject.empty().put("id", new JsonString(id))
+                    .put("anchor", JsonObject.empty().put("file", new JsonString("src/A.java"))
+                            .put("startKey", new JsonString("n1")))
+                    .put("severity", new JsonString("nit")).put("confidence", new JsonString("high"))
+                    .put("body", new JsonString("remote-" + id));
+        }
+
+        JsonObject findingArgs(String id) {
+            return JsonObject.empty().put("scopeId", new JsonString(remoteScope.id()))
+                    .put("findings", new JsonArray(List.of(finding(id))));
+        }
+
+        @Override
+        public void close() {
+            server.close();
+            annotations.close();
+            tours.close();
+            git.close();
+            worktrees.close();
+        }
+    }
+
+    @Test
+    void aRemoteFindingIsReadFromTheTypedSourceAndCommittedExactlyOnce() throws Exception {
+        try (RemoteStack remote = new RemoteStack(SessionStatus.RUNNING)) {
+            assertFalse(Files.exists(remote.placeholder), "the remote checkout is not a host path");
+
+            JsonValue stored = callTool("review_finding", remote.findingArgs("f_remote_1"));
+
+            assertEquals(remote.remoteScope.id(), str(stored, "scopeId"));
+            assertEquals(1, remote.annotations.forScope(remote.remoteScope.id()).size());
+            assertFalse(Files.exists(remote.placeholder), "nothing materialised a host path");
+        }
+    }
+
+    @Test
+    void aRevokedGenerationCannotCommitAFindingEvenWhenItWasCurrentAtDispatch() throws Exception {
+        try (RemoteStack remote = new RemoteStack(SessionStatus.RUNNING)) {
+            // Revocation lands after dispatch checked the permit and while the data is read.
+            remote.source.onRefresh = remote.fence::revoke;
+
+            JsonObject anchor = JsonObject.empty().put("file", new JsonString("src/A.java"))
+                    .put("startKey", new JsonString("n1")).put("endKey", new JsonString("n4"));
+            JsonObject step = JsonObject.empty().put("id", new JsonString("s1")).put("title", new JsonString("t"))
+                    .put("narrative", new JsonString(TOUR_TEXT)).put("anchors", new JsonArray(List.of(anchor)))
+                    .put("checks", new JsonArray(List.of(traceCheck("c1", "c1b"))));
+
+            JsonValue response = rpcResponse("tools/call", JsonObject.empty().put("name", new JsonString("review_tour"))
+                    .put("arguments", JsonObject.empty().put("scopeId", new JsonString(remote.remoteScope.id()))
+                            .put("steps", new JsonArray(List.of(step)))));
+
+            assertTrue(remote.source.refreshes.get() >= 1, "the diff came from the remote source");
+            assertTrue(field(response, "result") == null && field(response, "error") != null,
+                    "the stale commit is refused, not reported as success: " + response);
+            assertTrue(remote.tours.forScope(remote.remoteScope.id()).isEmpty(), "nothing was committed");
+        }
+    }
+
+    @Test
+    void aForeignAndAnUnknownScopeAreRefusedIdentically() throws Exception {
+        try (RemoteStack remote = new RemoteStack(SessionStatus.RUNNING)) {
+            ReviewScope foreign = remote.scopes.mint(ReviewScopeRegistry.spec(ReviewScope.Kind.WORKTREE,
+                    remote.placeholder, Optional.of(remote.placeholder.resolve("other")), "main", "other",
+                    Optional.empty(), Optional.of(ManagedSessionId.newId())));
+
+            String foreignRefusal = callToolRefused("review_scope",
+                    JsonObject.empty().put("scopeId", new JsonString(foreign.id())));
+            String unknownRefusal = callToolRefused("review_scope",
+                    JsonObject.empty().put("scopeId", new JsonString(foreign.id() + "x")));
+
+            assertEquals(unknownRefusal.replace(foreign.id() + "x", "ID"), foreignRefusal.replace(foreign.id(), "ID"));
+            assertEquals(0, remote.source.refreshes.get(), "a refused scope reads nothing");
+        }
+    }
+
+    @Test
+    void aDetachedEnrolledAgentKeepsItsToolsButConfirmedDeathFailsClosed() throws Exception {
+        // The catalog says IDLE (no attached console); the protocol evidence says ALIVE.
+        try (RemoteStack remote = new RemoteStack(SessionStatus.IDLE)) {
+            JsonValue scopeResult = callTool("review_scope",
+                    JsonObject.empty().put("scopeId", new JsonString(remote.remoteScope.id())));
+            assertFalse(array(field(scopeResult, "hunks")).isEmpty());
+            assertTrue(remote.source.refreshes.get() >= 1, "served by the typed source, not a host path");
+        }
+        try (RemoteStack dead = new RemoteStack(SessionStatus.RUNNING)) {
+            dead.evidence = RemoteReviewContextDelegates.Evidence.DEAD;
+            String refusal = callToolRefused("review_scope",
+                    JsonObject.empty().put("scopeId", new JsonString(dead.remoteScope.id())));
+            assertTrue(refusal.contains("no longer running"), refusal);
+        }
+    }
+
     private static JsonObject traceCheck(String id, String alternateId) {
         JsonObject alternate = traceCheckBody(alternateId, "Which line was added at the end?", "four");
         return traceCheckBody(id, "What does line two read now?", "TWO")
@@ -315,6 +568,10 @@ class ReviewBackendEndToEndTest {
     }
 
     private JsonValue rpc(String method, JsonObject params) throws Exception {
+        return field(rpcResponse(method, params), "result");
+    }
+
+    private JsonValue rpcResponse(String method, JsonObject params) throws Exception {
         JsonObject body = JsonObject.empty()
                 .put("jsonrpc", new JsonString("2.0"))
                 .put("id", JsonNumber.of(nextRequestId++))
@@ -328,7 +585,7 @@ class ReviewBackendEndToEndTest {
                 .build();
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), response.body());
-        return field(JsonParser.parse(response.body()), "result");
+        return JsonParser.parse(response.body());
     }
 
     private static JsonValue field(JsonValue value, String key) {

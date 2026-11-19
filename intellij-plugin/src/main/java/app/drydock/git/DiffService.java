@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -148,21 +147,8 @@ public final class DiffService implements AutoCloseable {
         Path git = locator.locate()
                 .orElseThrow(() -> new GitExecutableNotFoundException(locator.describeSearched()));
 
-        String range = switch (scope) {
-            case WORKING_TREE -> "HEAD";
-            case UPSTREAM -> "@{upstream}...HEAD";
-            case BASE -> baseBranch + "...HEAD";
-            // One revision, so git compares the WORKING TREE against it: the
-            // branch's commits and its uncommitted edits in a single diff,
-            // measured from the fork point as BASE's three dots are.
-            case BRANCH_WORKING_TREE -> resolveMergeBase(git, checkoutRoot, baseBranch);
-        };
-        // --end-of-options: a branch name that looks like an option must
-        // reach git as a revision, never be parsed as a flag.
-        List<String> command = List.of(
-                git.toString(), "-C", checkoutRoot.toString(),
-                "diff", "--no-color", "--no-ext-diff", "-U" + contextLines,
-                "--end-of-options", range);
+        List<String> command = GitReviewQueryRules.diffCommand(git.toString(), checkoutRoot, scope, baseBranch,
+                contextLines, () -> resolveMergeBase(git, checkoutRoot, baseBranch));
 
         // The untracked probe runs BEFORE the tracked-only diff so that diff
         // can be skipped outright whenever the untracked pass is going to
@@ -170,8 +156,7 @@ public final class DiffService implements AutoCloseable {
         // `git diff` twice and throwing the first result away doubled the
         // whole diff computation on every refresh of a working tree that had
         // any untracked file in it.
-        boolean includesWorkingTree = scope == DiffScope.WORKING_TREE
-                || scope == DiffScope.BRANCH_WORKING_TREE;
+        boolean includesWorkingTree = GitReviewQueryRules.includesWorkingTree(scope);
         Set<String> untrackedPaths = includesWorkingTree
                 ? untrackedPaths(git, checkoutRoot)
                 : Set.of();
@@ -236,18 +221,10 @@ public final class DiffService implements AutoCloseable {
     private Set<String> untrackedPaths(Path git, Path checkoutRoot) {
         // -z: NUL-separated raw paths, and also what lets an empty result be
         // told apart from a single empty-named entry unambiguously.
-        List<String> lsFilesCommand = List.of(
-                git.toString(), "-C", checkoutRoot.toString(),
-                "ls-files", "--others", "--exclude-standard", "-z");
+        List<String> lsFilesCommand = GitReviewQueryRules.untrackedCommand(git.toString(), checkoutRoot);
         ProcessResult lsFiles = run(lsFilesCommand);
         failIfFailed(lsFilesCommand, lsFiles, checkoutRoot);
-        Set<String> untracked = new HashSet<>();
-        for (String entry : lsFiles.stdout().split("\\u0000")) {
-            if (!entry.isEmpty()) {
-                untracked.add(entry);
-            }
-        }
-        return untracked;
+        return GitReviewQueryRules.parseNulPaths(lsFiles.stdout());
     }
 
     /**
@@ -347,20 +324,12 @@ public final class DiffService implements AutoCloseable {
         // -z: NUL-separated raw paths. Without it git C-quotes any
         // non-ASCII path and the contains() check against the diff's plain
         // path text would silently miss it.
-        List<String> command = List.of(
-                git.toString(), "-C", checkoutRoot.toString(),
-                "diff", "--cached", "--name-only", "-z");
+        List<String> command = GitReviewQueryRules.stagedCommand(git.toString(), checkoutRoot);
         ProcessResult result = run(command);
         if (result.exitCode() != 0) {
             return Set.of();
         }
-        Set<String> paths = new HashSet<>();
-        for (String entry : result.stdout().split("\\u0000")) {
-            if (!entry.isEmpty()) {
-                paths.add(entry);
-            }
-        }
-        return paths;
+        return GitReviewQueryRules.parseNulPaths(result.stdout());
     }
 
     @Override
@@ -519,8 +488,7 @@ public final class DiffService implements AutoCloseable {
 
     /** The commit {@code HEAD} forked from {@code baseBranch} at -- what {@code base...HEAD} measures from. */
     private static String resolveMergeBase(Path git, Path checkoutRoot, String baseBranch) {
-        List<String> command = List.of(git.toString(), "-C", checkoutRoot.toString(),
-                "merge-base", "--end-of-options", baseBranch, "HEAD");
+        List<String> command = GitReviewQueryRules.mergeBaseCommand(git.toString(), checkoutRoot, baseBranch);
         ProcessResult result = run(command);
         failIfFailed(command, result, checkoutRoot);
         return result.stdout().strip();

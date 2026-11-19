@@ -156,13 +156,7 @@ public final class ReviewInstructions {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(tiers, "tiers");
         Objects.requireNonNull(sessionModel, "sessionModel");
-        String work = "read review_scope for handle " + scopeId + " with include=sections,impact"
-                + ", call review_state first so already-settled findings are not re-flagged, "
-                + "then post review_finding and review_tour against that handle; review_tour is validated "
-                + "(every changed row in a step, each step at least one check with an alternate) and lists "
-                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
-                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
-                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES + "; " + WHOLE_CHANGE;
+        String work = tourWork(scopeId);
         return dispatched(work, supportsSubagents, tiers, sessionModel);
     }
 
@@ -178,14 +172,47 @@ public final class ReviewInstructions {
         Objects.requireNonNull(scopeId, "scopeId");
         Objects.requireNonNull(tiers, "tiers");
         Objects.requireNonNull(sessionModel, "sessionModel");
-        String work = "read review_scope for handle " + scopeId + " with include=sections,impact"
+        String work = sectionsWork(scopeId);
+        return dispatched(work, supportsSubagents, tiers, sessionModel);
+    }
+
+    /**
+     * The integration-only form of the review instruction, served to an agent
+     * that is already running under its own workflow (spec: the project
+     * launch points it at {@code review_scope} with {@code include=instructions}):
+     * what the tour or sections output must contain and how drydock validates
+     * it, and nothing about who does the work. No subagent dispatch, model
+     * roles, or quality gate -- those belong to {@link #forScope} and
+     * {@link #forSections}, which share these clauses byte for byte. One line.
+     *
+     * @param sections {@code true} for the {@code kind: "sections"} tour
+     *                 (no checks), {@code false} for the checked tour
+     */
+    public static String forIntegration(String scopeId, boolean sections) {
+        Objects.requireNonNull(scopeId, "scopeId");
+        return "For review handle " + scopeId + ": " + (sections ? sectionsWork(scopeId) : tourWork(scopeId)) + ".";
+    }
+
+    /** The checked tour's work clauses, shared by {@link #forScope} and {@link #forIntegration}. */
+    private static String tourWork(String scopeId) {
+        return "read review_scope for handle " + scopeId + " with include=sections,impact"
+                + ", call review_state first so already-settled findings are not re-flagged, "
+                + "then post review_finding and review_tour against that handle; review_tour is validated "
+                + "(every changed row in a step, each step at least one check with an alternate) and lists "
+                + "every problem if it is rejected, so fix them and post it again; " + ANCHOR_NOTES + "; "
+                + CHECK_KINDS + "; " + IMPACT_NOTES + "; " + CHECK_GROUNDING + "; " + TEACHING
+                + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES + "; " + WHOLE_CHANGE;
+    }
+
+    /** The sections tour's work clauses, shared by {@link #forSections} and {@link #forIntegration}. */
+    private static String sectionsWork(String scopeId) {
+        return "read review_scope for handle " + scopeId + " with include=sections,impact"
                 + ", call review_state first so already-settled findings are not re-flagged, "
                 + "then post review_finding and review_tour with kind sections against that handle; review_tour "
                 + "is validated (every changed row in a step, no step carries a check) and lists every problem "
                 + "if it is rejected, so fix them and post it again; " + SECTIONS + "; " + SECTION_ANCHOR_NOTES
                 + "; " + IMPACT_NOTES + "; " + DIAGRAM + "; " + DEPENDENCY_ORDER + "; " + INTENT + "; " + TAKES
                 + "; " + WHOLE_CHANGE;
-        return dispatched(work, supportsSubagents, tiers, sessionModel);
     }
 
     /**

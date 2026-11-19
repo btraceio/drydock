@@ -17,6 +17,11 @@ import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewRequest;
+import app.drydock.review.ReviewIntent;
+import app.drydock.sdlc.Cancellation;
+import app.drydock.sdlc.ProjectWorkflowResolver;
+import app.drydock.sdlc.WorkflowResolution;
+import app.drydock.sdlc.WorkflowTarget;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.review.tour.ReviewTour;
@@ -31,6 +36,7 @@ import com.intellij.openapi.ui.Messages;
 
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Files;
@@ -44,7 +50,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Reviews an existing worktree in place: an idle worktree's Review actions,
@@ -114,7 +122,113 @@ public final class WorktreeReview {
         }
     }
 
-    public WorktreeReview() { }
+    /** What an already-running session on the worktree gets: see {@link #existingAction}. */
+    enum ExistingAction { RUN, SUBMIT_SPHINX, FOCUS_ONLY }
+
+    /** The idle-tree race's result text: the console was joined and nothing was sent. */
+    static final String FOCUSED_NOTICE = "Focused existing session; no new review sent";
+
+    /** The project's workflow for a target; the seam {@link #explicitRun} resolves policy through. */
+    interface Policy {
+        WorkflowResolution resolve(WorkflowTarget target);
+    }
+
+    /** Background execution with immediate progress; production is {@link ProgressManager}. */
+    interface Background {
+        void run(Project from, String title, Consumer<ProgressIndicator> body);
+    }
+
+    /** User-visible result surface; production is a dialog on the EDT. */
+    interface Messenger {
+        void show(Project project, String message, Level level);
+    }
+
+    private final Background background;
+    private final Messenger messenger;
+
+    public WorktreeReview() {
+        this((from, title, body) -> ProgressManager.getInstance().run(new Task.Backgroundable(from, title, true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                body.accept(indicator);
+            }
+        }), (project, message, level) -> ApplicationManager.getApplication().invokeLater(() -> {
+            if (level == Level.ERROR) {
+                Messages.showErrorDialog(project, message, "Drydock");
+            } else if (level == Level.WARNING) {
+                Messages.showWarningDialog(project, message, "Drydock");
+            } else {
+                Messages.showInfoMessage(project, message, "Drydock");
+            }
+        }, ModalityState.nonModal(), project.getDisposed()));
+    }
+
+    WorktreeReview(Background background, Messenger messenger) {
+        this.background = background;
+        this.messenger = messenger;
+    }
+
+    /**
+     * Only an explicit workbench Run on a RUNNING session is a new invocation; the idle tree's
+     * Quick Review race, which carries no workbench origin, only joins. Sphinx always sends its
+     * own command. Pure.
+     */
+    static ExistingAction existingAction(Optional<ReviewIntent> intent, boolean sphinx) {
+        if (sphinx) {
+            return ExistingAction.SUBMIT_SPHINX;
+        }
+        return intent.filter(i -> i.origin() == ReviewIntent.Origin.WORKBENCH).isPresent()
+                ? ExistingAction.RUN : ExistingAction.FOCUS_ONLY;
+    }
+
+    /** The selected source as the progress title and result text show it. */
+    static String sourceOf(Optional<ReviewIntent> intent) {
+        return intent.map(i -> i.pullRequestTarget().map(pr -> "PR #" + pr.number()).orElse("local changes"))
+                .orElse("local changes");
+    }
+
+    /**
+     * Delivers an explicit Run to the session that already owns the checkout: policy first
+     * (unconfigured means the Drydock default; a configured project workflow cannot yet be retained
+     * for an existing session, so it is refused before anything is staged or sent), then ONE
+     * {@link ReviewRequest} for the intent bound to that session. Blocks; returns the text to show.
+     */
+    record RunResult(String text, Level level) { }
+
+    static RunResult explicitRun(ReviewRequest request, Policy policy,
+                              Supplier<Optional<ReviewRequest.Delivery>> delivery, ReviewIntent intent,
+                              ManagedAgentSession running, String branch) {
+        WorkflowTarget target = intent.pullRequestTarget().isPresent()
+                ? WorkflowTarget.PULL_REQUEST_REVIEW : WorkflowTarget.LOCAL_CHANGES_REVIEW;
+        WorkflowResolution resolution = policy.resolve(target);
+        if (resolution instanceof WorkflowResolution.Selected) {
+            return new RunResult("A project review workflow is configured, but running it in an existing"
+                    + " session is not yet supported; no review sent for " + branch + ".", Level.WARNING);
+        }
+        if (resolution instanceof WorkflowResolution.Invalid invalid) {
+            return new RunResult("The project's review workflow is invalid (" + invalid.problem().message()
+                    + "); no review sent for " + branch + ".", Level.WARNING);
+        }
+        Optional<ReviewRequest.Delivery> wiring = delivery.get();
+        ReviewRequest.Outcome outcome = wiring.isEmpty() ? new ReviewRequest.NotReady()
+                : request.request(new ReviewIntent(intent.repository(), intent.checkout(),
+                        Optional.of(running.id()), intent.target(), intent.origin(), intent.kind()),
+                        running, Optional.empty(), wiring.get());
+        return ReviewRequest.message(branch, outcome).map(text -> new RunResult(text, Level.WARNING))
+                .orElseGet(() -> new RunResult("Review of " + branch + " (" + sourceOf(Optional.of(intent)) + ", "
+                        + WorkflowSourceLabel.of(WorkflowSourceLabel.Provenance.DEFAULT, "", null)
+                        + ") was delivered to its existing session's console; start is not confirmed.",
+                        Level.INFO));
+    }
+
+    /** The real-path key that identifies a worktree for the in-flight guard; empty when it is gone. Blocking I/O. */
+    static Optional<String> realKey(Path worktree) {
+        try {
+            return Optional.of(worktree.toRealPath().toString());
+        } catch (RuntimeException | IOException e) {
+            return Optional.empty();
+        }
+    }
 
     /**
      * Whether a sphinx review can be offered for {@code mainRoot}'s
@@ -138,7 +252,7 @@ public final class WorktreeReview {
 
     /** EDT entry: refuses a second materialization of the same worktree. */
     public void review(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, false, ReviewTour.Kind.TOUR);
+        review(from, mainRoot, worktree, branch, false, false, ReviewTour.Kind.TOUR, Optional.empty());
     }
 
     /**
@@ -158,7 +272,18 @@ public final class WorktreeReview {
      */
     public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch,
                                       ReviewTour.Kind tourKind) {
-        review(from, mainRoot, worktree, branch, true, false, tourKind);
+        review(from, mainRoot, worktree, branch, true, false, tourKind, Optional.empty());
+    }
+
+    /** As {@link #reviewWithModelDialog(Project, Path, Path, String, ReviewTour.Kind)} for an explicit {@code intent}. */
+    public void reviewWithModelDialog(Project from, Path mainRoot, Path worktree, String branch,
+                                      ReviewIntent intent) {
+        review(from, mainRoot, worktree, branch, true, false, intent.kind(), Optional.of(intent));
+    }
+
+    /** As {@link #reviewSphinx(Project, Path, Path, String)} for an explicit {@code intent}. */
+    public void reviewSphinx(Project from, Path mainRoot, Path worktree, String branch, ReviewIntent intent) {
+        review(from, mainRoot, worktree, branch, false, true, intent.kind(), Optional.of(intent));
     }
 
     /**
@@ -171,36 +296,34 @@ public final class WorktreeReview {
      * agent does, and the launch re-checks whoever actually got picked.
      */
     public void reviewSphinx(Project from, Path mainRoot, Path worktree, String branch) {
-        review(from, mainRoot, worktree, branch, false, true, ReviewTour.Kind.TOUR);
+        review(from, mainRoot, worktree, branch, false, true, ReviewTour.Kind.TOUR, Optional.empty());
     }
 
     private void review(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                        boolean sphinx, ReviewTour.Kind tourKind) {
-        String key;
-        try {
-            key = worktree.toRealPath().toString();
-        } catch (RuntimeException | java.io.IOException e) {
-            report(from, "The worktree " + worktree + " is no longer on disk, so it cannot be reviewed.");
-            return;
-        }
-        if (!inFlight.add(key)) {
-            return;
-        }
-        ProgressManager.getInstance().run(new Task.Backgroundable(from,
-                "Preparing review of " + branch + "…", true) {
-            @Override
-            public void run(@NotNull ProgressIndicator indicator) {
-                try {
-                    materialize(from, mainRoot, worktree, branch, pickModel, sphinx, tourKind, indicator);
-                } finally {
-                    inFlight.remove(key);
-                }
+                        boolean sphinx, ReviewTour.Kind tourKind, Optional<ReviewIntent> intent) {
+        // EDT entry: progress first; the real-path probe and everything else is filesystem work and
+        // runs in the background task, which names the selected source.
+        background.run(from, "Preparing review of " + branch + " (" + sourceOf(intent) + ")…", indicator -> {
+            Optional<String> key = realKey(worktree);
+            if (key.isEmpty()) {
+                messenger.show(from, "The worktree " + worktree + " is no longer on disk, so it cannot be reviewed.",
+                        Level.ERROR);
+                return;
+            }
+            if (!inFlight.add(key.get())) {
+                return;
+            }
+            try {
+                materialize(from, mainRoot, worktree, branch, pickModel, sphinx, tourKind, intent, indicator);
+            } finally {
+                inFlight.remove(key.get());
             }
         });
     }
 
     private void materialize(Project from, Path mainRoot, Path worktree, String branch, boolean pickModel,
-                             boolean sphinx, ReviewTour.Kind tourKind, ProgressIndicator indicator) {
+                             boolean sphinx, ReviewTour.Kind tourKind, Optional<ReviewIntent> intent,
+                             ProgressIndicator indicator) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         Optional<AgentKind> agent;
         // The repository's last-used values, read once: they seed the dialog's
@@ -229,6 +352,14 @@ public final class WorktreeReview {
             LOG.log(Level.WARNING, "Could not prepare the review of " + worktree, e);
             report(from, "Drydock could not prepare the review of " + branch + ": " + e.getMessage());
             return;
+        }
+        if (existingAction(intent, sphinx) == ExistingAction.RUN) {
+            Optional<ManagedAgentSession> owner = PullRequestReview.runningSessionFor(
+                    plugin.stateStore().state().sessions(), worktree);
+            if (owner.isPresent()) {
+                runExplicit(from, plugin, mainRoot, branch, owner.get(), intent.get());
+                return;
+            }
         }
         if (agent.isEmpty()) {
             report(from, "No agent CLI is available, so " + branch + " cannot be reviewed.");
@@ -283,6 +414,7 @@ public final class WorktreeReview {
                         sphinxSupport.get().reviewLocalChangesPrompt());
             } else {
                 joinRunningReview(from, running.get());
+                messenger.show(from, FOCUSED_NOTICE, Level.INFO);
             }
             return;
         }
@@ -310,6 +442,24 @@ public final class WorktreeReview {
                         sphinx ? Optional.of(sphinxSupport.get().reviewLocalChangesPrompt()) : Optional.empty(),
                         tourKind, targetPullRequest),
                 ModalityState.nonModal());
+    }
+
+    /** Background: the explicit Run's one request against the session that owns the checkout. */
+    private void runExplicit(Project from, DrydockPluginService plugin, Path mainRoot, String branch,
+                             ManagedAgentSession running, ReviewIntent intent) {
+        AgentExecutionRegistry executions = AgentExecutionRegistry.getInstance();
+        ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
+                executions::isRunning, kind -> plugin.registry().supportsSubagents(kind), executions::submitPrompt);
+        Policy policy = target -> plugin.sharedProjects().byRoot(mainRoot)
+                .filter(project -> !project.isRemote())
+                .map(project -> (WorkflowResolution) new ProjectWorkflowResolver().resolve(project, target,
+                        Cancellation.none()))
+                .orElseGet(() -> new WorkflowResolution.Missing("project not registered"));
+        RunResult result = explicitRun(request, policy, () -> plugin.reviewBackend().map(backend ->
+                        new ReviewRequest.Delivery(backend.scopeAuthorizer(), backend.invocationBindings(),
+                                id -> executions.execution(id).isPresent(), 1L, () -> 1L, Optional.empty())),
+                intent, running, branch);
+        messenger.show(from, result.text(), result.level());
     }
 
     /** Shows the model dialog on the EDT and waits for its answer; empty means do not review. */
@@ -436,9 +586,7 @@ public final class WorktreeReview {
                 .map(backend -> backend.holdsAccess(started.id())).orElse(false);
     }
 
-    private static void report(Project project, String message) {
-        ApplicationManager.getApplication().invokeLater(
-                () -> Messages.showErrorDialog(project, message, "Drydock"), ModalityState.nonModal(),
-                project.getDisposed());
+    private void report(Project project, String message) {
+        messenger.show(project, message, Level.ERROR);
     }
 }

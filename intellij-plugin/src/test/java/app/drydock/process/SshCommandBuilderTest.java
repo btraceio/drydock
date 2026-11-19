@@ -26,6 +26,34 @@ class SshCommandBuilderTest {
     private final SshRemote remote = new SshRemote("user@h", "/srv/my repo");
 
     @Test
+    void reverseForwardCommandIsTheExactNoShellNoPtyArgv() {
+        List<String> argv = SshCommandBuilder.reverseForwardCommand("user@h", 42000, 51234);
+        assertEquals(List.of(
+                "ssh", "-N", "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=3",
+                "-o", "ServerAliveCountMax=2",
+                "-o", "ControlMaster=no",
+                "-o", "ControlPath=none",
+                "-R", "127.0.0.1:42000:127.0.0.1:51234",
+                "--", "user@h"), argv);
+        assertTrue(!argv.contains("-t") && !argv.contains("-tt") && !argv.contains("-f"), "no PTY/background");
+        assertTrue(argv.stream().noneMatch(a -> a.equals("sh") || a.equals("-c") || a.contains("'")), "no shell");
+        assertTrue(argv.indexOf("--") == argv.size() - 2, "-- immediately before the destination, no command after");
+    }
+
+    @Test
+    void reverseForwardCommandKeepsHostileHostAnOperandAndRejectsBadInput() {
+        assertThrows(IllegalArgumentException.class, () -> SshCommandBuilder.reverseForwardCommand("-oProxyCommand=x", 1, 2));
+        assertThrows(IllegalArgumentException.class, () -> SshCommandBuilder.reverseForwardCommand(" ", 1, 2));
+        assertThrows(IllegalArgumentException.class, () -> SshCommandBuilder.reverseForwardCommand("h", 0, 2));
+        assertThrows(IllegalArgumentException.class, () -> SshCommandBuilder.reverseForwardCommand("h", 1, 65536));
+        assertThrows(NullPointerException.class, () -> SshCommandBuilder.reverseForwardCommand(null, 1, 2));
+    }
+
+    @Test
     void remoteGitCommandShape() {
         List<String> command = SshCommandBuilder.remoteGitCommand(remote,
                 List.of("status", "--porcelain=v2", "--branch", "-z"));

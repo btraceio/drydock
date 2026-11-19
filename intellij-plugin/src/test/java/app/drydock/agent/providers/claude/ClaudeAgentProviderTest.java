@@ -6,6 +6,7 @@ import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.EvalTokenResolver;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
@@ -276,6 +277,40 @@ class ClaudeAgentProviderTest {
         assertFalse(afterImage.contains(" sh "), "no extra sh after image: " + afterImage);
         // The token must not leak into the command string.
         assertFalse(cmd.contains("tok"), "token must not be on the argv: " + cmd);
+    }
+
+    /** Eval create/resume mount the typed namespace only when LocalWorkflowAccess carries one. */
+    @Test
+    void evalLaunchMountsWorkflowNamespaceOnlyWhenAccessPresent() throws Exception {
+        Path stateDir = Files.createTempDirectory("drydock-eval-ns-test");
+        EvalTokenResolver resolver = () -> Optional.of(
+                new EvalTokenResolver.ResolvedToken("tok", Optional.of(Instant.now().plusSeconds(3600))));
+        ClaudeEvalContainer container = new ClaudeEvalContainer(stateDir, resolver);
+        container.mark("sess-eval").orElseThrow();
+        ClaudeAgentProvider provider = new ClaudeAgentProvider(
+                new ClaudeExecutableLocator(Path.of("/nonexistent/claude")), container, noDdtool());
+        provider.init(new AgentContext(stateDir, stateDir.resolve("activity"),
+                Executors.newVirtualThreadPerTaskExecutor()));
+        provider.activity().orElseThrow().install();
+        CreateContext create = new CreateContext("S", "sess-eval", Path.of("/tmp"),
+                Optional.empty(), Optional.empty(), true);
+        String mount = stateDir.resolve("workflow-namespaces").resolve("ns-1") + "':ro";
+
+        assertFalse(provider.buildCreateCommand(create).command().contains("workflow-namespaces"));
+        assertFalse(provider.buildCreateCommand(create.withWorkflowAccess(
+                new LocalWorkflowAccess(List.of(Path.of("/stage")), Optional.empty()))).command()
+                .contains("workflow-namespaces"));
+        LocalWorkflowAccess access = new LocalWorkflowAccess(List.of(Path.of("/stage")), Optional.of("ns-1"));
+        String cmd = provider.buildCreateCommand(create.withWorkflowAccess(access)).command();
+        assertTrue(cmd.contains(mount), cmd);
+        assertFalse(cmd.contains("/stage"), "read roots are never mounted into the container: " + cmd);
+        String resume = provider.buildResumeCommand(new ResumeContext(Optional.of("sess-eval"), Optional.empty(),
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), true, false, List.of(), Optional.empty())
+                .withWorkflowAccess(access)).command();
+        assertTrue(resume.contains(mount), resume);
+        // The task-resource refusal still comes first, namespace or not.
+        assertFalse(provider.buildCreateCommand(create.withLaunchResources(ONE_DIR)
+                .withWorkflowAccess(access)).supported());
     }
 
     @Test
@@ -561,6 +596,62 @@ class ClaudeAgentProviderTest {
                         Optional.empty(), Optional.empty(), true, false, List.of(), Optional.empty())
                         .withLaunchResources(ONE_DIR));
         assertFalse(plan.supported());
+    }
+
+    // ---- local workflow read roots (LocalWorkflowAccess) -------------------
+
+    private static final LocalWorkflowAccess ACCESS = new LocalWorkflowAccess(
+            List.of(Path.of("/stage/wf one"), Path.of("/wt/prereq")), Optional.of("ns-1"));
+
+    private static CreateContext createCtx() {
+        return new CreateContext("S", "uuid", Path.of("/tmp"), Optional.empty(), Optional.empty());
+    }
+
+    private static ResumeContext resumeCtx() {
+        return new ResumeContext(Optional.of("abc-123"), Optional.empty(), Path.of("/tmp"),
+                Optional.empty(), Optional.empty());
+    }
+
+    /** Read roots are unioned after the launch-resource dirs; a repeat collapses; absence is today's command. */
+    @Test
+    void workflowReadRootsAreUnionedIntoAddDirOnCreateAndResume() {
+        String create = newProviderNoExecutable().buildCreateCommand(
+                createCtx().withLaunchResources(ONE_DIR).withWorkflowAccess(ACCESS)).command();
+        assertEquals(ENV + "claude --add-dir '/wt/prereq' --add-dir '/stage/wf one'", create);
+        String resume = newProviderNoExecutable().buildResumeCommand(
+                resumeCtx().withLaunchResources(ONE_DIR).withWorkflowAccess(ACCESS)).command();
+        assertEquals(ENV + "claude --resume 'abc-123' --add-dir '/wt/prereq' --add-dir '/stage/wf one'", resume);
+
+        assertEquals(ENV + "claude --add-dir '/stage/wf one' --add-dir '/wt/prereq'",
+                newProviderNoExecutable().buildCreateCommand(createCtx().withWorkflowAccess(ACCESS)).command());
+        assertEquals(ENV + "claude", newProviderNoExecutable().buildCreateCommand(createCtx()).command());
+        assertEquals(ENV + "claude --resume 'abc-123'",
+                newProviderNoExecutable().buildResumeCommand(resumeCtx()).command());
+    }
+
+    /** Access never lifts the task-resource refusals nor adds guidance/plugin flags; namespace-only adds nothing. */
+    @Test
+    void workflowAccessLeavesRefusalsAndGuidanceUnchanged() {
+        assertFalse(newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "sess-eval",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), true)
+                .withLaunchResources(ONE_DIR).withWorkflowAccess(ACCESS)).supported());
+        assertFalse(newProviderNoExecutable().buildResumeCommand(new ResumeContext(Optional.of("e"),
+                Optional.empty(), Path.of("/tmp"), Optional.empty(), Optional.empty(), true, false,
+                List.of(), Optional.empty()).withLaunchResources(ONE_DIR).withWorkflowAccess(ACCESS)).supported());
+        SshRemote box = new SshRemote("build-box", "/srv");
+        assertFalse(newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"),
+                Optional.of(box), Optional.empty()).withLaunchResources(ONE_DIR).withWorkflowAccess(ACCESS))
+                .supported());
+        String command = newProviderNoExecutable().buildCreateCommand(createCtx().withWorkflowAccess(
+                new LocalWorkflowAccess(List.of(), Optional.of("ns-1")))).command();
+        assertEquals(ENV + "claude", command);
+        assertFalse(newProviderNoExecutable().buildCreateCommand(createCtx().withWorkflowAccess(ACCESS))
+                .command().contains("--plugin-dir"));
+        // Guidance-only resources stay refused for eval even with read roots present.
+        assertFalse(newProviderNoExecutable().buildCreateCommand(new CreateContext("S", "sess-eval",
+                Path.of("/tmp"), Optional.empty(), Optional.empty(), true)
+                .withLaunchResources(new LaunchResources(List.of(), Optional.of(Path.of("/g"))))
+                .withWorkflowAccess(ACCESS)).supported());
     }
 
     // ---- characterization: today's exact plan strings (the INV-1 oracle) ------

@@ -1,18 +1,28 @@
 package app.drydock.intellij.review;
 
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.DiffScope;
+import app.drydock.git.ReviewBase;
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewDataSnapshot;
+import app.drydock.review.ReviewDataSource;
+import app.drydock.review.ReviewDataSources;
 import app.drydock.review.ReviewScope;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -20,6 +30,7 @@ import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -327,6 +338,118 @@ class ReviewTabRefresherTest {
         List<String> unregistered = new ArrayList<>();
         refresher.onDispose(() -> unregistered.add("late"));
         assertEquals(List.of("late"), unregistered);
+    }
+
+    // ---- T72: refresh and selection contents through the dispatch ------------
+
+    private static ReviewDataSnapshot remoteSnapshot(ReviewScope scope, UnifiedDiff d) {
+        return new ReviewDataSnapshot(scope.id(), ReviewDataSource.Backend.REMOTE, "box", 3, DiffScope.BASE,
+                new ReviewBase("main", ReviewBase.Origin.DEFAULT_UNMEASURED), "b".repeat(40), "h".repeat(40),
+                "b".repeat(40), "fp", d, Map.of(), Instant.EPOCH);
+    }
+
+    private final List<String> adapterCalls = new ArrayList<>();
+    private ReviewDataSource.Result<ReviewDataSnapshot> refreshResult;
+
+    private ReviewTabRefresher dispatched() {
+        ReviewDataSource remote = new ReviewDataSource() {
+            @Override public Backend backend() { return Backend.REMOTE; }
+            @Override public CompletableFuture<Result<ReviewScope>> resolve(ManagedSessionId s, String sel) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot>> refresh(ReviewScope sc, BooleanSupplier c) {
+                adapterCalls.add("refresh");
+                return CompletableFuture.completedFuture(refreshResult);
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot.Content>> contents(
+                    ReviewDataSnapshot snap, String file, Side side) {
+                adapterCalls.add("contents:" + file + ":" + side);
+                return CompletableFuture.completedFuture(new Result.Ok<>(new ReviewDataSnapshot.Content.Absent()));
+            }
+            @Override public CompletableFuture<Result<Excerpt>> excerpt(ManagedSessionId s, String f, int l, int c) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot>> validateCurrent(ReviewDataSnapshot snap) {
+                throw new AssertionError();
+            }
+        };
+        ReviewDataSources.Verifier verifier = new ReviewDataSources.Verifier() {
+            @Override public Optional<ReviewDataSource.Backend> backendOfSession(ManagedSessionId s) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+            @Override public Optional<ReviewDataSource.Backend> backendOfScope(ReviewScope s) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+            @Override public Optional<ReviewDataSource.Backend> backendOfScopeId(String id) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+        };
+        EnumMap<ReviewDataSource.Backend, ReviewDataSource> map = new EnumMap<>(ReviewDataSource.Backend.class);
+        map.put(ReviewDataSource.Backend.REMOTE, remote);
+        return new ReviewTabRefresher(Runnable::run, scheduler, new ReviewDataSources(verifier, map),
+                (s, d, base) -> {
+                    joinedBases.add(base);
+                    return new ReviewTabModel.Inputs(d, List.of(), List.of(), base);
+                },
+                ReviewTabModel::snapshot, snapshots::add,
+                (state, text) -> {
+                    states.add(state);
+                    texts.add(text);
+                });
+    }
+
+    @Test
+    void aDispatchedReloadTakesDiffBaseAndSnapshotFromTheAdapterWithoutLocalDiffOrGit() {
+        ReviewScope scope = scope("s1");
+        ReviewDataSnapshot captured = remoteSnapshot(scope, diff("a.txt"));
+        refreshResult = new ReviewDataSource.Result.Ok<>(captured);
+        ReviewTabRefresher refresher = dispatched();
+        refresher.reload(scope);
+        scheduler.fireNext();
+        assertEquals(List.of("refresh"), adapterCalls);
+        assertEquals(ReviewTabStatus.READY, states.get(states.size() - 1));
+        assertEquals(List.of(Optional.of("b".repeat(40))), joinedBases);
+        assertSame(captured, refresher.snapshot().orElseThrow());
+        assertEquals(0, diff.calls);
+        assertEquals(0, git.calls);
+        // Selection contents go through the adapter with the cached snapshot.
+        assertInstanceOf(ReviewDataSource.Result.Ok.class, refresher.contents("a.txt", ReviewDataSource.Side.LEFT).join());
+        assertEquals("contents:a.txt:LEFT", adapterCalls.get(1));
+    }
+
+    @Test
+    void aStaleOrRefusedDispatchedRefreshIsAFailedReloadNotAnEmptyDiffAndKeepsNoNewSnapshot() {
+        ReviewScope scope = scope("s1");
+        ReviewDataSnapshot captured = remoteSnapshot(scope, diff("a.txt"));
+        refreshResult = new ReviewDataSource.Result.Ok<>(captured);
+        ReviewTabRefresher refresher = dispatched();
+        refresher.reload(scope);
+        scheduler.fireNext();
+        int emitted = snapshots.size();
+        refreshResult = new ReviewDataSource.Result.Stale<>("checkout moved");
+        refresher.reload(scope);
+        scheduler.fireNext();
+        assertEquals(ReviewTabStatus.DIFF_FAILED, states.get(states.size() - 1));
+        assertTrue(texts.get(texts.size() - 1).contains("stale: checkout moved"), texts.toString());
+        assertEquals(emitted, snapshots.size());
+        refreshResult = new ReviewDataSource.Result.Refused<>("not addressable");
+        refresher.reload(scope);
+        scheduler.fireNext();
+        assertTrue(texts.get(texts.size() - 1).contains("refused: not addressable"), texts.toString());
+        // Another scope never inherits the previous scope's snapshot.
+        refreshResult = new ReviewDataSource.Result.Unavailable<>("down");
+        refresher.reload(scope("s2"));
+        assertTrue(refresher.snapshot().isEmpty());
+        assertInstanceOf(ReviewDataSource.Result.Refused.class, refresher.contents("a.txt", ReviewDataSource.Side.RIGHT).join());
+    }
+
+    @Test
+    void theLegacyFormHasNoSnapshotAndRefusesDispatchedContents() {
+        ReviewTabRefresher refresher = fresh();
+        refresher.reload(scope("s1"));
+        load("a.txt");
+        assertTrue(refresher.snapshot().isEmpty());
+        assertInstanceOf(ReviewDataSource.Result.Refused.class, refresher.contents("a.txt", ReviewDataSource.Side.LEFT).join());
     }
 
     // ---- fakes ---------------------------------------------------------------

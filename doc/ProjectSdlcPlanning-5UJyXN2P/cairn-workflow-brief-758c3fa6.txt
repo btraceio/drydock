@@ -1,0 +1,71 @@
+# cairn brief — topic: project-sdlc-workflows workflow local prompts review scope
+Searched 207 source(s) (global scratchpad + knowledgebase memories)
+
+## ⚠ Conflicting memories — verify before following any of them
+- 2 matched memories share the anchor `app/src/main/java/app/drydock/review/reviewinstructions.java`: find-check-answerability-gap, find-learning-science-authoring-rules.
+  They may make contradictory claims. Do not adopt one on its
+  summary alone — read the full bodies (`brief <topic> --full`), run
+  the `verify:` command any of them carries, and check their claims
+  against the repo / the live system before following any of them.
+
+## Design constraints (confirmed findings — honor these in the design)
+- [btraceio--drydock/integrated-review/integrated-review/find-plugin-review-core-dormant] (tag:review, title:review, body:reviewx3, body:scopex1) — The plugin ships the review core and review_* router, but nothing in the platform glue uses them
+    - `intellij-plugin/src/main/java/app/drydock/review/` is byte-identical to the app's (diff -rq);
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-plugin-review-core-dormant.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/find-delayed-tasks-decisions] (body:workflowx2, body:reviewx2, body:scopex1, anchor:intellij-plugin/**) — Approved D1–D17/N1 requirements and P7–P9 safety clarifications
+    Canonical current requirements: docs/DelayedTasksRequirements.md. User approved
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/sneaky-fluffy-corgi/writing-any-code-thoroughly/nodes/find-delayed-tasks-decisions.md  [verified@ 45e4a620]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/glowing-pearly-meerkat/writing-any-code-thoroughly/find-issues-fix-round-landed] (body:workflowx2, tag:review, title:review, body:reviewx4) — The review fix round landed six invariants — do not regress them
+    The sphinx review of the issues-tree change (quick effort, 15 findings, 0
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/glowing-pearly-meerkat/writing-any-code-thoroughly/nodes/find-issues-fix-round-landed.md  [verified@ d18ce65a]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/brisk-ivory-egret/writing-any-code-thoroughly/find-jira-group-expansion-design] (body:reviewx2, body:scopex1, anchor:intellij-plugin/src/platform/java/app/drydock/intellij/tasks/**) — How Jira group expansion is made to work and survive rebuilds
+    Fix design (branch brisk-ivory-egret, commit 82d798c2, PR #63), each piece
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/brisk-ivory-egret/writing-any-code-thoroughly/nodes/find-jira-group-expansion-design.md  [verified@ 82d798c2]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/glowing-pearly-meerkat/writing-any-code-thoroughly/find-issues-lazy-fetch-keys] (body:scopex3, anchor:intellij-plugin/src/platform/java/app/drydock/intellij/tasks/**) — Issues fetch triggers are per node/group, carried by the expansion tracker
+    The lazy-fetch gate moved from section level to node level. The pieces and
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/glowing-pearly-meerkat/writing-any-code-thoroughly/nodes/find-issues-lazy-fetch-keys.md  [verified@ d18ce65a]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/drydock-jb-giddy-bronze-falcon/project-sdlc-workflows/find-preamble-applicability] (tag:prompts, title:prompts, body:promptsx1, body:reviewx1) — New task pre-prompts apply to prose, not native slash commands or empty chat
+    Coordinator interpretation of approved per-launch intent precedence and default compatibility, delivered in supervisor reply aa8628fb-d6df-4a9f-9269-37bcf2102342. The planner reported NewTaskPlan#init
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/drydock-jb-giddy-bronze-falcon/project-sdlc-workflows/nodes/find-preamble-applicability.md  [verified@ bec9e0f7]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/integrated-review/integrated-review/find-review-layering] (body:promptsx2, tag:review, title:review, body:reviewx3) — Drydock review splits into portable model, JavaFX UI, and parts that duplicate IDE facilities
+    **Portable model/logic (already in plugin core, identical):**
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-review-layering.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+- [btraceio--drydock/integrated-review/integrated-review/find-line-key-contract] (body:promptsx1, tag:review, title:review, body:reviewx1) — Agents address review state by git-diff line keys and hunk digests — any IDE integration must preserve this contract
+    - Findings and tour anchors use line keys `n<newLine>` / `o<oldLine>` (ReviewAnnotation.java:22-25, TourAnchor.java:5-20).
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/find-line-key-contract.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+- [kb/find-commit-split-technique] (tag:workflow, body:workflowx2, symbol:intellij-plugin/src/main/java/app/drydock/review/ReviewInstructions.java) — Split one file across single-purpose commits by staging intermediate content, never by partial patches
+    This repo requires single-purpose commits, and one feedback round often
+    source: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/drydock-jb-giddy-bronze-falcon/.knowledgebase/memories/find-commit-split-technique.md  [verified@ bec9e0f7]
+- [kb/find-check-answerability-gap] (tag:review, body:reviewx1, symbol:intellij-plugin/src/main/java/app/drydock/review/ReviewInstructions.java) — A tour check's question must be answerable from what the tour teaches or the visible code; validation enforces only structure
+    A tour check's question, of any kind (PREDICT, TRACE, RISK), must be
+    source: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/drydock-jb-giddy-bronze-falcon/.knowledgebase/memories/find-check-answerability-gap.md  [verified@ bec9e0f7]
+    verify: grep -q "CHECK_GROUNDING" app/src/main/java/app/drydock/review/ReviewInstructions.java
+- [kb/find-learning-science-authoring-rules] (tag:review, body:reviewx1, symbol:intellij-plugin/src/main/java/app/drydock/review/ReviewInstructions.java) — Tour authoring follows evidence-based teaching rules (Mayer/Sweller/WCAG/plain language); the citations live in the spec's Authoring rules section
+    A tour is studying material, and its authoring contract
+    source: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/drydock-jb-giddy-bronze-falcon/.knowledgebase/memories/find-learning-science-authoring-rules.md  [verified@ bec9e0f7]
+    verify: grep -q "everyFormTeachesByTheReadingScienceRules" app/src/test/java/app/drydock/review/ReviewInstructionsTest.java
+
+## Unresolved (open questions / hypotheses — design risks)
+- [btraceio--drydock/integrated-review/integrated-review/hyp-ide-inspections-as-evidence] (body:promptsx1, tag:review, title:review, body:reviewx3) — IDE inspections on changed lines are a new, IDE-only review signal (agent-pulled or Drydock-pushed)
+    - Nothing in ReviewInstructions mentions IDE tools (grep: no get_file_problems / jetbrains) — the review prompts
+    source: /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/integrated-review/integrated-review/nodes/hyp-ide-inspections-as-evidence.md  [verified@ 54fd690f]
+    (work-in-progress scratchpad — findings not yet settled)
+
+## Evidence (read on demand)
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-design-handoff-mvp  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-design-handoff-mvp.md
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-mvp-surface-status  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-mvp-surface-status.md
+- btraceio--drydock/improve-the-navigation/writing-any-code-thoroughly/ev-navigation-pr-handoff  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/improve-the-navigation/writing-any-code-thoroughly/evidence/ev-navigation-pr-handoff.md
+- btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/ev-v2-implementation  /Users/jaroslav.bachorik/.cairn/investigations/btraceio--drydock/feat-intellij-mvp/drydock-intellij-mvp/evidence/ev-v2-implementation.md
+
+---
+22 matching node(s). Read a node's full reasoning chain on demand —
+cite the node ids in your design/RFC so the loop is auditable.
+Then record them: cairn cite <doc>

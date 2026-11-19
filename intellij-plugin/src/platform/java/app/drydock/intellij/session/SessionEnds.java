@@ -13,9 +13,13 @@ import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.DrydockSessionsListener;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.LaunchClaims;
+import app.drydock.intellij.remote.RemoteReviewService;
+import app.drydock.intellij.remote.RemoteReviewService.ReleaseOutcome;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
+import app.drydock.sdlc.SessionWorkflowResourceOwner;
 import app.drydock.workspace.BoxShell;
 
 import java.lang.System.Logger;
@@ -66,6 +70,10 @@ final class SessionEnds implements AgentExecutionListener {
     private final Supplier<RemoteSessionLiveness> liveness;
     /** The requested-client-end coordination the end settle classifies an end by. */
     private final AgentExecutionRegistry.RemoteClientEnds clientEnds;
+    /** The application's retained workflow resources; resolved lazily, may yield null (no IDE application). */
+    private final Supplier<SessionWorkflowResourceOwner> workflowResources;
+    /** The application's remote review transport owner; resolved lazily, may yield null (none built yet). */
+    private final Supplier<RemoteReviewService> remoteReview;
 
     /**
      * Agent session ids already bound to a persisted session, or claimed by
@@ -110,6 +118,31 @@ final class SessionEnds implements AgentExecutionListener {
                 LaunchClaims claims, BoxShell boxShell,
                 Supplier<RemoteSessionLiveness> liveness,
                 AgentExecutionRegistry.RemoteClientEnds clientEnds) {
+        this(stateStore, registry, executor, mcpAccess, claims, boxShell, liveness, clientEnds,
+                SessionEnds::pluginWorkflowResources);
+    }
+
+    /** As above, with the retained-resource owner a session removal releases through (tests inject one). */
+    SessionEnds(Supplier<ApplicationStateStore> stateStore, Supplier<AgentRegistry> registry,
+                ExecutorService executor, SessionMcpAccess mcpAccess,
+                LaunchClaims claims, BoxShell boxShell,
+                Supplier<RemoteSessionLiveness> liveness,
+                AgentExecutionRegistry.RemoteClientEnds clientEnds,
+                Supplier<SessionWorkflowResourceOwner> workflowResources) {
+        this(stateStore, registry, executor, mcpAccess, claims, boxShell, liveness, clientEnds, workflowResources,
+                SessionEnds::pluginRemoteReview);
+    }
+
+    /** As above, with the remote transport owner each end outcome routes to (tests inject one). */
+    SessionEnds(Supplier<ApplicationStateStore> stateStore, Supplier<AgentRegistry> registry,
+                ExecutorService executor, SessionMcpAccess mcpAccess,
+                LaunchClaims claims, BoxShell boxShell,
+                Supplier<RemoteSessionLiveness> liveness,
+                AgentExecutionRegistry.RemoteClientEnds clientEnds,
+                Supplier<SessionWorkflowResourceOwner> workflowResources,
+                Supplier<RemoteReviewService> remoteReview) {
+        this.remoteReview = Objects.requireNonNull(remoteReview, "remoteReview");
+        this.workflowResources = Objects.requireNonNull(workflowResources, "workflowResources");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.executor = Objects.requireNonNull(executor, "executor");
@@ -118,6 +151,80 @@ final class SessionEnds implements AgentExecutionListener {
         this.boxShell = Objects.requireNonNull(boxShell, "boxShell");
         this.liveness = Objects.requireNonNull(liveness, "liveness");
         this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
+    }
+
+    private static SessionWorkflowResourceOwner pluginWorkflowResources() {
+        try {
+            return DrydockPluginService.getInstance().workflowResources();
+        } catch (RuntimeException e) {
+            return null;   // no IDE application (plain unit tests): nothing retained to release
+        }
+    }
+
+    private static RemoteReviewService pluginRemoteReview() {
+        try {
+            return DrydockPluginService.getInstance().remoteReview().orElse(null);
+        } catch (RuntimeException e) {
+            return null;   // no IDE application, or the remote transport is not built
+        }
+    }
+
+    /**
+     * Routes one end outcome to the remote transport owner on the executor (the release closes a process
+     * and revokes credentials: blocking). {@code DETACH} keeps the transport; DEATH/STOP/FORGET tear down
+     * only this session's. Never fails the caller; a failure is logged. A shut-down executor skips it:
+     * the owner's own close settles every transport at application shutdown. Tmux is never touched here.
+     */
+    private CompletableFuture<Void> releaseRemote(ManagedSessionId id, String host, ReleaseOutcome outcome) {
+        RemoteReviewService service = remoteReview.get();
+        if (service == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        RemoteReviewService.Session target = new RemoteReviewService.Session(host, "", id, "", "", 0, "",
+                () -> null);
+        try {
+            return CompletableFuture.runAsync(() -> service.release(target, outcome), executor)
+                    .exceptionally(e -> {
+                        LOG.log(Level.WARNING, () -> "Releasing the remote transport of " + id + " (" + outcome
+                                + ") failed: " + e);
+                        return null;
+                    });
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.DEBUG, "Remote transport of {0} stays until shutdown: the executor is closed", id);
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /**
+     * The session row was removed (explicit Forget): releases this session's retained workflow resources,
+     * local first with remote cleanup debt recorded by the owner, off the calling thread. This is the ONLY
+     * release path: terminal detach, console close, {@link #executionTerminated} and Stop never reach the
+     * owner (INV-33). Never fails the caller's removal; a failure is logged and the journal keeps the entry.
+     */
+    CompletableFuture<Void> sessionRemoved(ManagedSessionId id) {
+        Objects.requireNonNull(id, "id");
+        // The local revocation of the remote transport never depends on the retained-resource cleanup (a
+        // box deletion that fails leaves a debt there, not a live token here), and vice versa.
+        CompletableFuture<Void> transport = releaseRemote(id, "", ReleaseOutcome.FORGET);
+        return transport.thenCompose(done -> releaseWorkflowResources(id));
+    }
+
+    private CompletableFuture<Void> releaseWorkflowResources(ManagedSessionId id) {
+        SessionWorkflowResourceOwner owner = workflowResources.get();
+        if (owner == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            return CompletableFuture.supplyAsync(() -> owner.deleteSession(id.toString()), executor)
+                    .thenCompose(done -> done)
+                    .exceptionally(e -> {
+                        LOG.log(Level.WARNING, () -> "Releasing workflow resources for " + id + " failed: " + e);
+                        return null;
+                    });
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Workflow resources of {0} stay retained: the executor is shutting down", id);
+            return CompletableFuture.completedFuture(null);
+        }
     }
 
     Set<String> claimedAgentSessionIds() {
@@ -327,12 +434,14 @@ final class SessionEnds implements AgentExecutionListener {
                                            AgentExecutionRegistry.RemoteClientEnds.RequestedEnd requested) {
         if (requested.origin() == AgentExecutionRegistry.RemoteClientEnds.Origin.CLOSE) {
             settleRemote(id, SessionStatus.IDLE, null);
+            releaseRemote(id, "", ReleaseOutcome.DETACH);   // console close is a detach, never a death
             return;
         }
         if (requested.killConfirmed().isEmpty()) {
             return;
         }
         boolean killConfirmed = requested.killConfirmed().get();
+        releaseRemote(id, "", killConfirmed ? ReleaseOutcome.STOP : ReleaseOutcome.DETACH);
         settleRemote(id, killConfirmed ? SessionStatus.INACTIVE : SessionStatus.IDLE,
                 killConfirmed ? RemoteSessionLiveness.State.DEAD : RemoteSessionLiveness.State.UNKNOWN);
     }
@@ -359,12 +468,17 @@ final class SessionEnds implements AgentExecutionListener {
             return;
         }
         switch (verdict) {
-            case BoxShell.Liveness.Alive ignored ->
-                    settleRemote(id, SessionStatus.IDLE, RemoteSessionLiveness.State.ALIVE);
-            case BoxShell.Liveness.Dead ignored ->
-                    settleRemote(id, stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED,
-                            RemoteSessionLiveness.State.DEAD);
+            case BoxShell.Liveness.Alive ignored -> {
+                settleRemote(id, SessionStatus.IDLE, RemoteSessionLiveness.State.ALIVE);
+                releaseRemote(id, box.sshRemote().host(), ReleaseOutcome.DETACH);
+            }
+            case BoxShell.Liveness.Dead ignored -> {
+                settleRemote(id, stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED,
+                        RemoteSessionLiveness.State.DEAD);
+                releaseRemote(id, box.sshRemote().host(), ReleaseOutcome.DEATH);
+            }
             case BoxShell.Liveness.Unknown unknown -> {
+                releaseRemote(id, box.sshRemote().host(), ReleaseOutcome.DETACH);
                 LOG.log(Level.WARNING, () -> "Remote settle for " + id + " on " + box.sshRemote().host()
                         + " could not conclude (" + unknown.reason() + "); the row stays IDLE and resumable");
                 settleRemote(id, SessionStatus.IDLE, RemoteSessionLiveness.State.UNKNOWN);

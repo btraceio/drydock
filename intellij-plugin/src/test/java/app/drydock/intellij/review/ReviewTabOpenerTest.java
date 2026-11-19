@@ -7,7 +7,12 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.PullRequestTarget;
+import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.intellij.tasks.PullRequestReview;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.tour.ReviewTour;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
 import org.junit.jupiter.api.Test;
@@ -21,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -31,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -291,6 +298,96 @@ class ReviewTabOpenerTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ---- the review intent carried to the start (INV-20, AC-15) -------------
+
+    private static final RepositoryId REPO = RepositoryId.newId();
+    private static final PullRequestTarget PR = new PullRequestTarget("github.com/acme/app", 7);
+
+    private static ReviewIntent prIntent(Path checkout) {
+        return PullRequestReview.pullRequestIntent(REPO, checkout, PR);
+    }
+
+    private static ReviewIntent resolve(Optional<ReviewIntent> recorded, Path checkout, ReviewTabOpener.ReviewStart start) {
+        return ReviewTabOpener.resolveIntent(recorded, checkout, start, ReviewIntent.Origin.WORKBENCH,
+                () -> Optional.of(REPO));
+    }
+
+    /** A PR row's explicit PR survives to the start, with the kind the start asks for, and ignores incidental metadata. */
+    @Test
+    void theRecordedPullRequestReachesTheStartAsThePullRequestIntent() {
+        ReviewIntent resolved = resolve(Optional.of(prIntent(Path.of("/wt/pr-7"))), Path.of("/wt/pr-7"),
+                ReviewTabOpener.ReviewStart.SECTIONS);
+
+        assertEquals(Optional.of(PR), resolved.pullRequestTarget());
+        assertEquals(ReviewIntent.Origin.PULL_REQUEST_ROW, resolved.origin());
+        assertEquals(ReviewTour.Kind.SECTIONS, resolved.kind());
+        assertEquals(new ReviewIntent.Local(Path.of("/wt/pr-7")), resolved.checkout());
+    }
+
+    /** Missing context is explicit local changes, even in a checkout named pr-N whose scope carries a PR. */
+    @Test
+    void missingContextIsExplicitLocalWhateverTheCheckoutOrScopeSays() {
+        ReviewScope incidental = new ReviewScope("scope-pr", ReviewScope.Kind.WORKTREE, Path.of("/wt/pr-7"),
+                Optional.empty(), "main", "head", Optional.empty(), Optional.empty(), Optional.empty());
+        assertEquals(incidental.diffRoot(), Path.of("/wt/pr-7"));
+
+        ReviewIntent resolved = resolve(Optional.empty(), incidental.diffRoot(), ReviewTabOpener.ReviewStart.TOUR);
+
+        assertEquals(ReviewIntent.LocalChanges.INSTANCE, resolved.target());
+        assertEquals(Optional.empty(), resolved.pullRequestTarget());
+        assertEquals(ReviewIntent.Origin.WORKBENCH, resolved.origin());
+        assertEquals(REPO, resolved.repository());
+    }
+
+    /** A PR recorded for another checkout is not this checkout's context: conflicting PR/local text stays local. */
+    @Test
+    void aPullRequestRecordedForAnotherCheckoutDoesNotLeak() {
+        ReviewIntent resolved = resolve(Optional.of(prIntent(Path.of("/wt/pr-7"))), Path.of("/repo"),
+                ReviewTabOpener.ReviewStart.TOUR);
+
+        assertEquals(ReviewIntent.LocalChanges.INSTANCE, resolved.target());
+        assertEquals(new ReviewIntent.Local(Path.of("/repo")), resolved.checkout());
+    }
+
+    @Test
+    void anUnregisteredRepositoryWithNoContextIsAnErrorNotAGuess() {
+        assertThrows(IllegalStateException.class, () -> ReviewTabOpener.resolveIntent(Optional.empty(),
+                Path.of("/repo"), ReviewTabOpener.ReviewStart.TOUR, ReviewIntent.Origin.WORKBENCH,
+                Optional::empty));
+    }
+
+    /** The intent is recorded on the project and read back, replaced by a later record. */
+    @Test
+    void theIntentIsRecordedOnTheProjectAndReplaced() {
+        Project project = project("/wt/pr-7");
+        assertTrue(ReviewTabOpener.recordedIntent(project).isEmpty());
+
+        ReviewTabOpener.recordIntent(project, prIntent(Path.of("/wt/pr-7")));
+        assertEquals(Optional.of(PR), ReviewTabOpener.recordedIntent(project).flatMap(ReviewIntent::pullRequestTarget));
+
+        ReviewIntent local = ReviewIntent.local(REPO, new ReviewIntent.Local(Path.of("/wt/pr-7")), Optional.empty(),
+                ReviewIntent.Origin.LOCAL_TREE, ReviewTour.Kind.TOUR);
+        ReviewTabOpener.recordIntent(project, local);
+        assertEquals(Optional.of(local), ReviewTabOpener.recordedIntent(project));
+    }
+
+    /** The PR row's identity is the row's URL; a row without one, or whose URL names another PR, is no identity. */
+    @Test
+    void thePullRequestRowIdentityComesOnlyFromItsUrl() {
+        assertEquals(PR, PullRequestReview.pullRequestTarget(row(7, Optional.of("https://github.com/acme/app/pull/7"))));
+        assertThrows(IllegalArgumentException.class,
+                () -> PullRequestReview.pullRequestTarget(row(7, Optional.empty())));
+        assertThrows(IllegalArgumentException.class,
+                () -> PullRequestReview.pullRequestTarget(row(7, Optional.of("https://github.com/acme/app/pull/8"))));
+        assertThrows(IllegalArgumentException.class,
+                () -> PullRequestReview.pullRequestTarget(row(7, Optional.of("not a url"))));
+    }
+
+    private static OpenPullRequest row(int number, Optional<String> url) {
+        return new OpenPullRequest(number, "title", "pr-" + number, "main", false, Optional.empty(), url, false,
+                Set.of());
     }
 
     // ---- the empty-review offer -------------------------------------------

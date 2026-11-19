@@ -153,6 +153,39 @@ class DiffServiceUntrackedTest {
         return repo;
     }
 
+    @Test
+    void rulesQueriesRunWithRealGitTagUntrackedAndStagedExactlyAsDiffServiceDoes(@TempDir Path repoDir)
+            throws Exception {
+        Path repo = initCommittedRepo(repoDir, "one\ntwo\n");
+        Files.writeString(repo.resolve("New.java"), "class New {}\n");
+        Files.writeString(repo.resolve("Staged.java"), "class Staged {}\n");
+        runGit(repo, "add", "Staged.java");
+
+        String untrackedOut = gitOutput(GitReviewQueryRules.untrackedCommand("git", repo));
+        String stagedOut = gitOutput(GitReviewQueryRules.stagedCommand("git", repo));
+        String diffOut = gitOutput(GitReviewQueryRules.diffCommand(
+                "git", repo, DiffScope.WORKING_TREE, "main", DiffService.DEFAULT_CONTEXT_LINES, () -> "unused"));
+
+        assertEquals(java.util.Set.of("New.java"), GitReviewQueryRules.parseNulPaths(untrackedOut));
+        assertEquals(java.util.Set.of("Staged.java"), GitReviewQueryRules.parseNulPaths(stagedOut));
+        UnifiedDiff viaRules = GitReviewQueryRules.parse(diffOut,
+                GitReviewQueryRules.parseNulPaths(stagedOut), GitReviewQueryRules.parseNulPaths(untrackedOut));
+        // Tracked-only diff: the staged file is present and tagged, the untracked one is not
+        // (the intent-to-add pass is DiffService's local-only index handling).
+        assertEquals(1, viaRules.files().size());
+        assertTrue(viaRules.files().get(0).staged());
+        assertFalse(viaRules.files().get(0).untracked());
+    }
+
+    private static String gitOutput(java.util.List<String> command) throws IOException, InterruptedException {
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes());
+        if (process.waitFor() != 0) {
+            throw new IOException(String.join(" ", command) + " failed: " + output);
+        }
+        return output;
+    }
+
     private static void runGit(Path repo, String... args) throws IOException, InterruptedException {
         java.util.List<String> command = new java.util.ArrayList<>();
         command.add("git");

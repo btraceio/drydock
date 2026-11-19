@@ -8,8 +8,10 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
 import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.McpDelivery;
+import app.drydock.agent.api.RemoteLaunchSupport;
 import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
@@ -333,6 +335,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         command.append(stdioMcpConfigFlag(caps, c.stdioMcpServers()));
         command.append(planModeFlag(caps, c.readOnly()));
         command.append(addDirFlags(c.launchResources()));
+        command.append(workflowReadRootFlags(c.workflowAccess(), c.launchResources(), c.evalMode()));
         command.append(pluginDirFlag(c.launchResources(),
                 c.mcp().flatMap(McpAccess::credentialFile)));
         // The task goes last, as claude's positional [prompt], so the session
@@ -343,7 +346,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (c.evalMode()) {
             return LaunchPlan.of(
                     wrapEval(command.toString(), c.sessionId(), c.workingDirectory(),
-                            c.mcp().flatMap(McpAccess::credentialFile)),
+                            c.mcp().flatMap(McpAccess::credentialFile),
+                            c.workflowAccess().flatMap(LocalWorkflowAccess::evalNamespace)),
                     sessionIdUsed);
         }
         return LaunchPlan.of(command.toString(), sessionIdUsed);
@@ -379,6 +383,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
                 + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly())
                 + addDirFlags(r.launchResources())
+                + workflowReadRootFlags(r.workflowAccess(), r.launchResources(), r.evalMode())
                 + pluginDirFlag(r.launchResources(), r.mcp().flatMap(McpAccess::credentialFile));
         // Eval runs inside a container whose PATH has `claude`, not the host path.
         String binary = r.evalMode() ? "claude" : claudeBinary();
@@ -407,7 +412,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
             // the token.
             String key = r.agentSessionId().orElse("");
             return LaunchPlan.of(wrapEval(inner, key, r.workingDirectory(),
-                    r.mcp().flatMap(McpAccess::credentialFile)), false);
+                    r.mcp().flatMap(McpAccess::credentialFile),
+                    r.workflowAccess().flatMap(LocalWorkflowAccess::evalNamespace)), false);
         }
         return LaunchPlan.of(inner, false);
     }
@@ -554,9 +560,11 @@ public final class ClaudeAgentProvider implements AgentProvider {
      * no capability probe decides anything here — the flags describe the
      * <em>Mac's</em> claude, not the box's — so {@code -n} and {@code
      * --session-id} are always rendered and read-only always gets plan mode.
-     * No local-only surface is emitted: no settings file, no mcp-config,
-     * no PATH injection, no add-dirs (the host-path refusal above already
-     * covers the directories), no plugin-dir. {@code --session-id} is the
+     * No local-only surface is emitted: no settings file, no host
+     * mcp-config, no PATH injection, no host add-dirs (the host-path refusal
+     * above already covers the directories), no plugin-dir. The only
+     * exception is the typed {@link RemoteLaunchSupport} (remote bridge
+     * config and private namespace read dirs), rendered only when present. {@code --session-id} is the
      * generated UUID, so it appears literally in the plan and the launch
      * persists {@code agentSessionId}.</p>
      */
@@ -569,6 +577,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (c.readOnly()) {
             agentExec.append(" --permission-mode plan");
         }
+        agentExec.append(remoteSupportFlags(c.remoteLaunchSupport()));
         c.initialPrompt().ifPresent(prompt -> agentExec
                 .append(" -- ").append(AgentCommands.shellQuote(prompt)));
         return LaunchPlan.of(persistentSessionCommand(c.remote().get(), c.persistence().get(),
@@ -594,10 +603,31 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (r.readOnly()) {
             agentExec.append(" --permission-mode plan");
         }
+        agentExec.append(remoteSupportFlags(r.remoteLaunchSupport()));
         r.resumePrompt().ifPresent(prompt -> agentExec
                 .append(" -- ").append(AgentCommands.shellQuote(prompt)));
         return LaunchPlan.of(persistentSessionCommand(r.remote().get(), r.persistence().get(),
                 agentExec.toString()), false);
+    }
+
+    /**
+     * The typed remote surface as options, only when {@link RemoteLaunchSupport}
+     * is present: {@code --mcp-config <remote bridge JSON path>} for a review
+     * connection and one narrow {@code --add-dir <remote dir>} per private
+     * workflow-namespace read reference. The components are independent; an
+     * absent one renders nothing. All values are remote path text, never a
+     * host path, and no {@code --plugin-dir} or task guidance is added. The
+     * host McpAccess/LaunchResources refusals have already run in the callers.
+     */
+    private static String remoteSupportFlags(Optional<RemoteLaunchSupport> support) {
+        StringBuilder flags = new StringBuilder();
+        support.ifPresent(s -> {
+            s.reviewConnection().ifPresent(connection -> flags.append(" --mcp-config ")
+                    .append(AgentCommands.shellQuote(connection.mcpConfigPath())));
+            s.workflowAccess().ifPresent(access -> access.readReferences().forEach(reference ->
+                    flags.append(" --add-dir ").append(AgentCommands.shellQuote(reference))));
+        });
+        return flags.toString();
     }
 
     /**
@@ -632,9 +662,12 @@ public final class ClaudeAgentProvider implements AgentProvider {
      * runs it inside the eval container. Throws if the container setup is
      * missing (ddtool or docker unavailable): an eval session that cannot
      * be containerized fails loudly rather than silently shipping an
-     * unauthenticated host launch.
+     * unauthenticated host launch. A present {@code workflowNamespace} (from the
+     * typed {@link LocalWorkflowAccess}, never from launch resources) is mounted
+     * read-only through the container's dedicated overload.
      */
-    private String wrapEval(String innerCommand, String sessionKey, Path worktree, Optional<Path> mcpConfig) {
+    private String wrapEval(String innerCommand, String sessionKey, Path worktree, Optional<Path> mcpConfig,
+                            Optional<String> workflowNamespace) {
         EvalSetup setup = evalContainer.setupFor(sessionKey).orElseThrow(() -> new IllegalStateException(
                 "Eval session " + sessionKey + " has no container setup; ddtool or docker unavailable"));
         Optional<Path> settingsFile = activityReporter.settingsFile();
@@ -643,7 +676,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
         }
         try {
             return evalContainer.wrap(setup, innerCommand, worktree, mcpConfig,
-                    settingsFile.get().getParent(), activityDirectory);
+                    settingsFile.get().getParent(), activityDirectory, workflowNamespace);
         } catch (IOException e) {
             throw new IllegalStateException("Could not write eval entrypoint: " + e.getMessage(), e);
         }
@@ -674,6 +707,32 @@ public final class ClaudeAgentProvider implements AgentProvider {
         StringBuilder flags = new StringBuilder();
         for (Path dir : resources.get().extraDirectories()) {
             flags.append(" --add-dir ").append(AgentCommands.shellQuote(dir.toString()));
+        }
+        return flags.toString();
+    }
+
+    /**
+     * The local workflow read roots as {@code --add-dir} options, unioned
+     * into the host rendering through this separate typed path: they are
+     * never part of {@link LaunchResources}, so the task-resource and eval
+     * refusals ({@link #requestsHostPathResource}) neither see nor change
+     * them. A root already rendered by {@link #addDirFlags} is not repeated.
+     * Empty for no access, for an access carrying only an eval namespace,
+     * and for eval launches -- the container cannot see host paths and its
+     * namespace mount is not a Claude flag. Remote builders return before
+     * this point. Adds no {@code --plugin-dir} and no guidance.
+     */
+    private static String workflowReadRootFlags(Optional<LocalWorkflowAccess> access,
+            Optional<LaunchResources> resources, boolean evalMode) {
+        if (evalMode || access.isEmpty()) {
+            return "";
+        }
+        List<Path> already = resources.map(LaunchResources::extraDirectories).orElse(List.of());
+        StringBuilder flags = new StringBuilder();
+        for (Path root : access.get().readRoots()) {
+            if (!already.contains(root)) {
+                flags.append(" --add-dir ").append(AgentCommands.shellQuote(root.toString()));
+            }
         }
         return flags.toString();
     }
@@ -743,7 +802,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
      *
      * <p>Only reached after each builder's remote early-return: {@code claude}
      * runs on the remote host and cannot reach this machine's loopback
-     * address, so a remote session never receives a local config path.</p>
+     * address, so a remote session never receives a local config path; its remote bridge
+     * config arrives only through {@link RemoteLaunchSupport}.</p>
      */
     private static String mcpConfigFlag(ClaudeCapabilities caps, Optional<Path> mcpConfig) {
         if (!caps.supportsMcpConfig() || mcpConfig.isEmpty()) {

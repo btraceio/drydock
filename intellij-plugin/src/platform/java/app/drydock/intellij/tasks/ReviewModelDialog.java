@@ -3,6 +3,8 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.Agent;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ModelTiers;
+import app.drydock.intellij.tasks.WorkflowSourceLabel.Provenance;
+import app.drydock.sdlc.SelectedWorkflow.SourceDescriptor;
 
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.DialogWrapper;
@@ -10,9 +12,11 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
 import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
 
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.Action;
 import javax.swing.Box;
 import javax.swing.ButtonGroup;
 import javax.swing.JComponent;
@@ -46,6 +50,12 @@ import java.util.function.Predicate;
  * without subagents, or a review whose custom template replaces that
  * instruction, sees the starting-model row alone and records no tiers.</p>
  *
+ * <p>The dialog never edits a prompt. It can show the effective workflow
+ * source of the invocation ({@link SourceIndicator}, set and refreshed through
+ * {@link #refreshSource}); a refresh rewrites that label only, never the
+ * picked harness, model or tiers. For a running session the dialog says that
+ * the model picked here cannot change the agent already running.</p>
+ *
  * <p>The review instruction never spends MID: its row is there because the
  * tiers are remembered as one set per harness, shared with the Triage and
  * Implement tasks that do spend it, and the row is labelled so.</p>
@@ -61,6 +71,9 @@ final class ReviewModelDialog extends DialogWrapper {
     private final ModelField strongField;
     private final ModelField midField;
     private final ModelField lowField;
+    private final boolean runningSession;
+    private final JBLabel sourceLabel = new JBLabel();
+    private final JBLabel runningNote = new JBLabel();
     private final Map<AgentKind, JBRadioButton> agentButtons = new LinkedHashMap<>();
     /** Created in {@code createCenterPanel}, where the agent row is at hand. */
     private JPanel tierRows;
@@ -69,6 +82,16 @@ final class ReviewModelDialog extends DialogWrapper {
     private AgentKind acceptedAgent;
     private Optional<String> acceptedModel;
     private Optional<ModelTiers> acceptedTiers;
+
+    /** The effective source shown at invocation; {@code source} is read only for PROJECT. */
+    record SourceIndicator(Provenance provenance, String project, Optional<SourceDescriptor> source,
+                           boolean edited) {
+        String text() {
+            SourceDescriptor descriptor = source.orElse(null);
+            return edited ? WorkflowSourceLabel.edited(provenance, project, descriptor)
+                    : WorkflowSourceLabel.of(provenance, project, descriptor);
+        }
+    }
 
     /**
      * @param preselected   the flow's default harness (the repository's
@@ -81,7 +104,23 @@ final class ReviewModelDialog extends DialogWrapper {
                       Function<AgentKind, ModelTiers> lastUsedTiers,
                       Function<AgentKind, List<String>> suggestions,
                       Predicate<AgentKind> supportsSubagents) {
+        this(project, agents, preselected, lastUsedModel, lastUsedTiers, suggestions, supportsSubagents,
+                Optional.empty(), false);
+    }
+
+    /**
+     * @param source         the effective workflow source to show, if any
+     * @param runningSession whether Run joins an already-running agent, which a
+     *                       newly picked model cannot change
+     */
+    ReviewModelDialog(Project project, List<Agent> agents, AgentKind preselected,
+                      Function<AgentKind, Optional<String>> lastUsedModel,
+                      Function<AgentKind, ModelTiers> lastUsedTiers,
+                      Function<AgentKind, List<String>> suggestions,
+                      Predicate<AgentKind> supportsSubagents,
+                      Optional<SourceIndicator> source, boolean runningSession) {
         super(project, true);
+        this.runningSession = runningSession;
         this.agents = List.copyOf(agents);
         this.preselected = preselected;
         this.lastUsedModel = lastUsedModel;
@@ -94,6 +133,36 @@ final class ReviewModelDialog extends DialogWrapper {
         lowField = new ModelField(suggestions);
         init();
         applyAgent(preselected);
+        refreshSource(source);
+        if (runningSession) {
+            setOKButtonText("Run (keeps the running agent's model)");
+        }
+    }
+
+    /** Re-labels the workflow source; the picked harness, model and tiers are untouched. */
+    void refreshSource(Optional<SourceIndicator> source) {
+        sourceLabel.setText(source.map(s -> "Workflow source: " + s.text()).orElse(""));
+        sourceLabel.setVisible(source.isPresent());
+    }
+
+    /** The shown source line; empty when no source is shown. */
+    String sourceLabelText() {
+        return sourceLabel.isVisible() ? sourceLabel.getText() : "";
+    }
+
+    /** The starting-model picker, for the tests to type into. */
+    ModelField modelField() {
+        return modelField;
+    }
+
+    /** The Run button's text. */
+    String runText() {
+        return String.valueOf(getOKAction().getValue(Action.NAME));
+    }
+
+    /** The running-session note; empty when Run starts a new agent. */
+    String runningNoteText() {
+        return runningNote.isVisible() ? runningNote.getText() : "";
     }
 
     @Override
@@ -126,10 +195,17 @@ final class ReviewModelDialog extends DialogWrapper {
         tierRows.add(tierRow("LOW model:", lowField, labelWidth));
         tierRows.setVisible(tiersShown(selectedAgent()));
 
+        sourceLabel.setForeground(UIUtil.getContextHelpForeground());
+        runningNote.setForeground(UIUtil.getContextHelpForeground());
+        runningNote.setText("A new model cannot change an already-running agent; it applies to new sessions only.");
+        runningNote.setVisible(runningSession);
+
         return FormBuilder.createFormBuilder()
                 .addLabeledComponent("Harness:", agentsRow)
                 .addLabeledComponent("Starting model:", modelField)
                 .addComponent(tierRows, JBUI.scale(4))
+                .addComponent(sourceLabel, JBUI.scale(4))
+                .addComponent(runningNote, JBUI.scale(2))
                 .getPanel();
     }
 

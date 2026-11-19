@@ -22,7 +22,10 @@ import app.drydock.mcp.McpSessionRegistry.Spawn;
 import app.drydock.mcp.McpToolRouter;
 import app.drydock.mcp.BabysitToolContext;
 import app.drydock.mcp.BabysitTools;
+import app.drydock.mcp.RemoteAuthorizationPermit;
+import app.drydock.mcp.RemoteMcpTransportPolicy;
 import app.drydock.mcp.TaskTools;
+import app.drydock.mcp.ReviewInvocationBindings;
 import app.drydock.mcp.WorkspaceMcpSessionContext;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.PendingQuestions;
@@ -77,6 +80,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     /** The router {@link #server} serves; the task-capability query reads its serving set. */
     private final McpToolRouter router;
     private final SessionReviewScopeResolver scopeResolver;
+    /** The local router context's presentation bindings; the workbench installs one at commit. */
+    private final ReviewInvocationBindings invocationBindings;
     private final GhCliService pullRequests;
     /** The pull request lane's transport: gh checks and the review POST (W5e). */
     private final GitHubReviewService reviews;
@@ -140,6 +145,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 (session, draft) -> notServed("session_handoff"),
                 (session, draft) -> notServed("session_handoff"),
                 pendingQuestions);
+        invocationBindings = context.invocationBindings();
         McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS_AND_RENAME);
         this.router = router;
         server = new McpServer(mcpRegistry, router);
@@ -270,6 +276,7 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 (session, draft) -> notServed("session_handoff"),
                 (session, draft) -> notServed("session_handoff"),
                 pendingQuestions);
+        invocationBindings = context.invocationBindings();
         McpToolRouter router;
         if (babysitContext == null) {
             router = new McpToolRouter(context, mcpRegistry, reviewRenameAndTaskTools(), taskTools);
@@ -285,6 +292,29 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         reviews = new GitHubReviewService();
         scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
                 scopeRegistry, sessions, this::pullRequestCarriedBy);
+    }
+
+    /**
+     * The remote endpoint over this backend's SAME stores and scope registry:
+     * an independent registry/router/server serving only the review tools and
+     * {@code session_rename}, through {@code renamer} and never the local
+     * renamer. Session start, reclaim and handoff are not served there.
+     */
+    public RemoteMcpComposition remoteComposition(
+            Supplier<List<ManagedAgentSession>> sessions, Supplier<List<Repository>> repositories,
+            AgentRegistry agentRegistry, RemoteMcpComposition.RemoteRenamer renamer,
+            RemoteMcpTransportPolicy policy, RemoteAuthorizationPermit.Seams seams) {
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessions, repositories, annotationStore, tourStore, scopeRegistry, agentRegistry,
+                diffService, gitStatusService, worktreeService, UserConfig::load,
+                (worktree, prompt) -> notServed("session_start"),
+                RemoteMcpComposition.renameAdapter(renamer),
+                (session, conversation) -> notServed("session_reclaim"),
+                (session, draft) -> notServed("session_handoff"),
+                (session, draft) -> notServed("session_handoff"),
+                pendingQuestions);
+        return new RemoteMcpComposition(annotationStore, tourStore, pendingQuestions, selectionAsks,
+                scopeRegistry, context, policy, seams);
     }
 
     /**
@@ -417,6 +447,16 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         return scopeResolver;
     }
 
+    /** The exact-scope seam: a scope is addressable only by the session it is bound to. */
+    public ReviewRequest.ScopeAuthorizer scopeAuthorizer() {
+        return (session, scopeId) -> scopeRegistry.isAddressableBy(scopeId, session);
+    }
+
+    /** The invocation bindings the router reads; a request installs one just before its commit. */
+    public ReviewInvocationBindings invocationBindings() {
+        return invocationBindings;
+    }
+
     public void flushPendingSaves() {
         annotationStore.flushPendingSaves();
         tourStore.flushPendingSaves();
@@ -447,8 +487,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         }
     }
 
-    /** For tests: the scope registry. Package-private; the Review tab (T13) is wired through it. */
-    ReviewScopeRegistry scopeRegistry() {
+    /** The scope registry; public so the application-level remote data source shares the backend's (T61). */
+    public ReviewScopeRegistry scopeRegistry() {
         return scopeRegistry;
     }
 

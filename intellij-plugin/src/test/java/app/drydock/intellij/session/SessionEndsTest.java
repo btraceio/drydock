@@ -18,12 +18,28 @@ import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.domain.WorkspaceUiState;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
+import app.drydock.intellij.remote.RemoteCredentialGenerations;
+import app.drydock.intellij.remote.RemoteForwardOwner;
+import app.drydock.intellij.remote.RemoteReviewService;
+import app.drydock.intellij.review.ReviewBackend;
+import app.drydock.review.RemoteReviewDataSource;
+import app.drydock.review.RemoteSnapshotCache;
+import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.domain.SshRemote;
+import app.drydock.workspace.RemoteEnrollmentEvidence.Verdict;
+import java.time.Clock;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 import app.drydock.process.SshCommandBuilder;
+import app.drydock.sdlc.ResourceManifestJournal;
+import app.drydock.sdlc.SessionWorkflowResourceOwner;
+import app.drydock.sdlc.WorkflowResourceLease;
 import app.drydock.state.ApplicationStateRepository;
 import app.drydock.workspace.BoxShell;
 import app.drydock.workspace.CommandRunner;
@@ -31,8 +47,10 @@ import app.drydock.workspace.CommandRunner;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -41,6 +59,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
@@ -56,6 +75,7 @@ import static app.drydock.intellij.workspace.RemoteSessionLiveness.State.ALIVE;
 import static app.drydock.intellij.workspace.RemoteSessionLiveness.State.DEAD;
 import static app.drydock.intellij.workspace.RemoteSessionLiveness.State.UNKNOWN;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The remote half of the end-of-agent settle (workspace persistent
@@ -258,13 +278,24 @@ class SessionEndsTest {
         final SessionEnds ends;
 
         private Harness(Supplier<AgentRegistry> registry, List<ManagedAgentSession> sessions) {
+            this(registry, sessions, () -> null);
+        }
+
+        private Harness(Supplier<AgentRegistry> registry, List<ManagedAgentSession> sessions,
+                        Supplier<SessionWorkflowResourceOwner> owner) {
+            this(registry, sessions, owner, () -> null);
+        }
+
+        private Harness(Supplier<AgentRegistry> registry, List<ManagedAgentSession> sessions,
+                        Supplier<SessionWorkflowResourceOwner> owner,
+                        Supplier<RemoteReviewService> remoteReview) {
             repository.state = new ApplicationState(List.of(), new ArrayList<>(sessions), List.of(),
                     WorkspaceUiState.empty(), List.of());
             this.store = ApplicationStateStore.forRepository(repository);
             this.claims = new LaunchClaims(id -> liveExecution.get());
             this.clientEnds = new FakeClientEnds(liveExecution::get);
             this.ends = new SessionEnds(() -> store, registry, executor, mcpAccess, claims,
-                    new BoxShell(runner), () -> liveness, clientEnds);
+                    new BoxShell(runner), () -> liveness, clientEnds, owner, remoteReview);
         }
     }
 
@@ -273,6 +304,13 @@ class SessionEndsTest {
             throw new IllegalStateException("the remote settle never consults the agent registry");
         };
         return new Harness(never, List.of(sessions));
+    }
+
+    private static Harness localHarness(SessionWorkflowResourceOwner owner, ManagedAgentSession... sessions) {
+        AgentRegistry registry = new AgentRegistry(List.of(),
+                new AgentContext(Path.of("build/unused-state"), Path.of("build/unused-activity"),
+                        new DirectExecutor()));
+        return new Harness(() -> registry, List.of(sessions), () -> owner);
     }
 
     /** A local harness with a real (empty) registry: the local half's late bind may look at it. */
@@ -656,5 +694,253 @@ class SessionEndsTest {
         assertEquals(Optional.empty(), harness.liveness.state(id), "no liveness exists for local rows");
         assertEquals(List.of(id), harness.mcpAccess.released, "the local release still runs");
         assertEquals(List.of(), harness.runner.calls, "no box command ever runs for a local row");
+    }
+
+    // ---- retained workflow resources (T14: INV-32, INV-33, AC-26) ----------------------------
+
+    @TempDir
+    Path tmp;
+
+    private final List<String> released = new CopyOnWriteArrayList<>();
+    private final List<String> cleanedLocal = new CopyOnWriteArrayList<>();
+    private final SessionWorkflowResourceOwner.Cleaner cleaner = new SessionWorkflowResourceOwner.Cleaner() {
+        @Override public CompletableFuture<Void> deleteLocal(ResourceManifestJournal.Lease lease) {
+            cleanedLocal.add(lease.session() + "/" + lease.bundleId());
+            return CompletableFuture.completedFuture(null);
+        }
+        @Override public CompletableFuture<Void> deleteRemote(ResourceManifestJournal.Debt target) {
+            return CompletableFuture.failedFuture(new IOException("unreachable"));
+        }
+    };
+
+    private SessionWorkflowResourceOwner owner() {
+        return new SessionWorkflowResourceOwner(ResourceManifestJournal.open(tmp.resolve("sdlc/manifest.rmj")),
+                Runnable::run, cleaner);
+    }
+
+    private void retain(SessionWorkflowResourceOwner owner, ManagedSessionId id, String bundle, long remoteBytes) {
+        WorkflowResourceLease lease = new WorkflowResourceLease(() -> {
+            released.add(id + "/" + bundle);
+            return CompletableFuture.completedFuture(null);
+        });
+        assertEquals(SessionWorkflowResourceOwner.Outcome.ACCEPTED, owner.accept(id.toString(), bundle, 10,
+                remoteBytes, lease));
+    }
+
+    @Test
+    void forgetReleasesOnlyItsOwnNamespaceAndRecordsRemoteDebt() throws Exception {
+        ManagedSessionId gone = ManagedSessionId.newId();
+        ManagedSessionId stays = ManagedSessionId.newId();
+        SessionWorkflowResourceOwner owner = owner();
+        retain(owner, gone, "a", 5);
+        retain(owner, stays, "b", 0);
+        Harness harness = localHarness(owner, localRow(gone), localRow(stays));
+
+        harness.ends.sessionRemoved(gone).get(5, TimeUnit.SECONDS);
+
+        assertEquals(List.of(gone + "/a"), released, "local resources are released, only for the forgotten session");
+        assertEquals(List.of(stays.toString()), owner.requireRetained(stays.toString()).stream()
+                .map(l -> l.session()).toList());
+        assertThrows(IllegalStateException.class, () -> owner.requireRetained(gone.toString()),
+                "a session with outstanding remote debt is not resumable");
+        owner.flush();
+        ResourceManifestJournal.Recovery persisted = ResourceManifestJournal.recover(tmp.resolve("sdlc/manifest.rmj"));
+        assertEquals(1, persisted.debts().size(), "the failed remote cleanup is recorded, never treated as deleted");
+        assertEquals(gone.toString(), persisted.debts().get(0).session());
+    }
+
+    @Test
+    void detachStopAndCloseKeepRetainedResources() throws Exception {
+        ManagedSessionId local = ManagedSessionId.newId();
+        ManagedSessionId remote = ManagedSessionId.newId();
+        SessionWorkflowResourceOwner owner = owner();
+        retain(owner, local, "a", 0);
+        retain(owner, remote, "b", 0);
+        Harness harness = new Harness(() -> { throw new IllegalStateException("remote settle needs no registry"); },
+                List.of(remoteRow(remote, SessionStatus.RUNNING)), () -> owner);
+        Harness localSide = localHarness(owner, localRow(local));
+
+        localSide.ends.executionTerminated(local, true, null);     // Stop without Forget
+        localSide.ends.executionTerminated(local, false, 0);       // process end / terminal detach
+        harness.clientEnds.beginClose(remote);
+        harness.ends.executionTerminated(remote, false, null);     // console / tab close of a remote client
+
+        assertEquals(List.of(), released);
+        assertEquals(List.of(), cleanedLocal);
+        assertEquals(1, owner.requireRetained(local.toString()).size());
+        assertEquals(1, owner.requireRetained(remote.toString()).size());
+    }
+
+    @Test
+    void startupRestoresRetainedResourcesAndAForgetAfterRestartCleansThemWithoutALiveLease() throws Exception {
+        ManagedSessionId id = ManagedSessionId.newId();
+        SessionWorkflowResourceOwner before = owner();
+        retain(before, id, "a", 0);
+        before.flush();
+
+        SessionWorkflowResourceOwner restarted = owner();
+        restarted.recover(ResourceManifestJournal.recover(tmp.resolve("sdlc/manifest.rmj"))).get(5, TimeUnit.SECONDS);
+        assertEquals("a", restarted.requireRetained(id.toString()).get(0).bundleId());
+        Harness harness = localHarness(restarted, localRow(id));
+
+        harness.ends.sessionRemoved(id).get(5, TimeUnit.SECONDS);
+
+        assertEquals(List.of(id + "/a"), cleanedLocal, "no in-memory lease after restart: the cleaner deletes");
+        assertEquals(List.of(), released);
+        assertThrows(IllegalStateException.class, () -> restarted.requireRetained(id.toString()));
+    }
+
+    @Test
+    void aRemovalWithNoOwnerOrAShutDownExecutorNeverFailsTheCaller() throws Exception {
+        ManagedSessionId id = ManagedSessionId.newId();
+        localHarness(localRow(id)).ends.sessionRemoved(id).get(5, TimeUnit.SECONDS);
+        SessionWorkflowResourceOwner owner = owner();
+        retain(owner, id, "a", 0);
+        Harness harness = localHarness(owner, localRow(id));
+        harness.executor.shutdown();
+
+        harness.ends.sessionRemoved(id).get(5, TimeUnit.SECONDS);
+
+        assertEquals(List.of(), released, "nothing is deleted when the release could not run");
+    }
+
+    // ---- remote transport routing (T61: INV-33, INV-41, AC-31) ---------------------------------
+
+    private static final class Handle implements RemoteForwardOwner.ForwardHandle {
+        final CompletableFuture<Integer> exit = new CompletableFuture<>();
+        final AtomicInteger closes = new AtomicInteger();
+        @Override public CompletableFuture<Integer> exit() { return exit; }
+        @Override public void close() { closes.incrementAndGet(); exit.complete(143); }
+    }
+
+    private final List<Handle> handles = new CopyOnWriteArrayList<>();
+    private ExecutorService remoteExecutor;
+    private ReviewBackend remoteBackend;
+    private RemoteCredentialGenerations generations;
+    private RemoteReviewService remote;
+
+    private RemoteReviewService remoteService() throws Exception {
+        remoteExecutor = Executors.newSingleThreadExecutor();
+        AgentRegistry registry = new AgentRegistry(List.of(),
+                new AgentContext(tmp, tmp.resolve("activity"), remoteExecutor));
+        remoteBackend = new ReviewBackend(tmp, List::of, List::of, registry);
+        RemoteSnapshotCache cache = new RemoteSnapshotCache();
+        int[] port = {41000};
+        long[] now = {0};
+        RemoteForwardOwner forwards = new RemoteForwardOwner(argv -> {
+            Handle h = new Handle();
+            handles.add(h);
+            return h;
+        }, (host, exclude) -> port[0]++, (id, host, p) -> true, () -> now[0], d -> now[0] += d.toNanos());
+        Path credentialDir = Files.createDirectories(tmp.resolve("creds"));
+        generations = new RemoteCredentialGenerations((argv, options, cap) -> new ProcessResult(0, "", ""),
+                credentialDir, Clock.systemUTC());
+        RemoteReviewDataSource data = new RemoteReviewDataSource(new SshRemote("box", "/repo"),
+                (argv, options, cap) -> { throw new IOException("no box"); }, new ReviewScopeRegistry(), cache,
+                new RemoteReviewDataSource.Helpers("git.py", "data.py"), "c", 1, Runnable::run);
+        remote = new RemoteReviewService(remoteBackend, new RemoteReviewService.Wiring(List::of, List::of, registry,
+                (id, title, permit) -> CompletableFuture.failedFuture(new IllegalStateException("unused"))),
+                data, cache, forwards, generations);
+        remote.start();
+        return remote;
+    }
+
+    @AfterEach
+    void closeRemote() {
+        if (remote != null) {
+            remote.close();
+            remoteBackend.close();
+            remoteExecutor.shutdownNow();
+        }
+    }
+
+    private RemoteReviewService.Session enroll(RemoteReviewService service, ManagedSessionId id) throws Exception {
+        RemoteReviewService.Session s = new RemoteReviewService.Session("box", "inst", id, "agent", "nonce", 1,
+                "/h.py", () -> new Verdict.Ready());
+        service.ensure(s);
+        return s;
+    }
+
+    private long liveHandles() {
+        return handles.stream().filter(h -> h.closes.get() == 0).count();
+    }
+
+    private Harness remoteHarnessWith(ManagedAgentSession... rows) {
+        return new Harness(() -> { throw new IllegalStateException("remote settle needs no registry"); },
+                List.of(rows), () -> null, () -> remote);
+    }
+
+    @Test
+    void detachCloseAliveAndUnconcludedOutcomesKeepEveryTransport() throws Exception {
+        RemoteReviewService service = remoteService();
+        ManagedSessionId closed = ManagedSessionId.newId();
+        ManagedSessionId alive = ManagedSessionId.newId();
+        ManagedSessionId killUnknown = ManagedSessionId.newId();
+        Harness harness = remoteHarnessWith(remoteRow(closed, SessionStatus.RUNNING),
+                remoteRow(alive, SessionStatus.RUNNING), remoteRow(killUnknown, SessionStatus.STOPPING));
+        enroll(service, closed);
+        enroll(service, alive);
+        enroll(service, killUnknown);
+        assertEquals(3, liveHandles());
+
+        harness.clientEnds.beginClose(closed);
+        harness.ends.executionTerminated(closed, false, null);          // console close is a detach
+        harness.ends.executionTerminated(alive, false, 0);              // probe: tmux still alive
+        harness.clientEnds.beginExplicitStop(killUnknown);
+        harness.clientEnds.stopVerdict(killUnknown, false);
+        harness.ends.executionTerminated(killUnknown, true, 0);         // kill did not conclude
+
+        assertEquals(3, liveHandles(), "no handle closed: console exit is not death");
+        assertEquals(3, generations.liveTokenCount());
+    }
+
+    @Test
+    void deathAndConfirmedStopReleaseOnlyTheirOwnSession() throws Exception {
+        RemoteReviewService service = remoteService();
+        ManagedSessionId dead = ManagedSessionId.newId();
+        ManagedSessionId stopped = ManagedSessionId.newId();
+        ManagedSessionId sibling = ManagedSessionId.newId();   // same box, untouched
+        Harness harness = remoteHarnessWith(remoteRow(dead, SessionStatus.RUNNING),
+                remoteRow(stopped, SessionStatus.STOPPING), remoteRow(sibling, SessionStatus.RUNNING));
+        enroll(service, dead);
+        enroll(service, stopped);
+        RemoteReviewService.Session live = enroll(service, sibling);
+        harness.runner.reply = new ProcessResult(1, "", "can't find session: " + SshCommandBuilder.tmuxSessionName(dead));
+
+        harness.ends.executionTerminated(dead, false, 0);
+        assertEquals(2, liveHandles());
+        assertEquals(2, generations.liveTokenCount());
+        assertTrue(generations.permitFor(dead).isEmpty());
+
+        harness.clientEnds.beginExplicitStop(stopped);
+        harness.clientEnds.stopVerdict(stopped, true);
+        harness.ends.executionTerminated(stopped, false, 0);
+
+        assertEquals(1, liveHandles(), "only the unrelated live agent's transport remains");
+        assertEquals(1, generations.liveTokenCount());
+        assertTrue(generations.permitFor(live.id()).isPresent());
+    }
+
+    @Test
+    void forgetRevokesTheTransportLocallyEvenWhenBoxDeletionFails() throws Exception {
+        RemoteReviewService service = remoteService();
+        ManagedSessionId id = ManagedSessionId.newId();
+        ManagedSessionId other = ManagedSessionId.newId();
+        enroll(service, id);
+        enroll(service, other);
+        SessionWorkflowResourceOwner owner = owner();
+        retain(owner, id, "a", 5);   // remote debt: deleteRemote fails ("unreachable")
+        Harness harness = new Harness(() -> { throw new IllegalStateException("unused"); },
+                List.of(remoteRow(id, SessionStatus.IDLE), remoteRow(other, SessionStatus.IDLE)),
+                () -> owner, () -> remote);
+
+        harness.ends.sessionRemoved(id).get(5, TimeUnit.SECONDS);
+
+        assertEquals(1, liveHandles());
+        assertEquals(1, generations.liveTokenCount());
+        assertTrue(generations.permitFor(id).isEmpty());
+        assertTrue(generations.permitFor(other).isPresent());
+        assertThrows(IllegalStateException.class, () -> owner.requireRetained(id.toString()),
+                "the failed box deletion is a recorded debt, not a live credential");
     }
 }

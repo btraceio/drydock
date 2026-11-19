@@ -12,10 +12,13 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
 import app.drydock.review.DiffSelection;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewDataSource;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
 import app.drydock.review.Triage;
 import com.intellij.diff.fragments.LineFragment;
+import com.intellij.diff.util.Side;
+import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +27,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.awt.EventQueue;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
@@ -34,6 +39,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
@@ -43,6 +49,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -740,5 +747,54 @@ class ReviewTabProviderTest {
                 List.of(onA, onBFinding),
                 new WorkbenchState.InboxChoice(InboxModel.Tab.TO_TRIAGE, InboxModel.Scope.FILE));
         assertEquals(List.of(onBFinding), state.inbox().cards().stream().map(InboxModel.Card::finding).toList());
+    }
+
+    /** The remote half: the provider hands loading/selection/lifecycle to the T71 controller (INV-60, INV-62). */
+    public static class RemoteDelegation extends BasePlatformTestCase {
+
+        private final List<CompletableFuture<ReviewDataSource.Result<ReviewScope>>> resolves = new ArrayList<>();
+        private final ReviewDataSource source = (ReviewDataSource) Proxy.newProxyInstance(
+                ReviewDataSource.class.getClassLoader(), new Class<?>[] {ReviewDataSource.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("resolve")) {
+                        CompletableFuture<ReviewDataSource.Result<ReviewScope>> f = new CompletableFuture<>();
+                        resolves.add(f);
+                        return f;
+                    }
+                    throw new AssertionError("unexpected " + method.getName());
+                });
+
+        private ReviewTabProvider provider() {
+            return new ReviewTabProvider(getProject(), (id, prompt) -> PromptOutcome.DELIVERED);
+        }
+
+        public void testRemoteScopeDelegatesToTheControllerAndReusesIt() {
+            ReviewTabProvider provider = provider();
+            provider.selectRemote(source, (task, delay) -> () -> { }, SESSION, "sel");
+            assertEquals(1, resolves.size());
+            assertEquals(RemoteReviewWorkbenchController.Freshness.LOADING, provider.remoteState.freshness());
+            assertEquals(Optional.of(SESSION), provider.remoteState.session());
+            provider.selectRemote(source, (task, delay) -> () -> { }, SESSION, "sel2");
+            assertEquals(2, resolves.size());
+        }
+
+        public void testDisposalFencesTheControllerAndALateSelectionStartsNothing() {
+            ReviewTabProvider provider = provider();
+            provider.selectRemote(source, (task, delay) -> () -> { }, SESSION, "sel");
+            ReviewScope scope = new ReviewScope("s", ReviewScope.Kind.BRANCH, ROOT, Optional.empty(), "main",
+                    "HEAD", Optional.empty(), Optional.empty(), Optional.empty());
+            provider.disposeContent();
+            RemoteReviewWorkbenchController.State before = provider.remoteState;
+            resolves.get(0).complete(new ReviewDataSource.Result.Ok<>(scope));
+            provider.selectRemote(source, (task, delay) -> () -> { }, SESSION, "late");
+            assertEquals(1, resolves.size());
+            assertSame(before, provider.remoteState);
+        }
+
+        public void testProviderDoesNotGrowBeyondItsBaseline() throws Exception {
+            Path file = Path.of("src/platform/java/app/drydock/intellij/review/ReviewTabProvider.java");
+            assertTrue(Files.readAllLines(file).size() <= 3006);
+            assertTrue(Files.size(file) <= 144_948);
+        }
     }
 }

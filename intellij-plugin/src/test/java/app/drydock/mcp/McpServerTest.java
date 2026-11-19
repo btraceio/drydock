@@ -21,6 +21,12 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.lang.reflect.Proxy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -697,5 +703,172 @@ class McpServerTest {
                         "unpaired high surrogate at " + i);
             }
         }
+    }
+
+    // ---- remote transport bounds (RemoteMcpTransportPolicy.REMOTE) ----
+
+    private static final String PING = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"%s}";
+
+    private McpServer remoteServer(RemoteMcpTransportPolicy policy, McpSessionContext ctx) throws Exception {
+        McpServer remote = new McpServer(registry, new McpToolRouter(ctx, registry), new McpActivityLog(), policy);
+        remote.start();
+        return remote;
+    }
+
+    private HttpResponse<String> postTo(McpServer target, String body) throws Exception {
+        return client.send(HttpRequest.newBuilder(URI.create(target.endpointUrl()))
+                .timeout(Duration.ofSeconds(10)).header(TOKEN_HEADER, token)
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static String paddedTo(int totalBytes) {
+        String base = PING.formatted(",\"pad\":\"\"");
+        return PING.formatted(",\"pad\":\"" + "a".repeat(totalBytes - base.length()) + "\"");
+    }
+
+    @Test
+    void remoteBodyAtTheLimitIsServedAndOneByteOverIsRefusedBeforeParsing() throws Exception {
+        try (McpServer remote = remoteServer(RemoteMcpTransportPolicy.REMOTE, context)) {
+            assertEquals(200, postTo(remote, paddedTo(1024 * 1024)).statusCode());
+            HttpResponse<String> over;
+            try {
+                over = postTo(remote, paddedTo(1024 * 1024 + 1));
+                assertEquals(413, over.statusCode());
+            } catch (java.io.IOException reset) {
+                // the server may close the connection while the client still writes; no 2xx either way
+            }
+            // an oversize body that is not even JSON is still a size refusal, not a parse error
+            try {
+                assertEquals(413, postTo(remote, "x".repeat(1024 * 1024 + 1)).statusCode());
+            } catch (java.io.IOException reset) {
+                // see above
+            }
+        }
+    }
+
+    @Test
+    void remoteJsonDepthAtTheLimitParsesAndOneDeeperIsAParseError() throws Exception {
+        try (McpServer remote = remoteServer(RemoteMcpTransportPolicy.REMOTE, context)) {
+            // the request object is depth 1; params nests the rest
+            String atLimit = PING.formatted(",\"params\":" + "[".repeat(31) + "]".repeat(31));
+            String over = PING.formatted(",\"params\":" + "[".repeat(32) + "]".repeat(32));
+            assertTrue(postTo(remote, atLimit).body().contains("result"));
+            assertTrue(postTo(remote, over).body().contains("-32700"));
+        }
+    }
+
+    @Test
+    void remoteRejectsBatchesButLocalKeepsItsParseError() throws Exception {
+        String batch = "[" + PING.formatted("") + "]";
+        try (McpServer remote = remoteServer(RemoteMcpTransportPolicy.REMOTE, context)) {
+            assertTrue(postTo(remote, batch).body().contains("-32600"));
+        }
+        assertTrue(post(batch).body().contains("-32700"));
+    }
+
+    @Test
+    void remoteResponseAtTheLimitIsServedAndOneByteOverIsAnExplicitError() throws Exception {
+        try (McpServer probe = remoteServer(new RemoteMcpTransportPolicy(true, 1024, 1_000_000, 8, 4, 4,
+                Duration.ofSeconds(5), true), context)) {
+            int length = postTo(probe, PING.formatted("")).body().getBytes(StandardCharsets.UTF_8).length;
+            try (McpServer exact = remoteServer(new RemoteMcpTransportPolicy(true, 1024, length, 8, 4, 4,
+                    Duration.ofSeconds(5), true), context);
+                 McpServer tight = remoteServer(new RemoteMcpTransportPolicy(true, 1024, length - 1, 8, 4, 4,
+                         Duration.ofSeconds(5), true), context)) {
+                assertTrue(postTo(exact, PING.formatted("")).body().contains("\"result\""));
+                String refused = postTo(tight, PING.formatted("")).body();
+                assertTrue(refused.contains("Response too large") && refused.contains("\"id\": 1"), refused);
+            }
+        }
+    }
+
+    /** A context whose repositories() blocks until released, to hold a handler in flight. */
+    private McpSessionContext blockingContext(CountDownLatch entered, CountDownLatch release) {
+        return (McpSessionContext) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{McpSessionContext.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("repositories")) {
+                        entered.countDown();
+                        release.await();
+                        return List.of();
+                    }
+                    return method.invoke(context, args);
+                });
+    }
+
+    private static final String REPOS = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"repos_list\",\"arguments\":{}}}";
+
+    @Test
+    void aBlockedHandlerHitsTheDeadlineAndCapsAreEnforcedUntilItReallyReturns() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        RemoteMcpTransportPolicy policy = new RemoteMcpTransportPolicy(true, 4096, 4096, 8, 2, 1,
+                Duration.ofMillis(400), true);
+        try (McpServer remote = remoteServer(policy, blockingContext(entered, release))) {
+            long start = System.nanoTime();
+            HttpResponse<String> timedOut = postTo(remote, REPOS);
+            assertTrue(timedOut.body().contains("-32001"), timedOut.body());
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 5000);
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            release.countDown();
+        }
+    }
+
+    @Test
+    void perSessionAndApplicationWideCapsRefuseTheExcessRequest() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        RemoteMcpTransportPolicy policy = new RemoteMcpTransportPolicy(true, 4096, 4096, 8, 2, 1,
+                Duration.ofSeconds(20), true);
+        try (McpServer remote = remoteServer(policy, blockingContext(entered, release))) {
+            var first = client.sendAsync(HttpRequest.newBuilder(URI.create(remote.endpointUrl()))
+                    .header(TOKEN_HEADER, token).POST(HttpRequest.BodyPublishers.ofString(REPOS)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(429, postTo(remote, REPOS).statusCode(), "same session, per-session cap 1");
+            // a second session fills the app-wide cap of 2; a third request is refused by it
+            ManagedSessionId other = ManagedSessionId.newId();
+            String otherToken = registry.mint(other, Spawn.ALLOWED);
+            var second = client.sendAsync(HttpRequest.newBuilder(URI.create(remote.endpointUrl()))
+                    .header(TOKEN_HEADER, otherToken).POST(HttpRequest.BodyPublishers.ofString(REPOS)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            Thread.sleep(500);
+            assertEquals(503, client.send(HttpRequest.newBuilder(URI.create(remote.endpointUrl()))
+                    .POST(HttpRequest.BodyPublishers.ofString(REPOS)).build(),
+                    HttpResponse.BodyHandlers.ofString()).statusCode(), "app-wide cap 2");
+            release.countDown();
+            assertEquals(200, first.get(5, TimeUnit.SECONDS).statusCode());
+            assertEquals(200, second.get(5, TimeUnit.SECONDS).statusCode());
+            // permits came back
+            assertEquals(200, postTo(remote, PING.formatted("")).statusCode());
+        }
+    }
+
+    @Test
+    void malformedUnauthenticatedTrafficIsRefusedAndNoTokenReachesTheLog() throws Exception {
+        StringBuilder logged = new StringBuilder();
+        Handler capture = new Handler() {
+            @Override public void publish(LogRecord r) {
+                logged.append(r.getMessage()).append(r.getThrown()).append(r.getParameters() == null ? "" : "p");
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        Logger log = Logger.getLogger(McpServer.class.getName());
+        log.addHandler(capture);
+        try (McpServer remote = remoteServer(RemoteMcpTransportPolicy.REMOTE, context)) {
+            assertTrue(postTo(remote, "{\"a\":1,\"a\":2,\"" + token + "\":").body().contains("-32700"));
+            assertEquals(401, client.send(HttpRequest.newBuilder(URI.create(remote.endpointUrl()))
+                    .header(TOKEN_HEADER, "wrong-" + token)
+                    .POST(HttpRequest.BodyPublishers.ofString(PING.formatted(""))).build(),
+                    HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals(404, client.send(HttpRequest.newBuilder(URI.create(remote.endpointUrl().replace("/mcp", "/other")))
+                    .POST(HttpRequest.BodyPublishers.ofString("{}")).build(),
+                    HttpResponse.BodyHandlers.ofString()).statusCode(), "no redirect, just 404");
+        } finally {
+            log.removeHandler(capture);
+        }
+        assertFalse(logged.toString().contains(token), logged.toString());
+        assertFalse(logged.toString().contains("Duplicate"), "parser text must not be logged remotely");
     }
 }

@@ -6,6 +6,7 @@ import app.drydock.domain.PullRequestTarget;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.JiraIssue;
+import app.drydock.sdlc.WorkflowTarget;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 import app.drydock.tasks.StartPlan;
@@ -36,7 +37,8 @@ import java.util.Optional;
 public record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
                             Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
                             Optional<String> tierRoles, Optional<Composed> composed,
-                            Optional<PullRequestTarget> targetPullRequest) {
+                            Optional<PullRequestTarget> targetPullRequest,
+                            Optional<WorkflowTarget> workflowTarget) {
 
     /** The single-project start's plan seed (T31a): the plan and its one segment the dialog composes from. */
     public record Composed(StartPlan plan, StartPlan.Segment segment) {
@@ -55,6 +57,17 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         Objects.requireNonNull(tierRoles, "tierRoles");
         Objects.requireNonNull(composed, "composed");
         Objects.requireNonNull(targetPullRequest, "targetPullRequest");
+        Objects.requireNonNull(workflowTarget, "workflowTarget");
+    }
+
+    /** Today's signature: a segment start is excluded, every other preset is free-form eligible. */
+    public NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+                         Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
+                         Optional<String> tierRoles, Optional<Composed> composed,
+                         Optional<PullRequestTarget> targetPullRequest) {
+        this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, tierRoles, composed,
+                targetPullRequest,
+                composed.isPresent() ? Optional.empty() : Optional.of(WorkflowTarget.FREE_FORM_PRE_PROMPT));
     }
 
     public NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
@@ -66,7 +79,7 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
 
     NewTaskPreset withPullRequest(OpenPullRequest pr) {
         return new NewTaskPreset(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn,
-                tierRoles, composed, pr.url().map(PullRequestTarget::fromUrl));
+                tierRoles, composed, pr.url().map(PullRequestTarget::fromUrl), workflowTarget);
     }
 
     NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
@@ -238,7 +251,8 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
                 .append(DONE_COMMON)
                 .append(GITHUB_DONE_PR);
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
-                Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES));
+                Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES), Optional.empty(),
+                Optional.empty(), Optional.of(WorkflowTarget.ISSUE_IMPLEMENT));
     }
 
     /**
@@ -256,7 +270,7 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         prompt.append(RESOLVE_CONFLICTS_STEPS.formatted(pullRequest.baseRefName(), pullRequest.headRefName()));
         return new NewTaskPreset("Resolve conflicts " + reference + " " + pullRequest.title(),
                 Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), Optional.empty(), true,
-                OpenIn.THIS_WINDOW);
+                OpenIn.THIS_WINDOW, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     private static final String RESOLVE_CONFLICTS_STEPS = """
@@ -281,7 +295,8 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         issue.url().ifPresent(url -> prompt.append("\n\n").append(url));
         prompt.append(TRIAGE_STEPS);
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.empty(),
-                Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES));
+                Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES),
+                Optional.empty(), Optional.empty(), Optional.of(WorkflowTarget.ISSUE_TRIAGE));
     }
 
     static NewTaskPreset implement(JiraIssue issue) {
@@ -295,7 +310,8 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
                 .append(DONE_COMMON)
                 .append(JIRA_DONE_PR);
         return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
-                Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES));
+                Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES), Optional.empty(),
+                Optional.empty(), Optional.of(WorkflowTarget.ISSUE_IMPLEMENT));
     }
 
     static NewTaskPreset triage(JiraIssue issue) {
@@ -303,7 +319,8 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         String prompt = "Triage Jira issue " + issue.key() + ": " + issue.summary()
                 + "\n\n" + issue.url() + TRIAGE_STEPS;
         return new NewTaskPreset(name, Optional.of(prompt), Optional.empty(),
-                Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES));
+                Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES),
+                Optional.empty(), Optional.empty(), Optional.of(WorkflowTarget.ISSUE_TRIAGE));
     }
 
     SessionMode mode(boolean readOnlySelected) {

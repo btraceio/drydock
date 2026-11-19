@@ -305,9 +305,12 @@ public final class SessionDialogs {
      * console after the fact: a prompt typed into a terminal the harness has
      * not started reading yet is swallowed, while the launch's own prompt is
      * the harness's to consume when it is ready. The resolver blocks while it
-     * resolves; it runs on the launch chain, off the EDT. It must not throw:
-     * a failure to resolve a prompt means starting the session without one,
-     * and the caller tells the human why.
+     * resolves; it runs on the launch chain, off the EDT. A DEFAULT-only
+     * prompt must not throw: failing to resolve it means starting the session
+     * without one, and the caller tells the human why. A configured (project
+     * methodology) review prompt instead returns a failed future, which fails
+     * the chain before the spawn: nothing starts and {@link
+     * #reportLaunchFailure} shows the refusal.
      *
      * <p>{@code model} -- the starting model the human picked, empty for the
      * harness's own default -- and {@code tiers} -- the subagent model tiers

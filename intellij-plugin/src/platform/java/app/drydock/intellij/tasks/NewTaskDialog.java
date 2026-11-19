@@ -11,8 +11,16 @@ import app.drydock.intellij.settings.DrydockConfigurable;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
+import app.drydock.intellij.tasks.WorkflowInvocationController.Prepared;
+import app.drydock.intellij.tasks.WorkflowInvocationController.Request;
+import app.drydock.intellij.tasks.WorkflowInvocationState.Accepted;
+import app.drydock.intellij.tasks.WorkflowInvocationState.Input;
+import app.drydock.intellij.tasks.WorkflowSourceLabel.Provenance;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.review.ReviewInstructions;
+import app.drydock.sdlc.SelectedWorkflow.SourceDescriptor;
+import app.drydock.sdlc.WorkflowResolution.WorkflowProblem;
+import app.drydock.sdlc.WorkflowTarget;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.NewTaskLauncherResult;
 
@@ -30,6 +38,7 @@ import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.DialogWrapper;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.openapi.ui.ValidationInfo;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.HyperlinkLabel;
@@ -65,6 +74,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -90,6 +100,16 @@ import java.util.stream.Stream;
 final class NewTaskDialog extends DialogWrapper {
 
     private static final int WIDTH = 540;
+
+    /**
+     * How a launch site wires one invocation's workflow preparation: the controller factory receives the
+     * dialog's UI callbacks; {@code request} describes the preparation for a harness; {@code source} is the
+     * selected source, queried when a preparation completes (empty: the Drydock default applies).
+     */
+    record Workflow(Function<WorkflowInvocationController.Ui, WorkflowInvocationController> controller,
+                    Function<AgentKind, Request> request, String project,
+                    Supplier<Optional<SourceDescriptor>> source) {
+    }
 
     /** The summary line wraps here, leaving room for its Change… link. */
     private static final int SUMMARY_WIDTH = 420;
@@ -128,6 +148,23 @@ final class NewTaskDialog extends DialogWrapper {
     private final JBRadioButton ownWindow = new JBRadioButton("Its own window");
     private final JBLabel warning = new JBLabel();
     private final JBLabel base = new JBLabel();
+
+    private final Optional<Workflow> workflow;
+    private WorkflowInvocationController workflowController;
+    /** The source indicator, or the bypass notice while the free-form text is blank or a native command. */
+    private final JBLabel sourceLabel = new JBLabel();
+    private final JBLabel workflowNote = new JBLabel();
+    private boolean preparing;
+    private boolean workflowReady;
+    /** The invalid-source/failed actions: the first is the fallback or Retry, the second always cancels. */
+    private final JButton primaryAction = new JButton();
+    private final JButton secondaryAction = new JButton("Cancel");
+    private Runnable primaryHandler = () -> { };
+    /** Set by the invalid-source fallback; labels the invocation DEFAULT_ONCE. */
+    private boolean defaultOnceChosen;
+    private boolean preparationStarted;
+    private boolean seeding;
+    private Optional<Accepted<Prepared>> acceptedWorkflow = Optional.empty();
 
     /** The save-later switch (P5): checked, the dialog saves a task file and starts nothing. */
     private final JCheckBox saveForLater = new JCheckBox("Save as task for later");
@@ -205,7 +242,13 @@ final class NewTaskDialog extends DialogWrapper {
 
     NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser,
                   NewTaskPreset preset) {
+        this(project, inputs, refChooser, preset, Optional.empty());
+    }
+
+    NewTaskDialog(Project project, NewTaskPlan.Inputs inputs, Optional<Supplier<Optional<String>>> refChooser,
+                  NewTaskPreset preset, Optional<Workflow> workflow) {
         super(project, true);
+        this.workflow = workflow.filter(w -> preset.workflowTarget().isPresent());
         this.project = project;
         this.inputs = inputs;
         this.refChooser = refChooser;
@@ -237,6 +280,18 @@ final class NewTaskDialog extends DialogWrapper {
         defaultWorkIn();
         regenerate();
         refresh();
+        this.workflow.ifPresent(w -> {
+            workflowController = w.controller().apply(new WorkflowUi());
+            primaryAction.addActionListener(e -> primaryHandler.run());
+            secondaryAction.addActionListener(e -> doCancelAction());
+            // A hand-off to the caller (acceptedWorkflow) transfers ownership; otherwise the dialog disposes it.
+            Disposer.register(getDisposable(), () -> {
+                if (acceptedWorkflow.isEmpty()) {
+                    workflowController.dispose();
+                }
+            });
+            syncWorkflow();
+        });
     }
 
     @Override
@@ -299,6 +354,8 @@ final class NewTaskDialog extends DialogWrapper {
         // is no remote launch, so the offer's gate re-runs on every switch
         // and clears a checked box the moment it stops holding.
         agentButtons.forEach((kind, button) -> button.addActionListener(e -> refresh()));
+        // A harness switch re-prepares for the new harness; edited text and model/tier picks are untouched.
+        agentButtons.forEach((kind, button) -> button.addActionListener(e -> restartWorkflow()));
 
         // The tier pickers share the suggestion pool with the starting model
         // (one harness, one model space) and seed from the repository's
@@ -361,12 +418,17 @@ final class NewTaskDialog extends DialogWrapper {
         instructions.getDocument().addDocumentListener(new DocumentAdapter() {
             @Override
             protected void textChanged(@NotNull DocumentEvent e) {
-                if (!updating) {
+                if (!updating && !seeding) {
                     instructionsEdited = true;
+                    // The free-form text is the user's task, not the methodology: only a generated seed is edited.
+                    if (workflowController != null && !freeForm()) {
+                        workflowController.edit(instructions.getText());
+                    }
                 }
                 defaultWorkIn();
                 regenerate();
                 refresh();
+                syncWorkflow();
             }
         });
 
@@ -380,6 +442,7 @@ final class NewTaskDialog extends DialogWrapper {
                 .addComponent(evalMode, JBUI.scale(4))
                 .addComponent(workspaceBox, JBUI.scale(4))
                 .addComponent(saveForLater, JBUI.scale(4))
+                .addComponent(workflowRow(), JBUI.scale(4))
                 .addComponent(summaryRow, JBUI.scale(8))
                 .addComponent(details)
                 .addComponent(warning, JBUI.scale(8))
@@ -393,6 +456,178 @@ final class NewTaskDialog extends DialogWrapper {
         };
         root.add(form, BorderLayout.CENTER);
         return root;
+    }
+
+    private JPanel workflowRow() {
+        JPanel rows = new JPanel(new GridLayout(0, 1, 0, JBUI.scale(2)));
+        sourceLabel.setForeground(UIUtil.getContextHelpForeground());
+        rows.add(sourceLabel);
+        rows.add(workflowNote);
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0));
+        actions.add(primaryAction);
+        actions.add(secondaryAction);
+        primaryAction.setVisible(false);
+        secondaryAction.setVisible(false);
+        rows.add(actions);
+        rows.setVisible(workflow.isPresent());
+        return rows;
+    }
+
+    private boolean freeForm() {
+        return preset.workflowTarget().orElse(null) == WorkflowTarget.FREE_FORM_PRE_PROMPT;
+    }
+
+    /** The bypass notice: blank chat and a native one-line command resolve and validate nothing. */
+    private Optional<String> bypassNotice() {
+        if (workflow.isEmpty() || !freeForm()) {
+            return Optional.empty();
+        }
+        String text = instructions.getText();
+        if (text.isBlank()) {
+            return Optional.of("Pre-prompt not applied: blank chat");
+        }
+        return NewTaskPlan.isSlashOneLiner(text) ? Optional.of("Pre-prompt not applied: harness command")
+                : Optional.empty();
+    }
+
+    /** Whether Start must wait for, and launch with, a prepared workflow (never for save-later or a bypass). */
+    private boolean needsWorkflow() {
+        return workflow.isPresent() && !saveForLater.isSelected() && bypassNotice().isEmpty();
+    }
+
+    /**
+     * Reconciles the preparation with the text: leaving a bypass for prose prepares (and so validates) normally;
+     * entering a bypass releases whatever was staged. Completions that arrive later are ignored while bypassed.
+     */
+    private void syncWorkflow() {
+        if (workflowController == null) {
+            return;
+        }
+        if (bypassNotice().isPresent()) {
+            if (preparationStarted) {
+                workflowController.launchFailed();
+                preparationStarted = false;
+                preparing = false;
+                workflowReady = false;
+            }
+        } else if (!preparationStarted) {
+            restartWorkflow();
+            return;
+        }
+        refreshWorkflowLabel();
+    }
+
+    private void restartWorkflow() {
+        if (workflowController == null || bypassNotice().isPresent()) {
+            return;
+        }
+        Workflow w = workflow.orElseThrow();
+        AgentKind kind = selectedAgent();
+        preparationStarted = true;
+        workflowReady = false;
+        defaultOnceChosen = false;
+        workflowNote.setText("");
+        showActions(null, () -> { });
+        workflowController.prepare(w.request().apply(kind),
+                new Input(preset.workflowTarget().orElseThrow().name(), kind.name()));
+        refreshWorkflowLabel();
+    }
+
+    private void refreshWorkflowLabel() {
+        if (workflow.isEmpty()) {
+            return;
+        }
+        Workflow w = workflow.get();
+        Optional<String> notice = bypassNotice();
+        if (notice.isPresent()) {
+            sourceLabel.setText(notice.get());
+            workflowNote.setText("");
+        } else {
+            Optional<SourceDescriptor> source = w.source().get();
+            Provenance base = defaultOnceChosen ? Provenance.DEFAULT_ONCE
+                    : source.isPresent() ? Provenance.PROJECT : Provenance.DEFAULT;
+            boolean edited = instructionsEdited && !freeForm();
+            SourceDescriptor descriptor = source.orElse(null);
+            sourceLabel.setText(edited ? WorkflowSourceLabel.edited(base, w.project(), descriptor)
+                    : WorkflowSourceLabel.of(base, w.project(), descriptor));
+        }
+        updateOk();
+    }
+
+    /** Shows the invalid/failed actions ({@code primary} text, then Cancel), or hides them for a null text. */
+    private void showActions(String primary, Runnable handler) {
+        primaryHandler = handler;
+        primaryAction.setText(primary);
+        primaryAction.setVisible(primary != null);
+        secondaryAction.setVisible(primary != null);
+    }
+
+    private void updateOk() {
+        boolean saving = saveForLater.isSelected();
+        setOKActionEnabled(saving || bypassNotice().isPresent() || (workflowReady && !preparing));
+    }
+
+    /** The controller's callbacks; always on the UI executor the launch site supplied. */
+    private final class WorkflowUi implements WorkflowInvocationController.Ui {
+        @Override
+        public ModalityState modality() {
+            // Same state the disk check uses (doOKAction): the dialog is modal, so completions
+            // must carry the dialog's own modality to run at all while it is showing.
+            return ModalityState.stateForComponent(getContentPanel());
+        }
+
+        @Override
+        public void progress(boolean shown) {
+            preparing = shown;
+            if (shown) {
+                workflowNote.setText("Preparing workflow…");
+            } else if (workflowNote.getText().equals("Preparing workflow…")) {
+                workflowNote.setText("");
+            }
+            updateOk();
+        }
+
+        @Override
+        public void ready(String seedText, boolean edited) {
+            if (bypassNotice().isPresent()) {
+                return;
+            }
+            workflowReady = true;
+            workflowNote.setText("");
+            showActions(null, () -> { });
+            if (!freeForm() && !edited && !instructionsEdited && !seedText.isEmpty()
+                    && !seedText.equals(instructions.getText())) {
+                // `updating` is not reentrant (regenerate() resets it inside the document event), so the seed
+                // write has its own flag: a late seed is never a user edit and is never forwarded as one.
+                seeding = true;
+                try {
+                    instructions.setText(seedText);
+                } finally {
+                    seeding = false;
+                }
+            }
+            refreshWorkflowLabel();
+        }
+
+        @Override
+        public void invalidSource(WorkflowProblem problem) {
+            workflowReady = false;
+            // Start stays disabled until the user falls back to the default for this invocation, or cancels.
+            workflowNote.setText(problem.configKey() + ": " + problem.message());
+            showActions("Use Drydock default for this invocation", () -> {
+                defaultOnceChosen = true;
+                workflowController.chooseDefaultOnce();
+            });
+            updateOk();
+        }
+
+        @Override
+        public void failed(String message) {
+            workflowReady = false;
+            workflowNote.setText("Workflow preparation failed: " + message);
+            showActions("Retry", NewTaskDialog.this::restartWorkflow);
+            updateOk();
+        }
     }
 
     private JPanel detailsForm() {
@@ -770,6 +1005,11 @@ final class NewTaskDialog extends DialogWrapper {
         instructions.setText(text);
     }
 
+    /** Diagnostic-only: types into the model picker, through the real document listener. */
+    void diagSetModel(String text) {
+        modelField.diagType(text);
+    }
+
     /** Diagnostic-only: replaces the login shell and refreshes, as a shell change would. */
     void diagSetLoginShell(String shell) {
         loginShell = shell;
@@ -812,6 +1052,47 @@ final class NewTaskDialog extends DialogWrapper {
                 .orElse(null);
     }
 
+    /**
+     * Freezes the prepared workflow for Start: false (nothing launches) while a needed preparation is not ready. A bypass or save-later accepts nothing and releases any staged lease.
+     */
+    boolean acceptWorkflowForStart() {
+        if (workflowController == null) {
+            return true;
+        }
+        if (!needsWorkflow()) {
+            workflowController.launchFailed();
+            return true;
+        }
+        acceptedWorkflow = workflowController.accept();
+        return acceptedWorkflow.isPresent();
+    }
+
+    /** The frozen workflow of the accepted Start; the caller owns {@link #workflowController()} from then on. */
+    Optional<Accepted<Prepared>> acceptedWorkflow() {
+        return acceptedWorkflow;
+    }
+
+    WorkflowInvocationController workflowController() {
+        return workflowController;
+    }
+
+    String sourceLabelText() {
+        return sourceLabel.getText();
+    }
+
+    /** Diagnostic-only: whether Start is currently enabled. */
+    boolean diagStartEnabled() {
+        return getOKAction().isEnabled();
+    }
+
+    @Override
+    public void doCancelAction() {
+        if (workflowController != null) {
+            workflowController.cancel();
+        }
+        super.doCancelAction();
+    }
+
     @Override
     protected void doOKAction() {
         if (saveForLater.isSelected()) {
@@ -844,6 +1125,12 @@ final class NewTaskDialog extends DialogWrapper {
                     setErrorText(finalRefusal.get(),
                             preset.instructionsRequired() && choice.instructions().isEmpty() ? instructions : folder);
                 } else if (isShowing()) {
+                    // Accept only now, after the disk refusal: the controller's cancel is terminal and begin()
+                    // throws once ACCEPTED, so an earlier accept would strand a refused Start.
+                    if (!acceptWorkflowForStart()) {
+                        setErrorText("The workflow is not ready; wait for the preparation or cancel.");
+                        return;
+                    }
                     acceptedChoice = choice;
                     acceptedResult = NewTaskLauncherResult.launched(choice);
                     close(OK_EXIT_CODE);
