@@ -3,9 +3,12 @@ package app.drydock.agent.providers.claude;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.RemoteLaunchSupport;
+import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SshRemote;
 import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
@@ -18,6 +21,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -214,5 +218,70 @@ class ClaudeAgentProviderMcpFlagTest {
                         .withStdioMcpServers(List.of(IDE))).command();
 
         assertFalse(command.contains("--mcp-config"), command);
+    }
+
+    private static final Optional<SshRemote> BOX = Optional.of(new SshRemote("box", "/srv/repo"));
+    private static final RemotePersistence PERSISTENCE = new RemotePersistence(new ManagedSessionId(
+            UUID.fromString("00000000-0000-0000-0000-000000000001")), Map.of());
+    private static final RemoteLaunchSupport.ReviewConnection REVIEW = new RemoteLaunchSupport.ReviewConnection(
+            "/home/u/.drydock/mcp/s1.json", "mcp-1", "launch-1");
+    private static final RemoteLaunchSupport.WorkflowAccess WORKFLOW = new RemoteLaunchSupport.WorkflowAccess(
+            List.of("/home/u/.drydock/ns/s1"));
+
+    private static CreateContext persistentCreate() {
+        return new CreateContext("my session", "sid-1", Path.of("/tmp"), BOX, NO_MCP)
+                .withPersistence(PERSISTENCE);
+    }
+
+    private static ResumeContext persistentResume(Optional<String> id) {
+        return new ResumeContext(id, Optional.empty(), Path.of("/tmp"), BOX, NO_MCP)
+                .withPersistence(PERSISTENCE);
+    }
+
+    private static RemoteLaunchSupport support(boolean review, boolean workflow) {
+        return new RemoteLaunchSupport(review ? Optional.of(REVIEW) : Optional.empty(),
+                workflow ? Optional.of(WORKFLOW) : Optional.empty(), List.of());
+    }
+
+    @Test
+    void persistentRemoteArmsRenderEachSupportComponentIndependently(@TempDir Path dir) throws IOException {
+        // The stub advertises no --mcp-config: host capabilities are no remote evidence.
+        ClaudeAgentProvider provider = provider(dir, false);
+        for (boolean review : new boolean[] {false, true}) {
+            for (boolean workflow : new boolean[] {false, true}) {
+                RemoteLaunchSupport s = support(review, workflow);
+                String create = provider.buildCreateCommand(persistentCreate().withRemoteLaunchSupport(s)).command();
+                String resume = provider.buildResumeCommand(
+                        persistentResume(Optional.of("conv-1")).withRemoteLaunchSupport(s)).command();
+                for (String command : List.of(create, resume)) {
+                    // The agent exec is quoted again by the ssh/tmux wrapper, so assert on flag and path text.
+                    assertEquals(review, command.contains("--mcp-config") && command.contains("/home/u/.drydock/mcp/s1.json"), command);
+                    assertEquals(workflow, command.contains("--add-dir") && command.contains("/home/u/.drydock/ns/s1"), command);
+                    assertFalse(command.contains("--plugin-dir"), command);
+                }
+                assertTrue(create.contains("--session-id"), create);
+                assertTrue(resume.contains("--resume"), resume);
+                assertTrue(resume.contains("conv-1"), resume);
+            }
+        }
+    }
+
+    @Test
+    void persistentRemoteWithoutSupportKeepsNoMcpOrAddDir(@TempDir Path dir) throws IOException {
+        ClaudeAgentProvider provider = provider(dir, true);
+        String create = provider.buildCreateCommand(persistentCreate()).command();
+        String resume = provider.buildResumeCommand(persistentResume(Optional.of("conv-1"))).command();
+        assertFalse(create.contains("--mcp-config") || create.contains("--add-dir"), create);
+        assertFalse(resume.contains("--mcp-config") || resume.contains("--add-dir"), resume);
+    }
+
+    @Test
+    void persistentResumeRefusesEmptyConversationIdEvenWithSupport(@TempDir Path dir) throws IOException {
+        ClaudeAgentProvider provider = provider(dir, true);
+        RemoteLaunchSupport s = support(true, true);
+        assertFalse(provider.buildResumeCommand(
+                persistentResume(Optional.empty()).withRemoteLaunchSupport(s)).supported());
+        assertFalse(provider.buildResumeCommand(
+                persistentResume(Optional.of(" ")).withRemoteLaunchSupport(s)).supported());
     }
 }

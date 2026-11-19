@@ -11,6 +11,17 @@ import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.projects.SharedProject;
+import app.drydock.sdlc.MaterializedWorkflow;
+import app.drydock.sdlc.ResourceManifestJournal;
+import app.drydock.sdlc.SelectedWorkflow;
+import app.drydock.sdlc.SessionWorkflowResourceOwner;
+import app.drydock.sdlc.WorkflowBundle;
+import app.drydock.sdlc.WorkflowMaterializationRequest;
+import app.drydock.sdlc.WorkflowMaterializationRequest.Destination;
+import app.drydock.sdlc.WorkflowMaterializer;
+import app.drydock.sdlc.WorkflowResolution;
+import app.drydock.sdlc.WorkflowResourceLease;
+import app.drydock.sdlc.WorkflowTarget;
 import app.drydock.tasks.StartPlan;
 import app.drydock.tasks.TaskId;
 
@@ -19,17 +30,31 @@ import com.intellij.openapi.ui.ValidationInfo;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBRadioButton;
 import com.intellij.ui.components.JBTextField;
 
 import javax.swing.JCheckBox;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import javax.swing.JButton;
+import javax.swing.JComboBox;
+import javax.swing.text.JTextComponent;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -112,6 +137,27 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
         });
 
         assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
+    }
+
+    public void testSettingAModelKeepsStartEnabled() {
+        AtomicReference<ValidationInfo> validation = new AtomicReference<>();
+        AtomicReference<Boolean> okEnabled = new AtomicReference<>();
+
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog = new NewTaskDialog(getProject(), inputs(), Optional.empty());
+            try {
+                dialog.diagSetInstructions("Fix the parser");
+                assertNull("start enabled before a model is picked", dialog.doValidate());
+                dialog.diagSetModel("claude-sonnet-4-5");
+                validation.set(dialog.doValidate());
+                okEnabled.set(dialog.diagStartEnabled());
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+            }
+        });
+
+        assertNull("a picked model must not refuse the launch", validation.get());
+        assertEquals(Boolean.TRUE, okEnabled.get());
     }
 
     public void testNameIsInferredFromTheDescriptionAndThePresetNameWins() {
@@ -321,17 +367,26 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
     private static NewTaskPlan.Inputs inputs(Optional<NewTaskPlan.FixedWorktree> fixed,
                                              Function<AgentKind, ModelTiers> lastUsedTiers,
                                              Predicate<AgentKind> supportsSubagents) {
+        return inputs(fixed, List.of(agent(AgentKind.PI)), lastUsedTiers, supportsSubagents);
+    }
+
+    private static NewTaskPlan.Inputs inputs(Optional<NewTaskPlan.FixedWorktree> fixed, List<Agent> agents,
+                                             Function<AgentKind, ModelTiers> lastUsedTiers,
+                                             Predicate<AgentKind> supportsSubagents) {
         Path root = Path.of("/tmp/profiler");
         SharedProject project = SharedProject.local(RepositoryId.newId(), root, "profiler", Instant.EPOCH);
-        Agent pi = new Agent() {
-            @Override public AgentKind kind() { return AgentKind.PI; }
-            @Override public String displayName() { return "Pi"; }
+        return new NewTaskPlan.Inputs(project, "profiler", fixed, agents, AgentKind.PI,
+                "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false,
+                kind -> Optional.empty(), kind -> List.of(), lastUsedTiers, supportsSubagents);
+    }
+
+    private static Agent agent(AgentKind kind) {
+        return new Agent() {
+            @Override public AgentKind kind() { return kind; }
+            @Override public String displayName() { return kind.name(); }
             @Override public boolean isAvailable() { return true; }
             @Override public String describeSearched() { return "test"; }
         };
-        return new NewTaskPlan.Inputs(project, "profiler", fixed, List.of(pi), AgentKind.PI,
-                "origin/main", List.of("origin/main"), List.of("origin"), Set.of(), Path.of("/tmp"), false,
-                kind -> Optional.empty(), kind -> List.of(), lastUsedTiers, supportsSubagents);
     }
 
     public void testTriageTiersComposeTheSubagentModelRuleWhenTheHarnessDispatchesSubagents() {
@@ -679,5 +734,273 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             @Override public boolean isAvailable() { return true; }
             @Override public String describeSearched() { return "test"; }
         };
+    }
+
+    // ---- Project workflow wiring (T17): source indicator, bypass, Start flow ----
+
+    private static final SelectedWorkflow.SourceDescriptor SOURCE =
+            new SelectedWorkflow.SourceDescriptor(SelectedWorkflow.SourceKind.INLINE, "k", Optional.empty());
+
+    /** One dialog's fakes: the UI executor is a queue the test drains on the EDT, materializations complete on demand. */
+    private final class Wiring {
+        final ExecutorService background = Executors.newCachedThreadPool();
+        final Queue<Runnable> uiQueue = new ArrayDeque<>();
+        final List<CompletableFuture<WorkflowMaterializer.Result>> materializations = new ArrayList<>();
+        final AtomicInteger resolves = new AtomicInteger();
+        final AtomicInteger released = new AtomicInteger();
+        volatile WorkflowResolution resolution;
+        WorkflowInvocationController controller;
+        final WorkflowTarget target;
+
+        Wiring(WorkflowTarget target) {
+            this.target = target;
+            this.resolution = new WorkflowResolution.Selected(selected("project text"));
+        }
+
+        SelectedWorkflow selected(String text) {
+            return new SelectedWorkflow(RepositoryId.newId(), target, SOURCE, text, WorkflowBundle.empty(), "digest");
+        }
+
+        NewTaskDialog.Workflow workflow() throws IOException {
+            Path dir = Files.createTempDirectory("t17-dialog-");
+            var journal = ResourceManifestJournal.open(dir.resolve("sdlc/manifest.rmj"));
+            var owner = new SessionWorkflowResourceOwner(journal, Runnable::run,
+                    new SessionWorkflowResourceOwner.Cleaner() {
+                        public CompletableFuture<Void> deleteLocal(ResourceManifestJournal.Lease l) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+
+                        public CompletableFuture<Void> deleteRemote(ResourceManifestJournal.Debt d) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                    });
+            WorkflowMaterializer materializer = (req, cancel) -> {
+                var f = new CompletableFuture<WorkflowMaterializer.Result>();
+                synchronized (materializations) {
+                    materializations.add(f);
+                }
+                return f;
+            };
+            return new NewTaskDialog.Workflow(ui -> {
+                controller = new WorkflowInvocationController(background, r -> {
+                    synchronized (uiQueue) {
+                        uiQueue.add(r);
+                    }
+                }, (t, cancel) -> {
+                    resolves.incrementAndGet();
+                    return resolution;
+                }, materializer, owner, ui, 5_000, "default seed",
+                        new WorkflowInvocationState.Input(target.name(), "none"));
+                return controller;
+            }, kind -> new WorkflowInvocationController.Request(target, Destination.LOCAL, SessionMode.WRITES,
+                    Optional.empty()), "profiler",
+                    () -> resolution instanceof WorkflowResolution.Selected ? Optional.of(SOURCE) : Optional.empty());
+        }
+
+        MaterializedWorkflow materialized(WorkflowMaterializationRequest r) {
+            var lease = new WorkflowResourceLease(() -> {
+                released.incrementAndGet();
+                return CompletableFuture.completedFuture(null);
+            });
+            return new MaterializedWorkflow(r.invocationId(), r.generation(), "digest", r.destination(), target,
+                    r.mode(), List.of(), lease);
+        }
+
+        /** Completes materialization {@code index} successfully (its request is the fake's, so any generation). */
+        void complete(int index, String seed, long generation) {
+            var req = new WorkflowMaterializationRequest("inv" + index, generation, selected(seed),
+                    Destination.LOCAL, SessionMode.WRITES, Optional.empty());
+            materializations.get(index).complete(new WorkflowMaterializer.Success(materialized(req)));
+        }
+
+        /** Runs queued UI work on the EDT until {@code condition} holds. */
+        void drainUntil(BooleanSupplier condition) throws InterruptedException {
+            for (int i = 0; i < 500 && !condition.getAsBoolean(); i++) {
+                List<Runnable> batch;
+                synchronized (uiQueue) {
+                    batch = new ArrayList<>(uiQueue);
+                    uiQueue.clear();
+                }
+                batch.forEach(Runnable::run);
+                if (!condition.getAsBoolean()) {
+                    Thread.sleep(10);
+                }
+            }
+            assertTrue(condition.getAsBoolean());
+        }
+
+        boolean materializationStarted(int count) {
+            synchronized (materializations) {
+                return materializations.size() >= count;
+            }
+        }
+    }
+
+    private void withDialog(Wiring wiring, NewTaskPreset preset, NewTaskPlan.Inputs inputs, DialogBody body) {
+        ApplicationManager.getApplication().invokeAndWait(() -> {
+            NewTaskDialog dialog;
+            try {
+                dialog = new NewTaskDialog(getProject(), inputs, Optional.empty(), preset,
+                        Optional.of(wiring.workflow()));
+            } catch (IOException e) {
+                throw new AssertionError(e);
+            }
+            try {
+                body.run(dialog);
+            } catch (InterruptedException e) {
+                throw new AssertionError(e);
+            } finally {
+                Disposer.dispose(dialog.getDisposable());
+                wiring.background.shutdownNow();
+            }
+        });
+    }
+
+    private interface DialogBody {
+        void run(NewTaskDialog dialog) throws InterruptedException;
+    }
+
+    public void testBlankAndNativeCommandBypassShowTheirNoticeValidateNothingThenProseResolvesNormally() {
+        Wiring w = new Wiring(WorkflowTarget.FREE_FORM_PRE_PROMPT);
+        withDialog(w, NewTaskPreset.empty(), inputs(), dialog -> {
+            assertEquals("Pre-prompt not applied: blank chat", dialog.sourceLabelText());
+            assertTrue(dialog.diagStartEnabled());
+            dialog.diagSetInstructions("/review");
+            assertEquals("Pre-prompt not applied: harness command", dialog.sourceLabelText());
+            assertTrue(dialog.diagStartEnabled());
+            assertEquals(0, w.resolves.get());
+            assertTrue(dialog.acceptWorkflowForStart());
+            assertTrue(dialog.acceptedWorkflow().isEmpty());
+            assertEquals("/review", dialog.choice().instructions().orElseThrow());
+
+            dialog.diagSetInstructions("fix the parser");
+            assertFalse(dialog.diagStartEnabled());
+            w.drainUntil(() -> w.materializationStarted(1));
+            w.complete(0, "project text", 2);
+            w.drainUntil(dialog::diagStartEnabled);
+            assertEquals("Project profiler: inline text", dialog.sourceLabelText());
+            assertEquals(1, w.resolves.get());
+            assertEquals("fix the parser", dialog.choice().instructions().orElseThrow());
+            assertTrue(dialog.acceptWorkflowForStart());
+            assertFalse(dialog.acceptedWorkflow().orElseThrow().edited());
+        });
+    }
+
+    public void testLatePreparationCannotOverwriteEditsAndTheAcceptedPromptIsTheEdit() {
+        Wiring w = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        OpenIssue issue = new OpenIssue(42, "Fix", Optional.empty(), List.of(), List.of(), Optional.empty());
+        withDialog(w, NewTaskPreset.triage(issue), inputs(), dialog -> {
+            w.drainUntil(() -> w.materializationStarted(1));
+            dialog.diagSetInstructions("my own methodology");
+            assertEquals("Edited for this invocation; based on Project profiler: inline text",
+                    dialog.sourceLabelText());
+            w.complete(0, "late project seed", 2);
+            w.drainUntil(dialog::diagStartEnabled);
+            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            assertEquals("Edited for this invocation; based on Project profiler: inline text",
+                    dialog.sourceLabelText());
+            assertTrue(dialog.acceptWorkflowForStart());
+            var accepted = dialog.acceptedWorkflow().orElseThrow();
+            assertEquals("my own methodology", accepted.text());
+            assertTrue(accepted.edited());
+        });
+    }
+
+    // ---- Pass 2: invalid source, cancel, harness switches, dispose ----
+
+    private NewTaskPreset triage() {
+        return NewTaskPreset.triage(new OpenIssue(42, "Fix", Optional.empty(), List.of(), List.of(), Optional.empty()));
+    }
+
+    private static final WorkflowResolution INVALID = new WorkflowResolution.Invalid(
+            new WorkflowResolution.WorkflowProblem("issue_triage", Optional.empty(),
+                    WorkflowResolution.ProblemCategory.SCHEMA, "bad schema"));
+
+    public void testInvalidSourceOffersTheDefaultForThisInvocationOnlyOrCancel() {
+        Wiring w = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        w.resolution = INVALID;
+        withDialog(w, triage(), inputs(), dialog -> {
+            JButton primary = control(dialog, "primaryAction", JButton.class);
+            w.drainUntil(primary::isVisible);
+            assertEquals("Use Drydock default for this invocation", primary.getText());
+            assertTrue(control(dialog, "workflowNote", JBLabel.class).getText().contains("bad schema"));
+            assertFalse(dialog.diagStartEnabled());
+            assertTrue(control(dialog, "secondaryAction", JButton.class).isVisible());
+            primary.doClick();
+            assertTrue(dialog.diagStartEnabled());
+            assertFalse(primary.isVisible());
+            assertEquals("Drydock default (this time only)", dialog.sourceLabelText());
+            assertTrue(dialog.acceptWorkflowForStart());
+            assertEquals("default seed", dialog.acceptedWorkflow().orElseThrow().text());
+            assertFalse(dialog.acceptedWorkflow().orElseThrow().edited());
+        });
+        Wiring c = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        c.resolution = INVALID;
+        withDialog(c, triage(), inputs(), dialog -> {
+            JButton cancel = control(dialog, "secondaryAction", JButton.class);
+            c.drainUntil(cancel::isVisible);
+            cancel.doClick();
+            assertTrue(c.controller.accept().isEmpty());
+            assertFalse(dialog.acceptWorkflowForStart());
+        });
+    }
+
+    private static JComboBox<?> combo(ModelField field) {
+        try {
+            var f = ModelField.class.getDeclaredField("combo");
+            f.setAccessible(true);
+            return (JComboBox<?>) f.get(field);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    public void testModelTiersAndEditsSurviveHarnessSwitchesWithStaleCompletionsOutOfOrder() {
+        Wiring w = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        ModelTiers remembered = new ModelTiers(Optional.of("strong-m"), Optional.of("mid-m"), Optional.of("low-m"));
+        NewTaskPlan.Inputs two = inputs(Optional.empty(), List.of(agent(AgentKind.PI), agent(AgentKind.CODEX)),
+                kind -> remembered, kind -> true);
+        withDialog(w, triage(), two, dialog -> {
+            w.drainUntil(() -> w.materializationStarted(1));
+            dialog.diagSetInstructions("my own methodology");
+            JComboBox<?> combo = combo(control(dialog, "modelField", ModelField.class));
+            ((JTextComponent) combo.getEditor().getEditorComponent()).setText("my-model");
+            agentButton(dialog, AgentKind.CODEX).doClick();
+            w.drainUntil(() -> w.materializationStarted(2));
+            // The newer preparation completes first; the superseded one arrives after it and is released.
+            w.complete(1, "codex seed", 3);
+            w.drainUntil(dialog::diagStartEnabled);
+            w.complete(0, "stale seed", 2);
+            w.drainUntil(() -> w.released.get() == 1);
+            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            assertEquals(Optional.of(remembered), dialog.choice().tiers());
+            agentButton(dialog, AgentKind.PI).doClick();
+            assertEquals(Optional.of("my-model"), dialog.choice().model());
+            assertEquals(Optional.of(remembered), dialog.choice().tiers());
+            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            assertTrue(dialog.sourceLabelText().startsWith("Edited for this invocation"));
+        });
+    }
+
+    public void testDisposeReleasesAnUnacceptedPreparationButNotAHandedOffOne() {
+        Wiring w = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        withDialog(w, triage(), inputs(), dialog -> {
+            w.drainUntil(() -> w.materializationStarted(1));
+            w.complete(0, "seed", 2);
+            w.drainUntil(dialog::diagStartEnabled);
+            Disposer.dispose(dialog.getDisposable());
+            assertEquals(1, w.released.get());
+        });
+        Wiring h = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        withDialog(h, triage(), inputs(), dialog -> {
+            h.drainUntil(() -> h.materializationStarted(1));
+            h.complete(0, "seed", 2);
+            h.drainUntil(dialog::diagStartEnabled);
+            assertTrue(dialog.acceptWorkflowForStart());
+            Disposer.dispose(dialog.getDisposable());
+            assertEquals(0, h.released.get());
+            h.controller.launchFailed();
+            assertEquals(1, h.released.get());
+        });
     }
 }

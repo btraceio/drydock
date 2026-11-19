@@ -1,6 +1,9 @@
 package app.drydock.intellij.review;
 
 import app.drydock.git.UnifiedDiff;
+import app.drydock.review.ReviewDataSnapshot;
+import app.drydock.review.ReviewDataSource;
+import app.drydock.review.ReviewDataSources;
 import app.drydock.review.ReviewScope;
 
 import java.lang.System.Logger;
@@ -9,6 +12,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -90,13 +94,14 @@ public final class ReviewTabRefresher {
     }
 
     /** What one reload caches: the diff and the base commit it resolved alongside. */
-    private record Loaded(UnifiedDiff diff, Optional<String> baseCommit) {
+    private record Loaded(UnifiedDiff diff, Optional<String> baseCommit, Optional<ReviewDataSnapshot> snapshot) {
     }
 
     private final Executor background;
     private final Scheduler scheduler;
-    private final Function<ReviewScope, CompletableFuture<UnifiedDiff>> diff;
-    private final Function<ReviewScope, Optional<String>> baseCommit;
+    /** One reload's load: legacy diff+base, or one dispatched snapshot refresh. */
+    private final Function<ReviewScope, CompletableFuture<Loaded>> load;
+    private final ReviewDataSources dispatch;
     private final InputsJoin inputsFor;
     private final Function<ReviewTabModel.Inputs, ReviewTabModel.Snapshot> assembler;
     private final Consumer<ReviewTabModel.Snapshot> snapshots;
@@ -112,6 +117,8 @@ public final class ReviewTabRefresher {
     private UnifiedDiff cachedDiff;
     /** The base commit resolved at the last reload; the marks path reads only this, never git. */
     private Optional<String> cachedBaseCommit = Optional.empty();
+    /** The dispatched snapshot of the last successful reload; cleared with the scope, kept (not re-authorizing) after a failed reload. */
+    private ReviewDataSnapshot cachedSnapshot;
     private CompletableFuture<?> inFlight;
     /** True between deciding to start a run and the future being registered, so no second timer can double-start. */
     private boolean starting;
@@ -146,14 +153,92 @@ public final class ReviewTabRefresher {
                               Function<ReviewTabModel.Inputs, ReviewTabModel.Snapshot> assembler,
                               Consumer<ReviewTabModel.Snapshot> snapshots,
                               BiConsumer<ReviewTabStatus, String> status) {
+        this(background, scheduler, legacyLoad(background, diff, baseCommit), null, inputsFor, assembler, snapshots,
+                status);
+    }
+
+    /**
+     * Dispatch form: a reload is one {@link ReviewDataSources#refresh} of the
+     * scope (local adapters wrap the same {@code DiffService} call). Its diff
+     * and base commit come from the captured snapshot; a Stale, Unavailable
+     * or Refused refresh is a failed reload carrying the reason, never an
+     * empty diff. A remote scope therefore never reaches a local path or git.
+     */
+    public ReviewTabRefresher(Executor background,
+                              Scheduler scheduler,
+                              ReviewDataSources dispatch,
+                              InputsJoin inputsFor,
+                              Function<ReviewTabModel.Inputs, ReviewTabModel.Snapshot> assembler,
+                              Consumer<ReviewTabModel.Snapshot> snapshots,
+                              BiConsumer<ReviewTabStatus, String> status) {
+        this(background, scheduler, dispatchLoad(Objects.requireNonNull(dispatch, "dispatch")), dispatch,
+                inputsFor, assembler, snapshots, status);
+    }
+
+    private ReviewTabRefresher(Executor background,
+                               Scheduler scheduler,
+                               Function<ReviewScope, CompletableFuture<Loaded>> load,
+                               ReviewDataSources dispatch,
+                               InputsJoin inputsFor,
+                               Function<ReviewTabModel.Inputs, ReviewTabModel.Snapshot> assembler,
+                               Consumer<ReviewTabModel.Snapshot> snapshots,
+                               BiConsumer<ReviewTabStatus, String> status) {
         this.background = Objects.requireNonNull(background, "background");
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
-        this.diff = Objects.requireNonNull(diff, "diff");
-        this.baseCommit = Objects.requireNonNull(baseCommit, "baseCommit");
+        this.load = load;
+        this.dispatch = dispatch;
         this.inputsFor = Objects.requireNonNull(inputsFor, "inputsFor");
         this.assembler = Objects.requireNonNull(assembler, "assembler");
         this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
         this.status = Objects.requireNonNull(status, "status");
+    }
+
+    private static Function<ReviewScope, CompletableFuture<Loaded>> legacyLoad(
+            Executor background, Function<ReviewScope, CompletableFuture<UnifiedDiff>> diff,
+            Function<ReviewScope, Optional<String>> baseCommit) {
+        Objects.requireNonNull(background, "background");
+        Objects.requireNonNull(diff, "diff");
+        Objects.requireNonNull(baseCommit, "baseCommit");
+        // The base commit is resolved on the reload path (on the background
+        // executor once the diff is in), so the marks path can reuse it.
+        return target -> diff.apply(target).thenApplyAsync(
+                result -> new Loaded(result, baseCommit.apply(target), Optional.empty()), background);
+    }
+
+    private static Function<ReviewScope, CompletableFuture<Loaded>> dispatchLoad(ReviewDataSources dispatch) {
+        return target -> dispatch.refresh(target, () -> false).thenApply(result -> switch (result) {
+            case ReviewDataSource.Result.Ok<ReviewDataSnapshot> ok -> new Loaded(ok.value().diff(),
+                    Optional.of(ok.value().baseCommit()), Optional.of(ok.value()));
+            case ReviewDataSource.Result.Unavailable<ReviewDataSnapshot> u -> throw failure("unavailable", u.reason());
+            case ReviewDataSource.Result.Stale<ReviewDataSnapshot> st -> throw failure("stale", st.reason());
+            case ReviewDataSource.Result.Refused<ReviewDataSnapshot> r -> throw failure("refused", r.reason());
+        });
+    }
+
+    private static CompletionException failure(String kind, String reason) {
+        return new CompletionException(new IllegalStateException("review data " + kind + ": " + reason));
+    }
+
+    /** The snapshot of the last successful dispatched reload for the current scope, if any (never for the legacy form). */
+    public Optional<ReviewDataSnapshot> snapshot() {
+        synchronized (lock) {
+            return Optional.ofNullable(cachedSnapshot);
+        }
+    }
+
+    /**
+     * One side of {@code file} from the cached snapshot, through the
+     * dispatch (the adapter, not a local path, supplies the bytes). Refused
+     * without a dispatch or before a snapshot exists.
+     */
+    public CompletableFuture<ReviewDataSource.Result<ReviewDataSnapshot.Content>> contents(
+            String file, ReviewDataSource.Side side) {
+        ReviewDataSnapshot shown = snapshot().orElse(null);
+        if (dispatch == null || shown == null) {
+            return CompletableFuture.completedFuture(new ReviewDataSource.Result.Refused<>(
+                    "no review data snapshot is loaded for this tab"));
+        }
+        return dispatch.contents(shown, file, side);
     }
 
     /**
@@ -215,6 +300,7 @@ public final class ReviewTabRefresher {
             if (!target.equals(scope)) {
                 scope = target;
                 cachedDiff = null; // another scope's diff is not this one's
+                cachedSnapshot = null;
                 cachedBaseCommit = Optional.empty();
             }
             if (reloadTimer != null) {
@@ -310,11 +396,7 @@ public final class ReviewTabRefresher {
         }
         CompletableFuture<Loaded> future;
         try {
-            // The base commit is resolved on the reload path (here, on the
-            // background executor once the diff is in — not on the diff
-            // service's own executor), so the marks path can reuse it.
-            future = diff.apply(target).thenApplyAsync(
-                    result -> new Loaded(result, baseCommit.apply(target)), background);
+            future = load.apply(target);
         } catch (RuntimeException | Error e) {
             synchronized (lock) {
                 starting = false;
@@ -369,6 +451,7 @@ public final class ReviewTabRefresher {
             synchronized (lock) {
                 cachedDiff = result.diff();
                 cachedBaseCommit = result.baseCommit();
+                cachedSnapshot = result.snapshot().orElse(null);
             }
             ReviewTabStatus state = result.diff().files().isEmpty()
                     ? ReviewTabStatus.EMPTY_DIFF : ReviewTabStatus.READY;

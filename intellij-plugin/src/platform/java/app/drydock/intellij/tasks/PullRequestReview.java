@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ModelTiers;
+import app.drydock.domain.PullRequestTarget;
+import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionStatusFacet;
 import app.drydock.git.GhCliService.OpenPullRequest;
@@ -18,6 +20,7 @@ import app.drydock.intellij.review.ReviewCheckouts;
 import app.drydock.intellij.review.ReviewRequest;
 import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.review.ReviewInstructions;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.tour.ReviewTour;
 
@@ -154,6 +157,20 @@ public final class PullRequestReview {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 try {
+                    // The explicitly selected PR and its registered repository, before any checkout:
+                    // an unusable one is a visible error, never a silently local review.
+                    PullRequestTarget target;
+                    RepositoryId repository;
+                    try {
+                        target = pullRequestTarget(pullRequest);
+                        repository = DrydockPluginService.getInstance().sharedProjects().byRoot(mainRoot)
+                                .map(registered -> registered.id())
+                                .orElseThrow(() -> new IllegalArgumentException(
+                                        mainRoot + " is not a registered Drydock project"));
+                    } catch (IllegalArgumentException e) {
+                        report(from, "Could not open PR #" + pullRequest.number() + " for review: " + e.getMessage());
+                        return;
+                    }
                     Path base = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
                             UserConfig.load().worktreesDirectory(), repositoryName,
                             PrCheckoutService.localBranchFor(pullRequest.number()));
@@ -171,23 +188,47 @@ public final class PullRequestReview {
                             canonical);
                     // Before the window opens: its Review tab is shown only for a
                     // covered checkout, and no session covers this one.
-                    ReviewCheckouts.register(window.map(project -> Path.of(project.getBasePath()))
-                            .orElse(worktree.get()));
+                    Path checkout = window.map(project -> Path.of(project.getBasePath())).orElse(worktree.get());
+                    ReviewCheckouts.register(checkout);
+                    ReviewIntent intent = pullRequestIntent(repository, checkout, target);
                     ApplicationManager.getApplication().invokeLater(() -> {
-                        Project target = window.filter(project -> !project.isDisposed())
+                        Project opened = window.filter(project -> !project.isDisposed())
                                 .orElseGet(() -> TaskWindows.openAsProject(worktree.get()));
-                        if (target == null || target.isDisposed()) {
+                        if (opened == null || opened.isDisposed()) {
                             return;
                         }
-                        ProjectUtil.focusProjectWindow(target, true);
+                        ProjectUtil.focusProjectWindow(opened, true);
+                        // The explicit PR rides with the window to the Review menu's start.
+                        ReviewTabOpener.recordIntent(opened, intent);
                         // The review is asked for from the workbench's Review menu, not offered on open.
-                        ReviewTabOpener.openWithoutOffer(target);
+                        ReviewTabOpener.openWithoutOffer(opened);
                     }, ModalityState.nonModal());
                 } finally {
                     inFlight.remove(key);
                 }
             }
         });
+    }
+
+    /**
+     * The explicitly selected PR of a PR row: its URL's host/owner/repo and number. A row without
+     * a usable URL is not an identity ({@code pr-N} branch names and PR metadata are never one):
+     * throws {@link IllegalArgumentException}.
+     */
+    public static PullRequestTarget pullRequestTarget(OpenPullRequest pullRequest) {
+        String url = pullRequest.url().orElseThrow(() ->
+                new IllegalArgumentException("the pull request has no URL to identify it"));
+        PullRequestTarget target = PullRequestTarget.fromUrl(url);
+        if (target.number() != pullRequest.number()) {
+            throw new IllegalArgumentException("the URL " + url + " is not pull request #" + pullRequest.number());
+        }
+        return target;
+    }
+
+    /** The PR row's intent: the explicit PR, reviewed in {@code checkout}, from the PR row. */
+    public static ReviewIntent pullRequestIntent(RepositoryId repository, Path checkout, PullRequestTarget target) {
+        return ReviewIntent.pullRequest(repository, new ReviewIntent.Local(checkout), Optional.empty(), target,
+                ReviewIntent.Origin.PULL_REQUEST_ROW, ReviewTour.Kind.TOUR);
     }
 
     /**
@@ -424,7 +465,37 @@ public final class PullRequestReview {
             return p;
         }
 
+        /**
+         * A configured (project-methodology) fresh local review: {@code instruction} turns the authorized
+         * scope id into the project's effective instruction, and ANY missing mandatory piece (review
+         * service, tools, scope, data, instruction) REFUSES the launch before the spawn instead of
+         * degrading to a bare session. Never the default-only path below, never a remote or
+         * existing-session send (those go through {@link ReviewRequest}, which always refuses).
+         */
+        static ReviewPrompt configured(AgentKind agent, Function<String, String> instruction,
+                                       Supplier<? extends CompletableFuture<?>> initialization,
+                                       Supplier<Optional<ReviewBackend>> backend,
+                                       Predicate<AgentKind> supportsSubagents, Executor executor) {
+            ReviewPrompt p = drydockReview(agent, initialization, backend, supportsSubagents, executor);
+            p.configuredInstruction = Objects.requireNonNull(instruction, "instruction");
+            return p;
+        }
+
+        /** Whether a missing mandatory piece refuses the launch (configured) or leaves a bare session (default-only). */
+        boolean refusesWithoutIntegration() {
+            return configuredInstruction != null;
+        }
+
+        /** Why a configured fresh local review did not start; the launch chain fails with it, nothing spawns. */
+        static final class ReviewRefused extends RuntimeException {
+            ReviewRefused(String message) {
+                super(message);
+            }
+        }
+
         private Function<ManagedAgentSession, CompletableFuture<Optional<String>>> resolver;
+        /** Non-null exactly for a configured review: the project's instruction for an authorized scope id. */
+        private volatile Function<String, String> configuredInstruction;
         /** Whether the prompt (when there is one) addresses Drydock's review tools. */
         private boolean needsTools;
         /** What Drydock's instruction asks for; a fixed prompt ignores it. */
@@ -441,10 +512,6 @@ public final class PullRequestReview {
             this.sessionModel = Objects.requireNonNull(sessionModel, "sessionModel");
         }
 
-        /**
-         * See {@code SessionDialogs.launchSession}'s {@code prompt} parameter. Blocks while resolving.
-         * Never throws and never completes exceptionally: a failure is a complaint and an empty prompt.
-         */
         /** This prompt, asking for {@code requested}: the educational tour (the default) or the section-based review. */
         ReviewPrompt asking(ReviewTour.Kind requested) {
             kind = Objects.requireNonNull(requested, "requested");
@@ -465,9 +532,29 @@ public final class PullRequestReview {
                 resolving = resolver.apply(session);
             } catch (RuntimeException e) {
                 // e.g. the plugin service or its executor is gone mid-launch
-                return CompletableFuture.completedFuture(noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
+                resolving = CompletableFuture.completedFuture(
+                        noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
             }
-            return resolving.exceptionally(e -> noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
+            CompletableFuture<Optional<String>> settled =
+                    resolving.exceptionally(e -> noPrompt(new ReviewRequest.Failed(PullRequestReview.cause(e))));
+            if (configuredInstruction == null) {
+                return settled;
+            }
+            return settled.thenCompose(prompt -> complaint == null && prompt.isPresent()
+                    ? CompletableFuture.completedFuture(prompt)
+                    : CompletableFuture.failedFuture(new ReviewRefused(refusal())));
+        }
+
+        private String refusal() {
+            ReviewRequest.Outcome outcome = complaint != null ? complaint : new ReviewRequest.Failed("no instruction");
+            String why = switch (outcome) {
+                case ReviewRequest.NotReady n -> "Drydock's review service is not running";
+                case ReviewRequest.NoTools t -> "the agent has no Drydock review tools";
+                case ReviewRequest.Failed f -> f.cause();
+                default -> outcome.getClass().getSimpleName();
+            };
+            return "The review was not started and nothing was sent: the project's review method needs"
+                    + " Drydock's review tools, scope and data (" + why + ").";
         }
 
         /** What to tell the human once the session is up, or empty when the review is properly armed. */
@@ -517,6 +604,12 @@ public final class PullRequestReview {
             try {
                 ReviewScope scope = backend.scopeResolver().resolve(session)
                         .get(ReviewRequest.SCOPE_WAIT_SECONDS, TimeUnit.SECONDS);
+                if (configuredInstruction != null) {
+                    String text = configuredInstruction.apply(scope.id());
+                    return text == null || text.isBlank()
+                            ? noPrompt(new ReviewRequest.Failed("the project's review instruction is empty"))
+                            : Optional.of(text);
+                }
                 return Optional.of(instructionFor(kind, scope.id(), supportsSubagents.test(agent), tiers,
                         sessionModel));
             } catch (InterruptedException e) {

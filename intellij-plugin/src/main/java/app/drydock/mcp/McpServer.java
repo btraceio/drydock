@@ -25,9 +25,17 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -133,9 +141,58 @@ public final class McpServer implements AutoCloseable {
     }
 
     public McpServer(McpSessionRegistry registry, McpToolRouter router, McpActivityLog activityLog) {
+        this(registry, router, activityLog, RemoteMcpTransportPolicy.LOCAL);
+    }
+
+    public McpServer(McpSessionRegistry registry, McpToolRouter router, McpActivityLog activityLog,
+                     RemoteMcpTransportPolicy policy) {
+        this(registry, router, activityLog, policy, RemoteAuthorizationPermit.Seams.NONE);
+    }
+
+    public McpServer(McpSessionRegistry registry, McpToolRouter router, McpActivityLog activityLog,
+                     RemoteMcpTransportPolicy policy, RemoteAuthorizationPermit.Seams seams) {
+        this.seams = seams;
         this.activityLog = activityLog;
         this.registry = registry;
         this.router = router;
+        this.policy = policy;
+        this.appPermits = new Semaphore(policy.bounded() ? policy.maxConcurrent() : Integer.MAX_VALUE);
+    }
+
+    private final RemoteMcpTransportPolicy policy;
+    private final RemoteAuthorizationPermit.Seams seams;
+    private final Semaphore appPermits;
+    private final ConcurrentHashMap<ManagedSessionId, AtomicInteger> sessionInFlight = new ConcurrentHashMap<>();
+
+    /**
+     * One request's concurrency permits. Release is idempotent and is run by
+     * whichever side finishes last: a dispatch that outlives its deadline keeps
+     * its permits until it really returns, so the caps bound live work.
+     */
+    private final class Lease {
+        private final AtomicBoolean released = new AtomicBoolean();
+        private volatile ManagedSessionId session;
+
+        boolean bindSession(ManagedSessionId id) {
+            AtomicInteger count = sessionInFlight.computeIfAbsent(id, k -> new AtomicInteger());
+            if (count.incrementAndGet() > policy.maxPerSession()) {
+                count.decrementAndGet();
+                return false;
+            }
+            session = id;
+            return true;
+        }
+
+        void release() {
+            if (!released.compareAndSet(false, true)) {
+                return;
+            }
+            ManagedSessionId id = session;
+            if (id != null) {
+                sessionInFlight.computeIfPresent(id, (k, v) -> v.decrementAndGet() <= 0 ? null : v);
+            }
+            appPermits.release();
+        }
     }
 
     /** A no-op once {@link #close()} has been called; never binds after shutdown. */
@@ -312,13 +369,26 @@ public final class McpServer implements AutoCloseable {
 
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Lease lease = null;
+            if (policy.bounded()) {
+                if (!appPermits.tryAcquire()) {
+                    sendEmpty(exchange, 503);
+                    exchange.close();
+                    return;
+                }
+                lease = new Lease();
+            }
+            boolean[] handedOff = {false};
             try {
-                handleSafely(exchange);
+                handleSafely(exchange, lease, handedOff);
             } catch (Exception e) {
                 // One bad request must not kill the server or this connection.
                 LOG.log(Level.WARNING, "Unhandled error serving MCP request", e);
                 sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32603, "Internal error"));
             } finally {
+                if (lease != null && !handedOff[0]) {
+                    lease.release();
+                }
                 exchange.close();
             }
         }
@@ -369,7 +439,7 @@ public final class McpServer implements AutoCloseable {
             return credential.isEmpty() ? Optional.empty() : Optional.of(credential);
         }
 
-        private void handleSafely(HttpExchange exchange) throws IOException {
+        private void handleSafely(HttpExchange exchange, Lease lease, boolean[] handedOff) throws IOException {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                 sendEmpty(exchange, 405);
                 return;
@@ -386,15 +456,29 @@ public final class McpServer implements AutoCloseable {
 
             // The body is read before the token resolves, because a rejected
             // call is worth a row naming it -- see recordRejectedToolCall.
-            String body = readBody(exchange.getRequestBody());
+            byte[] raw = readBody(exchange.getRequestBody());
+            if (policy.bounded() && raw.length > policy.maxBodyBytes()) {
+                sendEmpty(exchange, 413);
+                return;
+            }
+            String body = new String(raw, StandardCharsets.UTF_8);
             JsonValue parsed;
             try {
-                parsed = JsonParser.parse(body);
+                parsed = policy.bounded() ? JsonParser.parseStrict(body, policy.maxJsonDepth())
+                        : JsonParser.parse(body);
             } catch (JsonParseException e) {
                 // There is nothing the activity panel can show -- no call to
                 // name -- so the one trace an unparseable request gets is here.
-                LOG.log(Level.WARNING, "Could not parse an MCP request: " + e.getMessage());
+                // A bounded endpoint logs no parser text: it can echo request content.
+                LOG.log(Level.WARNING, policy.bounded() ? "Could not parse an MCP request"
+                        : "Could not parse an MCP request: " + e.getMessage());
                 sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32700, "Parse error"));
+                return;
+            }
+
+            if (policy.rejectBatch() && parsed instanceof JsonArray) {
+                sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32600,
+                        "Batch requests are not supported"));
                 return;
             }
 
@@ -423,7 +507,75 @@ public final class McpServer implements AutoCloseable {
                 return;
             }
 
-            sendJson(exchange, 200, dispatch(caller.get(), method, params, id));
+            RemoteAuthorizationPermit permit = null;
+            if (seams.permits() != null) {
+                permit = seams.permits().permitFor(caller.get()).orElse(null);
+                if (permit == null || !permit.sessionId().equals(caller.get()) || !permit.isCurrent()) {
+                    sendEmpty(exchange, 401);
+                    return;
+                }
+            }
+            String launchNonce = exchange.getRequestHeaders().getFirst("X-Drydock-Launch-Nonce");
+            String bridgePid = exchange.getRequestHeaders().getFirst("X-Drydock-Bridge-Pid");
+            RemoteAuthorizationPermit requestPermit = permit;
+            Supplier<JsonValue> call = () -> dispatchBound(requestPermit, caller.get(), method, params, id,
+                    launchNonce, bridgePid);
+            if (!policy.bounded()) {
+                sendJson(exchange, 200, call.get());
+                return;
+            }
+            if (!lease.bindSession(caller.get())) {
+                sendEmpty(exchange, 429);
+                return;
+            }
+            ExecutorService pool = executor;
+            if (pool == null) {
+                sendEmpty(exchange, 503);
+                return;
+            }
+            Future<JsonValue> work;
+            try {
+                work = pool.submit(() -> {
+                    try {
+                        return call.get();
+                    } finally {
+                        lease.release();
+                    }
+                });
+            } catch (RuntimeException rejected) {
+                sendEmpty(exchange, 503);
+                return;
+            }
+            handedOff[0] = true;
+            try {
+                sendJson(exchange, 200, work.get(policy.deadline().toNanos(), TimeUnit.NANOSECONDS));
+            } catch (TimeoutException e) {
+                work.cancel(true);
+                sendJson(exchange, 200, errorResponse(id, -32001, "Request timed out"));
+            } catch (ExecutionException e) {
+                LOG.log(Level.WARNING, "Unhandled error serving MCP request", e.getCause());
+                sendJson(exchange, 200, errorResponse(id, -32603, "Internal error"));
+            } catch (InterruptedException e) {
+                work.cancel(true);
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        /** Binds the request's permit for exactly this dispatch and notifies the observer of an authenticated initialize. */
+        private JsonValue dispatchBound(RemoteAuthorizationPermit permit, ManagedSessionId caller, String method,
+                                        JsonValue params, JsonValue id, String launchNonce, String bridgePid) {
+            try (RemoteAuthorizationPermit.Bound ignored = permit == null ? null
+                    : RemoteAuthorizationPermit.Bound.bind(permit)) {
+                if ("initialize".equals(method) && seams.observer() != null) {
+                    try {
+                        seams.observer().authenticatedInitialize(caller, launchNonce, bridgePid);
+                    } catch (RuntimeException e) {
+                        // Never log the exception text: it may carry launch identity.
+                        LOG.log(Level.WARNING, "Initialize observer failed: " + e.getClass().getSimpleName());
+                    }
+                }
+                return dispatch(caller, method, params, id);
+            }
         }
 
         private JsonValue dispatch(ManagedSessionId caller, String method, JsonValue params, JsonValue id) {
@@ -602,12 +754,19 @@ public final class McpServer implements AutoCloseable {
                     || presented.equals("127.0.0.1:" + port) || presented.equals("localhost:" + port);
         }
 
-        private String readBody(InputStream in) throws IOException {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        /** Reads at most limit+1 bytes on a bounded endpoint, so an overrun is seen without buffering it. */
+        private byte[] readBody(InputStream in) throws IOException {
+            return policy.bounded() ? in.readNBytes(policy.maxBodyBytes() + 1) : in.readAllBytes();
         }
 
         private void sendJson(HttpExchange exchange, int status, JsonValue value) throws IOException {
             byte[] bytes = JsonWriter.write(value).getBytes(StandardCharsets.UTF_8);
+            if (policy.bounded() && bytes.length > policy.maxResponseBytes()) {
+                JsonValue id = value instanceof JsonObject o && o.get("id") != null
+                        ? o.get("id") : JsonValue.JsonNull.INSTANCE;
+                bytes = JsonWriter.write(errorResponse(id, -32603, "Response too large"))
+                        .getBytes(StandardCharsets.UTF_8);
+            }
             exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(status, bytes.length);
             exchange.getResponseBody().write(bytes);

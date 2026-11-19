@@ -8,7 +8,9 @@ import app.drydock.review.RecheckAssessment;
 import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
+import app.drydock.review.ReviewInstructions;
 import app.drydock.review.ReviewVerdict;
+import app.drydock.review.tour.ReviewTour;
 import app.drydock.review.tour.TourRecord;
 
 import java.nio.file.Path;
@@ -104,6 +106,23 @@ public interface McpSessionContext {
 
     /** The scope's tour record, if the agent has posted one. */
     Optional<TourRecord> tourOf(String scopeId);
+
+    /** The integration-only review instructions served by {@code review_scope include=instructions}. */
+    record ReviewIntegration(String mode, String text) {
+    }
+
+    /**
+     * The integration-only instructions for an already-authorized {@code scope}.
+     * The router calls this only after the live-session and scope checks, and
+     * the presentation mode is never a caller argument. The default reads the
+     * scope's stored tour kind, falling back to a checked tour.
+     */
+    default ReviewIntegration reviewIntegration(ReviewScope scope, ManagedSessionId caller) {
+        ReviewTour.Kind kind = tourOf(scope.id()).map(record -> record.tour().kind()).orElse(ReviewTour.Kind.TOUR);
+        boolean sections = kind == ReviewTour.Kind.SECTIONS;
+        return new ReviewIntegration(sections ? "sections" : "tour",
+                ReviewInstructions.forIntegration(scope.id(), sections));
+    }
 
     /** Stores (replaces) the scope's tour record and flushes it to disk. */
     void putTour(TourRecord record);

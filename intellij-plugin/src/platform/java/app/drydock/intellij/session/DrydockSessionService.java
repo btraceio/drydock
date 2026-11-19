@@ -7,14 +7,16 @@ import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
 import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.RemoteLaunchSupport;
 import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
-import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.app.AgentRenameMutation;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.babysit.BabysitInstructions;
 import app.drydock.babysit.BabysitPairing;
@@ -51,6 +53,7 @@ import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
+import app.drydock.intellij.remote.RemoteReviewService;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.intellij.workspace.WorkspaceSettings;
@@ -61,6 +64,7 @@ import app.drydock.mcp.McpToolException;
 import app.drydock.mcp.PromptSafety;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
+import app.drydock.sdlc.SessionWorkflowResourceOwner;
 import app.drydock.tasks.TaskGuidance;
 import app.drydock.workspace.BoxShell;
 import app.drydock.workspace.CommandRunner;
@@ -183,14 +187,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private final Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor;
     private final AgentConsoleHost consoles;
     private final ExecutorService executor;
-    /**
-     * The stdio MCP servers a session in a given worktree starts: the IDE's
-     * bundled server routed to that worktree, when it is enabled. Never fails
-     * a launch; a broken lookup degrades to no IDE tools.
-     */
-    private final Function<Path, List<StdioMcpServer>> stdioMcpServers;
-    /** Mints and revokes each launch's Drydock MCP credentials. */
-    private final SessionMcpAccess mcpAccess;
+    /** The local launch's MCP access, IDE server and task-resource assembly. */
+    private final LocalLaunchPreparation launch;
 
     /**
      * The application-wide launch claims; every launch holds its session's
@@ -200,13 +198,6 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /** The end-of-agent half: persistence, late id binding, and the id bookkeeping both halves share. */
     private final SessionEnds ends;
-
-    /**
-     * The launch-resources resolver (T29a): null is every pre-T29
-     * caller's path -- nothing resolves and every launch is
-     * byte-identical to before.
-     */
-    private final TaskLaunchResources taskLaunchResources;
 
     /** Whether workspace-box sessions are opted in (Settings › Tools › Drydock). */
     private final BooleanSupplier workspaceSessionsEnabled;
@@ -354,10 +345,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.repositoryIdFor = Objects.requireNonNull(repositoryIdFor, "repositoryIdFor");
         this.consoles = Objects.requireNonNull(consoles, "consoles");
         this.executor = Objects.requireNonNull(executor, "executor");
-        this.stdioMcpServers = Objects.requireNonNull(stdioMcpServers, "stdioMcpServers");
-        this.mcpAccess = Objects.requireNonNull(mcpAccess, "mcpAccess");
+        this.launch = new LocalLaunchPreparation(taskLaunchResources, mcpAccess, stdioMcpServers);
         this.claims = Objects.requireNonNull(claims, "claims");
-        this.taskLaunchResources = taskLaunchResources;
         this.workspaceSessionsEnabled = Objects.requireNonNull(workspaceSessionsEnabled, "workspaceSessionsEnabled");
         this.boxShell = Objects.requireNonNull(boxShell, "boxShell");
         this.workspacesCli = Objects.requireNonNull(workspacesCli, "workspacesCli");
@@ -367,6 +356,63 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.babysitGit = Objects.requireNonNull(babysitGit, "babysitGit");
         this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims, boxShell,
                 () -> remoteLiveness, clientEnds);
+    }
+
+    /** T35 seam: the retained-resource owner and typed local workflow access for launches. */
+    void workflowResources(SessionWorkflowResourceOwner owner, Function<ManagedSessionId, Optional<LocalWorkflowAccess>> access) { launch.workflowResources(owner, access); }
+
+    /** T67 seam: the remote review identity (no production source yet); unset = remote launches unchanged. */
+    interface RemoteReviewWiring {
+        RemoteReviewService.Session session(ManagedAgentSession s, String conversationId);
+        RemoteLaunchSupport.ReviewConnection connection(RemoteReviewService.Session session);
+        RemoteLaunchPreparation.Capability enrollment(RemoteReviewService.Session session);
+    }
+
+    private volatile RemoteLaunchPreparation remotePrep;
+    private volatile RemoteReviewWiring remoteWiring;
+
+    void remoteReview(RemoteLaunchPreparation prep, RemoteReviewWiring wiring) { remotePrep = prep; remoteWiring = wiring; }
+
+    /** The typed support (or none) and the post-spawn enrollment step; blocked prepare refuses pre-persist, pre-spawn. */
+    private record RemoteStage(Optional<RemoteLaunchSupport> support, Runnable afterSpawn) { }
+
+    private RemoteStage remoteStage(ManagedAgentSession s, RemoteLaunchPreparation.Invocation inv, String conv, boolean bypass) {
+        RemoteLaunchPreparation prep = remotePrep;
+        RemoteReviewWiring w = remoteWiring;
+        if (prep == null || w == null) {
+            return new RemoteStage(Optional.empty(), () -> { });
+        }
+        RemoteReviewService.Session rs = w.session(s, conv);
+        RemoteLaunchPreparation.Prepared p = prep.prepare(new RemoteLaunchPreparation.Request(inv,
+                RemoteLaunchPreparation.Attachment.ATTACHED, conv, new RemoteLaunchPreparation.Capability.Ready(),
+                new RemoteLaunchPreparation.Capability.NotConsumed(),
+                new RemoteLaunchPreparation.Capability.NotConsumed(), bypass, rs));
+        if (!p.proceeds()) {
+            throw new RemoteLaunchRefusal(p.blocked().orElseThrow());
+        }
+        p.notice().ifPresent(n -> LOG.log(Level.WARNING, n));
+        if (!p.review().ready()) {
+            return new RemoteStage(Optional.empty(), () -> { });
+        }
+        return new RemoteStage(Optional.of(RemoteLaunchSupport.ofReviewConnection(w.connection(rs))), () -> {
+            try {
+                executor.execute(() -> {
+                    RemoteLaunchPreparation.Capability e = enrollmentOf(w, rs);
+                    prep.afterSpawn(p, e, bypass).notice().ifPresent(n -> LOG.log(Level.WARNING, n));
+                });
+            } catch (RejectedExecutionException e) {
+                LOG.log(Level.DEBUG, "post-spawn enrollment skipped: the executor is closed");
+            }
+        });
+    }
+
+    /** The process is already running: an enrollment failure only downgrades the tools, never the process. */
+    private static RemoteLaunchPreparation.Capability enrollmentOf(RemoteReviewWiring w, RemoteReviewService.Session rs) {
+        try {
+            return w.enrollment(rs);
+        } catch (RuntimeException e) {
+            return new RemoteLaunchPreparation.Capability.Unverifiable(String.valueOf(e.getMessage()));
+        }
     }
 
     // ---- create flow ---------------------------------------------------------
@@ -581,19 +627,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 ? provider.idDiscovery() : Optional.empty();
         Object snapshot = discovery.map(value -> value.snapshot(candidate.workingDirectory())).orElse(null);
         Instant launchedAt = Instant.now();
-        Optional<McpAccess> access = mcpAccessFor(candidate.id(), provider);
+        Optional<McpAccess> access = launch.mcpAccessFor(candidate.id(), provider);
         // T29a: the replacement create resolves the SAME resources a direct
         // create of this session would, before its context is built -- a
         // transfer must not drop the session's task context.
-        Optional<LaunchResources> resources = launchResourcesFor(candidate.id(), access);
+        Optional<LaunchResources> resources = launch.resourcesFor(candidate.id(), access);
         CreateContext context = new CreateContext(candidate.displayName(), generatedId,
                 candidate.workingDirectory(), Optional.empty(), access, candidate.evalMode(),
-                candidate.readOnly(), initialPrompt).withStdioMcpServers(stdioMcpServersFor(candidate.workingDirectory()));
+                candidate.readOnly(), initialPrompt).withStdioMcpServers(launch.stdioMcpServersFor(candidate.workingDirectory()));
         if (resources.isPresent()) {
             context = context.withLaunchResources(resources.get());
         }
-        LaunchPlan plan = provider.buildCreateCommand(context);
-        releaseIfUnused(candidate.id(), access, plan);
+        LaunchPlan plan = provider.buildCreateCommand(launch.withWorkflow(context, candidate.id()));
+        launch.releaseIfUnused(candidate.id(), access, plan);
         if (!plan.supported()) {
             throw new IllegalStateException(kindName(provider.kind())
                     + " cannot launch this session (unsupported context)");
@@ -823,7 +869,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * (INV-4).
      */
     private void endClaim(ManagedSessionId id) {
-        claims.finish(id, () -> releaseMcpAccess(id));
+        claims.finish(id, () -> launch.release(id));
         ends.settleDeferredRemoteEnd(id);
     }
 
@@ -913,23 +959,23 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
         ends.lastLaunchedAt().put(prepared.id(), launchedAt);
-        Optional<McpAccess> access = mcpAccessFor(prepared.id(), provider);
+        Optional<McpAccess> access = launch.mcpAccessFor(prepared.id(), provider);
         // Resolved BEFORE the context is built (T29a): the receipt and
         // directory I/O is blocking, and this whole pre-spawn stage runs on
         // the executor, never the EDT (AGENTS.md). A receipt directory that
         // cannot be resolved refuses the launch visibly here; no resources
         // resolve to empty and the launch is byte-identical to before.
-        Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), access);
+        Optional<LaunchResources> resources = launch.resourcesFor(prepared.id(), access);
         try {
             CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
                     Optional.empty(), access, model, prepared.evalMode(), prepared.readOnly(), initialPrompt,
                     List.of())
-                    .withStdioMcpServers(stdioMcpServersFor(cwd));
+                    .withStdioMcpServers(launch.stdioMcpServersFor(cwd));
             if (resources.isPresent()) {
                 ctx = ctx.withLaunchResources(resources.get());
             }
-            LaunchPlan plan = provider.buildCreateCommand(ctx);
-            releaseIfUnused(prepared.id(), access, plan);
+            LaunchPlan plan = provider.buildCreateCommand(launch.withWorkflow(ctx, prepared.id()));
+            launch.releaseIfUnused(prepared.id(), access, plan);
             if (!plan.supported()) {
                 // AC11: name the agent, open nothing.
                 throw new IllegalStateException(
@@ -1000,16 +1046,21 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // that would run it unmarked).
             throw new RemoteLaunchRefusal("eval sessions cannot run on a workspace box");
         }
-        Optional<LaunchResources> resources = launchResourcesFor(prepared.id(), Optional.empty());
+        Optional<LaunchResources> resources = launch.resourcesFor(prepared.id(), Optional.empty());
         if (resources.isPresent()) {
             throw new RemoteLaunchRefusal(kindName(prepared.agentKind())
                     + " cannot take this session's task resources onto a workspace box");
         }
         String generatedId = UUID.randomUUID().toString();
+        RemoteStage stage = remoteStage(prepared, RemoteLaunchPreparation.Invocation.FRESH_TASK, generatedId,
+                initialPrompt.isEmpty());
         CreateContext ctx = new CreateContext(prepared.displayName(), generatedId,
                 prepared.workingDirectory(), Optional.of(box.sshRemote()), Optional.empty(), model,
                 false, prepared.readOnly(), initialPrompt, List.of())
                 .withPersistence(new RemotePersistence(prepared.id(), BOX_AGENT_ENV));
+        if (stage.support().isPresent()) {
+            ctx = ctx.withRemoteLaunchSupport(stage.support().get());
+        }
         LaunchPlan plan = provider.buildCreateCommand(ctx);
         if (!plan.supported()) {
             throw new RemoteLaunchRefusal(kindName(provider.kind())
@@ -1032,6 +1083,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // steer this launch's.
         clientEnds.clear(prepared.id());
         CompletableFuture<Void> open = consoles.startConsole(prepared.id(), consoleCwdFor(prepared), plan);
+        stage.afterSpawn().run();
         return new StartedLaunch(prepared, Optional.empty(), null, launchedAt, generatedId, sessionIdUsed,
                 model, tiers, open);
     }
@@ -1231,71 +1283,6 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // the interactive picker.
             LOG.log(Level.WARNING, () -> started.prepared().agentKind() + " id discovery failed for "
                     + started.prepared().id() + "; resume will use the picker: " + e);
-        }
-    }
-
-    /**
-     * The resources this launch carries (T29a), resolved on this executor
-     * stage BEFORE any context is built, never the EDT: the session's
-     * retained receipt directories plus the installed guidance when this
-     * launch's MCP access reaches a task-serving surface. A receipt
-     * directory that cannot be resolved is a visible refusal, never a
-     * silent empty-resources launch; a session carrying neither resolves
-     * to empty and its launch is byte-identical to the pre-task one. A
-     * null resolver (the pre-T29 seam) resolves nothing, byte-identically.
-     */
-    private Optional<LaunchResources> launchResourcesFor(ManagedSessionId id, Optional<McpAccess> access) {
-        TaskLaunchResources resolver = taskLaunchResources;
-        return resolver == null ? Optional.empty() : resolver.resolve(id, access);
-    }
-
-    /**
-     * The Drydock MCP access for a launch of {@code id}, or empty when the
-     * access service declines or throws. A failure is logged without the
-     * credentials and never fails the launch.
-     */
-    private Optional<McpAccess> mcpAccessFor(ManagedSessionId id, AgentProvider provider) {
-        try {
-            return mcpAccess.accessFor(id, provider.mcpDelivery());
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, () -> "Launching " + id + " without Drydock MCP access: " + e);
-            return Optional.empty();
-        }
-    }
-
-    /**
-     * Revokes {@code id}'s MCP access when {@code plan} does not carry its
-     * credential file. A provider can drop the Drydock server from the
-     * command, for example when Claude's probe finds no {@code --mcp-config}
-     * or Pi's MCP extension fails to install. Every provider puts the file
-     * into the command as {@link AgentCommands#shellQuote}, so its absence
-     * means the agent never reaches the server, and the session must not
-     * report that it holds access.
-     */
-    private void releaseIfUnused(ManagedSessionId id, Optional<McpAccess> access, LaunchPlan plan) {
-        Optional<Path> file = access.flatMap(McpAccess::credentialFile);
-        if (file.isPresent() && !plan.command().contains(AgentCommands.shellQuote(file.get().toString()))) {
-            LOG.log(Level.INFO, () -> "Launch of " + id + " does not use Drydock MCP access; releasing it");
-            releaseMcpAccess(id);
-        }
-    }
-
-    /** Revokes {@code id}'s MCP access; a failure is logged and swallowed. */
-    private void releaseMcpAccess(ManagedSessionId id) {
-        try {
-            mcpAccess.release(id);
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, () -> "Releasing Drydock MCP access for " + id + " failed: " + e);
-        }
-    }
-
-    private List<StdioMcpServer> stdioMcpServersFor(Path workingDirectory) {
-        try {
-            return stdioMcpServers.apply(workingDirectory);
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, () -> "Launching without the IDE's MCP server for " + workingDirectory
-                    + ": " + e);
-            return List.of();
         }
     }
 
@@ -1579,11 +1566,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // provider's own no-id branch is what a session without an id gets
             // (AC21). The row's eval mode rides the resume: an eval session
             // resumes on the eval account, like the app's resumeSession.
-            Optional<McpAccess> access = mcpAccessFor(session.id(), provider);
+            Optional<McpAccess> access = launch.mcpAccessFor(session.id(), provider);
             // T29a: resolved before the context, on this executor stage
             // (never the EDT); a resumed task session re-receives exactly
             // what its retained receipts and the MCP surface resolve now.
-            Optional<LaunchResources> resources = launchResourcesFor(session.id(), access);
+            Optional<LaunchResources> resources = launch.resourcesFor(session.id(), access);
             // The eval mark rides the resumed conversation's session key, and
             // is in place before the command is built; best-effort like the
             // launch-side mark. A session with no bound id cannot be
@@ -1600,12 +1587,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     session.workingDirectory(), Optional.empty(), access, session.evalMode(), session.readOnly(),
                     List.of(),
                     resumePromptFor(session, promptOverride))
-                    .withStdioMcpServers(stdioMcpServersFor(session.workingDirectory()));
+                    .withStdioMcpServers(launch.stdioMcpServersFor(session.workingDirectory()));
             if (resources.isPresent()) {
                 ctx = ctx.withLaunchResources(resources.get());
             }
-            plan = provider.buildResumeCommand(ctx);
-            releaseIfUnused(session.id(), access, plan);
+            plan = provider.buildResumeCommand(launch.withWorkflow(ctx, session.id()));
+            launch.releaseIfUnused(session.id(), access, plan);
         } catch (RuntimeException failure) {
             unmarkEvalAsync(session);
             persistFailedBestEffort(session);
@@ -1783,12 +1770,17 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 .orElseThrow(() -> new IllegalStateException("No " + session.agentKind() + " ("
                         + session.agentKind().persistedName() + ") provider is registered; cannot resume session"));
         LaunchPlan plan;
+        RemoteStage stage = remoteStage(session, RemoteLaunchPreparation.Invocation.RESUME_NEW_PROCESS,
+                session.agentSessionId().orElse(""), !session.startedWithTask());
         try {
             ResumeContext ctx = new ResumeContext(session.agentSessionId(), session.agentSessionName(),
                     session.workingDirectory(), Optional.of(box.sshRemote()), Optional.empty(), false,
                     session.readOnly(), List.of(),
                     resumePromptFor(session, promptOverride))
                     .withPersistence(new RemotePersistence(session.id(), BOX_AGENT_ENV));
+            if (stage.support().isPresent()) {
+                ctx = ctx.withRemoteLaunchSupport(stage.support().get());
+            }
             plan = provider.buildResumeCommand(ctx);
         } catch (RuntimeException failure) {
             persistFailedBestEffort(session);
@@ -1811,6 +1803,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             persistFailedBestEffort(session);
             throw failure;
         }
+        stage.afterSpawn().run();
         return open
                 .handleAsync((ignored, ex) -> finalizeResume(session, ex), executor);
     }
@@ -2197,45 +2190,13 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(title, "title");
         return initialization.thenApplyAsync(unused -> {
-            RenameOutcome[] result = new RenameOutcome[1];
-            stateStore.get().update(state -> {
-                ManagedAgentSession session = state.sessions().stream()
-                        .filter(existing -> existing.id().equals(sessionId))
-                        .findFirst()
-                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"));
-                if (session.namePinned()) {
-                    result[0] = new RenameOutcome(RenameKind.PINNED, session.displayName());
-                    return state;
-                }
-                if (session.displayName().equals(title)) {
-                    result[0] = new RenameOutcome(RenameKind.UNCHANGED, session.displayName());
-                    return state;
-                }
-                Optional<ManagedAgentSession> clash = state.sessions().stream()
-                        .filter(other -> !other.id().equals(sessionId))
-                        .filter(other -> other.repositoryId().equals(session.repositoryId()))
-                        // Both sides folded: a stored name came through the
-                        // human path, which applies no checkSessionTitle, so
-                        // it can carry a non-breaking space that renders
-                        // identically.
-                        .filter(other -> PromptSafety.foldForComparison(other.displayName()).equalsIgnoreCase(title))
-                        .findFirst();
-                if (clash.isPresent()) {
-                    result[0] = new RenameOutcome(RenameKind.COLLIDED, clash.get().displayName());
-                    return state;
-                }
-                ManagedAgentSession renamed = session.withDisplayName(title);
-                result[0] = new RenameOutcome(RenameKind.RENAMED, title);
-                return state.withSessions(state.sessions().stream()
-                        .map(existing -> existing.id().equals(sessionId) ? renamed : existing)
-                        .toList());
-            });
+            RenameOutcome outcome = AgentRenameMutation.apply(stateStore.get(), sessionId, title);
             // Only a real change is worth a republish; a refused attempt must
             // not buy the agent a task-tree rebuild.
-            if (result[0].kind() == RenameKind.RENAMED) {
+            if (outcome.kind() == RenameKind.RENAMED) {
                 DrydockSessionsListener.publishChanged();
             }
-            return result[0];
+            return outcome;
         }, executor);
     }
 

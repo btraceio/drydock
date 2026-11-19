@@ -75,6 +75,14 @@ start, every engagement's PR is merged or closed, or none is left), and
 every child the watcher runs (gh, git, the headless agent) goes through
 `ProcessRunner` with a timeout.
 
+**Second sanctioned exception:** the managed reverse SSH forward for remote
+review tools is the only other child without an overall lifetime timeout. It
+is started solely through `ProcessRunner.startSshForward` with the argv built
+by `SshCommandBuilder` (argument list, pipes, no PTY, no ControlMaster); it
+lives until it exits or its handle is closed, while connect, readiness,
+keep-alive, shutdown and drain bounds stay explicit. Every one-shot
+operation around it keeps its deadline.
+
 - Every spawn has a timeout (short for status/query commands, long for
   clone-scale work). On expiry or interrupt: `destroyForcibly()`, join the
   readers, surface a distinct timeout failure. No bare `process.waitFor()`.

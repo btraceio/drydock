@@ -235,6 +235,39 @@ public final class SshCommandBuilder {
                 + posixQuote(remote.host()) + " " + posixQuote(remoteCommand);
     }
 
+    /**
+     * Argv for {@link ProcessRunner#startSshForward}: the managed reverse forward
+     * {@code ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=5
+     * -o ServerAliveInterval=3 -o ServerAliveCountMax=2 -o ControlMaster=no -o ControlPath=none
+     * -R 127.0.0.1:<remotePort>:127.0.0.1:<idePort> -- <host>}. Argument list only (no shell
+     * quoting applies), no PTY ({@code -T}), no remote command ({@code -N}), and multiplexing
+     * explicitly disabled so a user-config mux master can never adopt or outlive the child. Both
+     * ends are loopback only. {@code ExitOnForwardFailure} turns a refused remote bind into an
+     * exit; the forward has no overall lifetime, only the keep-alive budget bounds a dead link.
+     */
+    public static List<String> reverseForwardCommand(String host, int remotePort, int idePort) {
+        requireSshHost(host);
+        requirePort(remotePort, "remotePort");
+        requirePort(idePort, "idePort");
+        return List.of(
+                "ssh", "-N", "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=3",
+                "-o", "ServerAliveCountMax=2",
+                "-o", "ControlMaster=no",
+                "-o", "ControlPath=none",
+                "-R", "127.0.0.1:" + remotePort + ":127.0.0.1:" + idePort,
+                "--", host);
+    }
+
+    private static void requirePort(int port, String name) {
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException(name + " out of range: " + port);
+        }
+    }
+
     /** Wraps {@code value} as one POSIX single-quoted word, safe against embedded metacharacters. */
     public static String posixQuote(String value) {
         return "'" + value.replace("'", "'\\''") + "'";

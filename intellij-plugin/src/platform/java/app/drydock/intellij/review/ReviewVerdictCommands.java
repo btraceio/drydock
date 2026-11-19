@@ -6,6 +6,9 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.HunkDigest;
+import app.drydock.review.ReviewDataSnapshot;
+import app.drydock.review.ReviewDataSource;
+import app.drydock.review.ReviewDataSources;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
@@ -20,12 +23,15 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The tab's mark-reviewed / unmark commands: the write side of the Review
@@ -64,6 +70,8 @@ public final class ReviewVerdictCommands {
     private final GitStatusService git;
     private final AnnotationStore store;
     private final Executor executor;
+    /** The review-data dispatch the snapshot-bound overloads validate and read through; null = legacy local only. */
+    private final ReviewDataSources dispatch;
 
     /**
      * @param store the backend's own annotation store -- the same instance
@@ -75,6 +83,19 @@ public final class ReviewVerdictCommands {
      */
     public ReviewVerdictCommands(DiffService diffService, GitStatusService git, AnnotationStore store,
                                  Executor executor) {
+        this(diffService, git, store, executor, null);
+    }
+
+    /**
+     * As above, plus the headless dispatch the snapshot-bound overloads use:
+     * those validate the snapshot the human saw with a <em>fresh</em>
+     * {@link ReviewDataSources#validateCurrent} before any store write, and
+     * take the diff and the dating commits from it -- never from a local
+     * path or git, so a remote scope cannot fall through to the host.
+     */
+    public ReviewVerdictCommands(DiffService diffService, GitStatusService git, AnnotationStore store,
+                                 Executor executor, ReviewDataSources dispatch) {
+        this.dispatch = dispatch;
         this.diffService = Objects.requireNonNull(diffService, "diffService");
         this.git = Objects.requireNonNull(git, "git");
         this.store = Objects.requireNonNull(store, "store");
@@ -101,7 +122,68 @@ public final class ReviewVerdictCommands {
     public CompletableFuture<Result> markReviewed(ReviewScope scope, UnifiedDiff.FileDiff file) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(file, "file");
-        return diff(scope).thenApplyAsync(fresh -> mark(scope, file, fresh), executor);
+        return diff(scope).thenApplyAsync(fresh -> mark(scope, file, legacy(scope, fresh)), executor);
+    }
+
+    /** {@link #markReviewed(ReviewScope, UnifiedDiff.FileDiff)} bound to the snapshot the human saw. */
+    public CompletableFuture<Result> markReviewed(ReviewDataSnapshot shown, ReviewScope scope,
+                                                  UnifiedDiff.FileDiff file) {
+        Objects.requireNonNull(file, "file");
+        return validated(shown, scope, basis -> mark(scope, file, basis));
+    }
+
+    /** {@link #unmark(ReviewScope, UnifiedDiff.FileDiff)} bound to the snapshot the human saw. */
+    public CompletableFuture<Result> unmark(ReviewDataSnapshot shown, ReviewScope scope,
+                                            UnifiedDiff.FileDiff file) {
+        Objects.requireNonNull(file, "file");
+        return validated(shown, scope, basis -> unmark(scope, file, basis.diff()));
+    }
+
+    /** {@link #markHunks(ReviewScope, List, Optional)} bound to the snapshot the human saw. */
+    public CompletableFuture<Result> markHunks(ReviewDataSnapshot shown, ReviewScope scope, List<String> digests,
+                                               Optional<String> stepId) {
+        Objects.requireNonNull(digests, "digests");
+        Objects.requireNonNull(stepId, "stepId");
+        return validated(shown, scope, basis -> markHunks(scope, digests, stepId, basis));
+    }
+
+    /**
+     * The digest-dependent write gate: a fresh {@code validateCurrent} of
+     * {@code shown} (Stale, Unavailable and Refused all refuse, writing
+     * nothing), and the validated snapshot must be the one shown -- an
+     * adapter answering with different content is refused too. The write
+     * then runs on the validated snapshot's own diff and commits.
+     */
+    private CompletableFuture<Result> validated(ReviewDataSnapshot shown, ReviewScope scope,
+                                                Function<Basis, Result> write) {
+        Objects.requireNonNull(shown, "shown");
+        Objects.requireNonNull(scope, "scope");
+        if (dispatch == null) {
+            return CompletableFuture.completedFuture(new Result.Refused(
+                    "no review data dispatch is configured; nothing was written"));
+        }
+        if (!shown.scopeId().equals(scope.id())) {
+            return CompletableFuture.completedFuture(new Result.Refused(
+                    "the snapshot belongs to another review scope; nothing was written"));
+        }
+        return dispatch.validateCurrent(shown).thenApplyAsync(checked -> {
+            if (!(checked instanceof ReviewDataSource.Result.Ok<ReviewDataSnapshot>(ReviewDataSnapshot now))) {
+                return new Result.Refused("the review data is no longer current ("
+                        + checked.getClass().getSimpleName().toLowerCase(Locale.ROOT)
+                        + "); refresh the review; nothing was written");
+            }
+            if (!now.fingerprint().equals(shown.fingerprint()) || now.generation() != shown.generation()
+                    || !now.headCommit().equals(shown.headCommit())) {
+                return new Result.Refused("the review data changed since it was shown; "
+                        + "refresh the review; nothing was written");
+            }
+            return write.apply(new Basis(now.diff(), () -> Optional.of(now.baseCommit()),
+                    () -> Optional.of(now.headCommit())));
+        }, executor);
+    }
+
+    /** What a write works from: the diff and the two dating commits (lazy, so legacy git runs only when needed). */
+    private record Basis(UnifiedDiff diff, Supplier<Optional<String>> base, Supplier<Optional<String>> head) {
     }
 
     /**
@@ -130,7 +212,7 @@ public final class ReviewVerdictCommands {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(digests, "digests");
         Objects.requireNonNull(stepId, "stepId");
-        return diff(scope).thenApplyAsync(fresh -> markHunks(scope, digests, stepId, fresh), executor);
+        return diff(scope).thenApplyAsync(fresh -> markHunks(scope, digests, stepId, legacy(scope, fresh)), executor);
     }
 
     /**
@@ -153,15 +235,16 @@ public final class ReviewVerdictCommands {
      * anything to approve at all, then the writes. Runs on a background
      * executor; blocking git calls are legal here.
      */
-    private Result mark(ReviewScope scope, UnifiedDiff.FileDiff file, UnifiedDiff fresh) {
-        Optional<String> base = resolveRef(scope, scope.base());
+    private Result mark(ReviewScope scope, UnifiedDiff.FileDiff file, Basis basis) {
+        UnifiedDiff fresh = basis.diff();
+        Optional<String> base = basis.base().get();
         if (base.isEmpty()) {
             return new Result.Refused("the base of this review ('" + scope.base()
                     + "') does not resolve to a commit right now, so an approval could not be dated; "
                     + "nothing was written");
         }
         String headRef = SessionReviewScopes.headRevision(scope.head());
-        Optional<String> head = resolveRef(scope, headRef);
+        Optional<String> head = basis.head().get();
         if (head.isEmpty()) {
             return new Result.Refused("the head of this review ('" + headRef
                     + "') does not resolve to a commit right now, so an approval could not be dated; "
@@ -189,7 +272,8 @@ public final class ReviewVerdictCommands {
         return new Result.Ok();
     }
 
-    private Result markHunks(ReviewScope scope, List<String> digests, Optional<String> stepId, UnifiedDiff fresh) {
+    private Result markHunks(ReviewScope scope, List<String> digests, Optional<String> stepId, Basis basis) {
+        UnifiedDiff fresh = basis.diff();
         Map<String, Set<String>> rowsByDigest = new LinkedHashMap<>();
         Map<String, String> fileByDigest = new HashMap<>();
         Set<String> wanted = new LinkedHashSet<>(digests);
@@ -207,14 +291,14 @@ public final class ReviewVerdictCommands {
             return new Result.Refused("these changes are no longer in the diff: refresh the review; "
                     + "nothing was written");
         }
-        Optional<String> base = resolveRef(scope, scope.base());
+        Optional<String> base = basis.base().get();
         if (base.isEmpty()) {
             return new Result.Refused("the base of this review ('" + scope.base()
                     + "') does not resolve to a commit right now, so an approval could not be dated; "
                     + "nothing was written");
         }
         String headRef = SessionReviewScopes.headRevision(scope.head());
-        Optional<String> head = resolveRef(scope, headRef);
+        Optional<String> head = basis.head().get();
         if (head.isEmpty()) {
             return new Result.Refused("the head of this review ('" + headRef
                     + "') does not resolve to a commit right now, so an approval could not be dated; "
@@ -256,6 +340,12 @@ public final class ReviewVerdictCommands {
     }
 
     // ---- shared ---------------------------------------------------------
+
+    /** The legacy local basis: the fresh local diff, refs resolved through git only when a write asks. */
+    private Basis legacy(ReviewScope scope, UnifiedDiff fresh) {
+        return new Basis(fresh, () -> resolveRef(scope, scope.base()),
+                () -> resolveRef(scope, SessionReviewScopes.headRevision(scope.head())));
+    }
 
     /**
      * The distinct digests of the file's hunks in the fresh diff, in hunk

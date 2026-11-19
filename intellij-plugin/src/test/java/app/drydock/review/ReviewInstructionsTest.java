@@ -1,9 +1,12 @@
 package app.drydock.review;
 
 import app.drydock.domain.ModelTiers;
+import app.drydock.review.tour.TourValidator;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Optional;
 
@@ -363,5 +366,85 @@ class ReviewInstructionsTest {
         ModelTiers tiers = new ModelTiers(Optional.of("strong-1"), Optional.empty(), Optional.of("low-1"));
         String sections = ReviewInstructions.forSections("rs_abc123", true, tiers, Optional.empty());
         assertTrue(sections.contains("exactly `strong-1`") && sections.contains("exactly `low-1`"), sections);
+    }
+
+    // ---- integration-only form (INV-29 / AC-23) ----
+
+    private static String sha256(String text) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (byte b : MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8))) {
+            out.append(String.format("%02x", b));
+        }
+        return out.toString();
+    }
+
+    /** Digests of the pre-extraction outputs: the public forms must not move a byte. */
+    @Test
+    void thePublicFormsAreByteIdenticalToTheirPreExtractionOutput() throws Exception {
+        ModelTiers tiers = new ModelTiers(Optional.of("s"), Optional.empty(), Optional.of("l"));
+        assertEquals("406b300382857099e7f96743ee0ea1feed5c2fa60c64c7962212a71a158823d4",
+                sha256(ReviewInstructions.forScope("rs_x", false)));
+        assertEquals("127254680ed30c4bffc6c8c57912e1ec3adae613257a7006bd2be9bf3ac7fd4d",
+                sha256(ReviewInstructions.forScope("rs_x", true)));
+        assertEquals("5401a506b2db2afbe8c2d0dd7aea3791ff644d668e254d34a377091859e37dfe",
+                sha256(ReviewInstructions.forScope("rs_x", true, tiers, Optional.of("m"))));
+        assertEquals("6a9cd4964b4d668f552cd583659d11c56cc524a8f565c0797b23d0a157261b57",
+                sha256(ReviewInstructions.forSections("rs_x", false, ModelTiers.EMPTY, Optional.empty())));
+        assertEquals("7e050b40ff955cb330f44739b094ff9d2c2519535e2c2cd1461a8b0799c08c70",
+                sha256(ReviewInstructions.forSections("rs_x", true, ModelTiers.EMPTY, Optional.empty())));
+        assertEquals("b9da743f1c29e660bbe4586877abbb82965dd2ef8aa8e87f4948b61914292343",
+                sha256(ReviewInstructions.forSections("rs_x", true, tiers, Optional.of("m"))));
+        assertEquals("2b616aeb2bd0feca33be293114379406936aaa1d592bf430293d46d0595406d1",
+                sha256(ReviewInstructions.forTourRefresh("rs_x", List.of("s1", "s2"), 2)));
+    }
+
+    @Test
+    void theIntegrationFormsCarryNoDelegationModelRoleOrQualityGateText() {
+        for (boolean sections : new boolean[] {false, true}) {
+            String text = ReviewInstructions.forIntegration("rs_abc123", sections);
+            assertFalse(text.contains("\n"));
+            assertTrue(text.contains("rs_abc123") && text.contains("review_state"), text);
+            for (String forbidden : List.of("subagent", "Dispatch", "dispatch", "model", "tier", "sphinx",
+                    "code-review", "deep review", "quality gate", "MUST")) {
+                assertFalse(text.contains(forbidden), forbidden + " in: " + text);
+            }
+        }
+    }
+
+    @Test
+    void theTourFormCarriesTheValidatedCheckContractAndTheSectionsFormNone() {
+        String tour = ReviewInstructions.forIntegration("rs_abc123", false);
+        String sections = ReviewInstructions.forIntegration("rs_abc123", true);
+
+        // TourValidator: every row in a step, each step a check with an alternate; sections: none.
+        assertTrue(tour.contains("each step at least one check with an alternate"), tour);
+        assertTrue(tour.contains("predict only if its question can be answered from the removed and surrounding"
+                + " code"), tour);
+        assertTrue(tour.contains("must be answerable from what the tour itself explains"), tour);
+        assertFalse(tour.contains("kind sections"), tour);
+        assertTrue(sections.contains("review_tour with kind sections"), sections);
+        assertTrue(sections.contains("no step carries a check") && sections.contains("post no checks"), sections);
+        assertFalse(sections.contains("predict") || sections.contains("trace check")
+                || sections.contains("alternate"), sections);
+        for (String text : List.of(tour, sections)) {
+            assertTrue(text.contains("every changed row in a step"), text);
+            assertTrue(text.contains("lists every problem if it is rejected"), text);
+            assertTrue(text.contains("at most " + TourValidator.MAX_IMPACT_NOTES + " impact notes"), text);
+            assertTrue(text.contains("lines under " + TourValidator.MAX_DIAGRAM_LINE + " characters"), text);
+            assertTrue(text.contains("name those earlier steps' ids in its dependsOn"), text);
+            assertTrue(text.contains("without an anchor"), text);
+            assertTrue(text.contains("plain active-voice sentences"), text);
+        }
+        assertTrue(tour.contains("every unfamiliar term defined at first use"), tour);
+    }
+
+    @Test
+    void theIntegrationFormsShareTheirWorkClausesWithThePublicForms() {
+        assertTrue(ReviewInstructions.forScope("rs_abc123", false)
+                .contains(ReviewInstructions.forIntegration("rs_abc123", false)
+                        .substring("For review handle rs_abc123: ".length()).replaceAll("\\.$", "")));
+        assertTrue(ReviewInstructions.forSections("rs_abc123", false, ModelTiers.EMPTY, Optional.empty())
+                .contains(ReviewInstructions.forIntegration("rs_abc123", true)
+                        .substring("For review handle rs_abc123: ".length()).replaceAll("\\.$", "")));
     }
 }

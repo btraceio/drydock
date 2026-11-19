@@ -9,6 +9,8 @@ import app.drydock.domain.PullRequestTarget;
 import app.drydock.git.BranchNameRules;
 import app.drydock.git.WorktreeNaming;
 import app.drydock.projects.SharedProject;
+import app.drydock.sdlc.SelectedWorkflow;
+import app.drydock.sdlc.WorkflowPromptComposer;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -17,6 +19,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * The decisions behind the New task dialog, free of Swing: the generated
@@ -324,11 +327,39 @@ public final class NewTaskPlan {
             if (isSlashOneLiner(text)) {
                 return text;
             }
-            String framing = choice.subagentModelRule()
-                    .map(rule -> CLARIFY_FIRST + TITLE_GUIDANCE + rule + "\n\n")
-                    .orElse(CLARIFY_FIRST + TITLE_GUIDANCE);
-            return framing + CreateContext.TASK_SEPARATOR + "\n" + text;
+            return defaultFraming(choice) + CreateContext.TASK_SEPARATOR + "\n" + text;
         });
+    }
+
+    /**
+     * {@link #initialPrompt(Choice)} for a free-form task whose project
+     * workflow is looked up lazily. Blank instructions and a {@code /}
+     * one-liner return before {@code workflow} is asked, so a bypassed
+     * invocation never touches configuration. An empty answer is the
+     * built-in framing, byte for byte; a selected workflow is composed by
+     * {@link WorkflowPromptComposer}: its policy replaces only the
+     * clarify-first slot, and title guidance, the neutral tier rule, the
+     * unchanged separator and the task bytes are kept.
+     */
+    public static Optional<String> initialPrompt(Choice choice, Supplier<Optional<SelectedWorkflow>> workflow) {
+        Optional<String> text = choice.instructions().filter(t -> !t.isBlank());
+        if (text.isEmpty() || isSlashOneLiner(text.get())) {
+            return initialPrompt(choice);
+        }
+        Optional<SelectedWorkflow> selected = workflow.get();
+        if (selected.isEmpty()) {
+            return initialPrompt(choice);
+        }
+        return WorkflowPromptComposer.compose(new WorkflowPromptComposer.Input(
+                WorkflowPromptComposer.Origin.FREE_FORM, selected, CLARIFY_FIRST, "", text.get(),
+                Optional.empty(), Optional.empty(), Optional.of(TITLE_GUIDANCE), Optional.empty(),
+                choice.tiers(), choice.subagentModelRule().isPresent())).initialPrompt();
+    }
+
+    private static String defaultFraming(Choice choice) {
+        return choice.subagentModelRule()
+                .map(rule -> CLARIFY_FIRST + TITLE_GUIDANCE + rule + "\n\n")
+                .orElse(CLARIFY_FIRST + TITLE_GUIDANCE);
     }
 
     public static String primaryLabel(boolean warned) {

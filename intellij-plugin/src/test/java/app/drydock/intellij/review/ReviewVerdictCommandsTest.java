@@ -1,6 +1,9 @@
 package app.drydock.intellij.review;
 
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.git.DiffScope;
 import app.drydock.git.DiffService;
+import app.drydock.git.ReviewBase;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.UnifiedDiff;
 import app.drydock.process.ProcessResult;
@@ -10,6 +13,9 @@ import app.drydock.review.AnnotationStore;
 import app.drydock.review.Confidence;
 import app.drydock.review.HunkDigest;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewDataSnapshot;
+import app.drydock.review.ReviewDataSource;
+import app.drydock.review.ReviewDataSources;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewVerdict;
 import app.drydock.review.Severity;
@@ -25,17 +31,22 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -342,6 +353,132 @@ class ReviewVerdictCommandsTest {
                 store.verdict(scope.id(), identical).orElseThrow().decision());
         assertEquals(ReviewVerdict.Decision.CHANGES,
                 store.verdict(scope.id(), changes).orElseThrow().decision());
+    }
+
+    // ---- T72: fresh validation before every digest-dependent write ------------
+
+    private static final String REMOTE_BASE = "b".repeat(40);
+    private static final String REMOTE_HEAD = "c".repeat(40);
+
+    /** A remote-backed scope whose root names nothing on this host: any local diff or git use would fail. */
+    private ReviewScope remoteScope() {
+        return new ReviewScope("scope-r", ReviewScope.Kind.WORKTREE, base.resolve("no-such-remote-root"),
+                Optional.empty(), "main", "feat", Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    private ReviewDataSnapshot snapshotOf(ReviewScope s, UnifiedDiff diff, String fingerprint) {
+        return new ReviewDataSnapshot(s.id(), ReviewDataSource.Backend.REMOTE, "box", 7, DiffScope.BASE,
+                new ReviewBase("main", ReviewBase.Origin.DEFAULT_UNMEASURED), REMOTE_BASE, REMOTE_HEAD,
+                REMOTE_BASE, fingerprint, diff, Map.of(), Instant.EPOCH);
+    }
+
+    /** Commands over a remote adapter whose validateCurrent is {@code answer}; counts the validations. */
+    private ReviewVerdictCommands remoteCommands(
+            Function<ReviewDataSnapshot, ReviewDataSource.Result<ReviewDataSnapshot>> answer, AtomicInteger validations) {
+        ReviewDataSource remote = new ReviewDataSource() {
+            @Override public Backend backend() { return Backend.REMOTE; }
+            @Override public CompletableFuture<Result<ReviewScope>> resolve(ManagedSessionId s, String sel) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot>> refresh(ReviewScope s, BooleanSupplier c) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot.Content>> contents(
+                    ReviewDataSnapshot snap, String f, Side side) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<Excerpt>> excerpt(ManagedSessionId s, String f, int l, int c) {
+                throw new AssertionError();
+            }
+            @Override public CompletableFuture<Result<ReviewDataSnapshot>> validateCurrent(ReviewDataSnapshot snap) {
+                validations.incrementAndGet();
+                return CompletableFuture.completedFuture(answer.apply(snap));
+            }
+        };
+        ReviewDataSources.Verifier verifier = new ReviewDataSources.Verifier() {
+            @Override public Optional<ReviewDataSource.Backend> backendOfSession(ManagedSessionId s) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+            @Override public Optional<ReviewDataSource.Backend> backendOfScope(ReviewScope s) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+            @Override public Optional<ReviewDataSource.Backend> backendOfScopeId(String id) {
+                return Optional.of(ReviewDataSource.Backend.REMOTE);
+            }
+        };
+        EnumMap<ReviewDataSource.Backend, ReviewDataSource> map = new EnumMap<>(ReviewDataSource.Backend.class);
+        map.put(ReviewDataSource.Backend.REMOTE, remote);
+        return new ReviewVerdictCommands(diffService, git, store, executor, new ReviewDataSources(verifier, map));
+    }
+
+    @Test
+    void aFreshlyValidatedRemoteSnapshotIsApprovedFromItsOwnDiffAndCommitsWithoutLocalGit() throws Exception {
+        ReviewScope remote = remoteScope();
+        UnifiedDiff shownDiff = diff(scope);
+        ReviewDataSnapshot shown = snapshotOf(remote, shownDiff, "fp");
+        AtomicInteger validations = new AtomicInteger();
+        ReviewVerdictCommands cmds = remoteCommands(ReviewDataSource.Result.Ok::new, validations);
+        UnifiedDiff.FileDiff file = shownDiff.files().stream()
+                .filter(f -> f.path().equals("src/Distinct.java")).findFirst().orElseThrow();
+
+        assertInstanceOf(ReviewVerdictCommands.Result.Ok.class,
+                cmds.markReviewed(shown, remote, file).get(SECONDS, TimeUnit.SECONDS));
+        assertEquals(1, validations.get());
+        for (ReviewVerdict verdict : store.verdictsFor("scope-r")) {
+            assertEquals(REMOTE_BASE, verdict.baseCommit());
+            assertEquals(REMOTE_HEAD, verdict.headCommit());
+        }
+        assertEquals(2, store.verdictsFor("scope-r").size());
+
+        assertInstanceOf(ReviewVerdictCommands.Result.Ok.class,
+                cmds.unmark(shown, remote, file).get(SECONDS, TimeUnit.SECONDS));
+        assertTrue(store.verdictsFor("scope-r").isEmpty());
+        assertEquals(2, validations.get());
+
+        List<String> digests = List.copyOf(digestsOf(scope, "src/Changes.java"));
+        assertInstanceOf(ReviewVerdictCommands.Result.Ok.class,
+                cmds.markHunks(shown, remote, digests, Optional.empty()).get(SECONDS, TimeUnit.SECONDS));
+        assertEquals(3, validations.get());
+        assertEquals(1, store.verdictsFor("scope-r").size());
+    }
+
+    @Test
+    void aStaleUnavailableRefusedOrMismatchedValidationRefusesApprovalAndWritesNothing() throws Exception {
+        ReviewScope remote = remoteScope();
+        UnifiedDiff shownDiff = diff(scope);
+        ReviewDataSnapshot shown = snapshotOf(remote, shownDiff, "fp");
+        UnifiedDiff.FileDiff file = shownDiff.files().get(0);
+        List<Function<ReviewDataSnapshot, ReviewDataSource.Result<ReviewDataSnapshot>>> answers = List.of(
+                snap -> new ReviewDataSource.Result.Stale<>("generation 8 replaced generation 7"),
+                snap -> new ReviewDataSource.Result.Unavailable<>("connection lost"),
+                snap -> new ReviewDataSource.Result.Refused<>("root replaced"),
+                // refreshed content mismatch: Ok, but a different capture than the one shown
+                snap -> new ReviewDataSource.Result.Ok<>(snapshotOf(remote, shownDiff, "other-fingerprint")));
+        for (var answer : answers) {
+            ReviewVerdictCommands cmds = remoteCommands(answer, new AtomicInteger());
+            ReviewVerdictCommands.Result.Refused refused = assertInstanceOf(ReviewVerdictCommands.Result.Refused.class,
+                    cmds.markReviewed(shown, remote, file).get(SECONDS, TimeUnit.SECONDS));
+            assertTrue(refused.reason().contains("nothing was written"), refused.reason());
+            assertInstanceOf(ReviewVerdictCommands.Result.Refused.class, cmds.markHunks(shown, remote,
+                    List.of(HunkDigest.of(file.path(), file.hunks().get(0))), Optional.empty())
+                    .get(SECONDS, TimeUnit.SECONDS));
+            assertTrue(store.verdictsFor("scope-r").isEmpty(), "a refusal writes nothing");
+        }
+    }
+
+    @Test
+    void theSnapshotBoundOverloadsRefuseWithoutDispatchOrForAnotherScopesSnapshot() throws Exception {
+        UnifiedDiff shownDiff = diff(scope);
+        UnifiedDiff.FileDiff file = shownDiff.files().get(0);
+        ReviewScope remote = remoteScope();
+        ReviewDataSnapshot shown = snapshotOf(remote, shownDiff, "fp");
+        assertInstanceOf(ReviewVerdictCommands.Result.Refused.class,
+                commands.markReviewed(shown, remote, file).get(SECONDS, TimeUnit.SECONDS));
+        ReviewVerdictCommands cmds = remoteCommands(ReviewDataSource.Result.Ok::new, new AtomicInteger());
+        assertInstanceOf(ReviewVerdictCommands.Result.Refused.class,
+                cmds.markReviewed(shown, scope, file).get(SECONDS, TimeUnit.SECONDS));
+        assertTrue(store.verdictsFor("scope-r").isEmpty());
+        assertTrue(store.verdictsFor(scope.id()).isEmpty());
     }
 
     // ---- fixture helpers ----------------------------------------------------

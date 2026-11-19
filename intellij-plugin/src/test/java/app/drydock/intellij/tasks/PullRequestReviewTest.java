@@ -31,6 +31,8 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -91,6 +93,84 @@ class PullRequestReviewTest {
         assertTrue(resolved.isDone());
         assertFalse(resolved.isCompletedExceptionally());
         return resolved;
+    }
+
+    private static CompletableFuture<Optional<String>> resolveConfigured(PullRequestReview.ReviewPrompt prompt,
+                                                                         List<String> sent) {
+        // A resolved prompt would ride the launch as its initial prompt; record it as the "send".
+        return prompt.resolve(null).thenApply(resolved -> {
+            resolved.ifPresent(sent::add);
+            return resolved;
+        });
+    }
+
+    private static PullRequestReview.ReviewPrompt configured(
+            java.util.function.Supplier<? extends CompletableFuture<?>> init,
+            java.util.function.Supplier<Optional<app.drydock.intellij.review.ReviewBackend>> backend,
+            java.util.concurrent.Executor executor) {
+        return PullRequestReview.ReviewPrompt.configured(AgentKind.CLAUDE, scopeId -> "PROJECT METHOD " + scopeId,
+                init, backend, kind -> true, executor);
+    }
+
+    @Test
+    void aConfiguredReviewWithoutABackendRefusesBeforeSpawnAndSendsNothing() {
+        List<String> sent = new java.util.ArrayList<>();
+        PullRequestReview.ReviewPrompt prompt = configured(PullRequestReviewTest::initialized, Optional::empty,
+                Runnable::run);
+        CompletableFuture<Optional<String>> resolved = resolveConfigured(prompt, sent);
+        assertTrue(prompt.refusesWithoutIntegration());
+        assertTrue(resolved.isCompletedExceptionally());
+        var failure = assertThrows(java.util.concurrent.CompletionException.class, resolved::join);
+        assertInstanceOf(PullRequestReview.ReviewPrompt.ReviewRefused.class, failure.getCause());
+        assertTrue(failure.getCause().getMessage().contains("review service is not running"));
+        assertTrue(sent.isEmpty());
+    }
+
+    @Test
+    void aConfiguredReviewRefusesOnEveryResolutionFailureNeverABareSession() {
+        List<String> sent = new java.util.ArrayList<>();
+        for (PullRequestReview.ReviewPrompt prompt : List.of(
+                configured(() -> CompletableFuture.failedFuture(new IllegalStateException("init")), Optional::empty,
+                        Runnable::run),
+                configured(PullRequestReviewTest::initialized, () -> { throw new IllegalStateException("gone"); },
+                        Runnable::run),
+                configured(PullRequestReviewTest::initialized, Optional::empty,
+                        command -> { throw new RejectedExecutionException("gone"); }))) {
+            CompletableFuture<Optional<String>> resolved = resolveConfigured(prompt, sent);
+            assertTrue(resolved.isCompletedExceptionally());
+        }
+        assertTrue(sent.isEmpty());
+    }
+
+    @Test
+    void theDefaultOnlyReviewKeepsTheBareSessionAndVisibleComplaintWithoutRefusing() {
+        // The same absent backend that refuses a configured review: default-only (also default-once with no
+        // project override consumed) resolves empty, the bare session starts, the complaint is shown.
+        List<String> sent = new java.util.ArrayList<>();
+        PullRequestReview.ReviewPrompt prompt = PullRequestReview.ReviewPrompt.drydockReview(AgentKind.CLAUDE,
+                PullRequestReviewTest::initialized, Optional::empty, kind -> true, Runnable::run);
+        assertFalse(prompt.refusesWithoutIntegration());
+        assertEquals(Optional.empty(), resolveConfigured(prompt, sent).join());
+        assertTrue(sent.isEmpty());
+        assertEquals(Optional.of(message(new ReviewRequest.NotReady())), prompt.userMessage(NAME, true));
+    }
+
+    @Test
+    void anEditedProjectMethodIsConfiguredNotRelabelledDefault() {
+        // Strictness follows the factory, never the text: a configured prompt whose methodology equals the
+        // default instruction is still refused-without-integration.
+        PullRequestReview.ReviewPrompt edited = PullRequestReview.ReviewPrompt.configured(AgentKind.CLAUDE,
+                scopeId -> ReviewInstructions.forScope(scopeId, true, ModelTiers.EMPTY, Optional.empty()),
+                PullRequestReviewTest::initialized, Optional::empty, kind -> true, Runnable::run);
+        assertTrue(edited.refusesWithoutIntegration());
+        assertTrue(edited.resolve(null).isCompletedExceptionally());
+    }
+
+    @Test
+    void aSphinxFixedPromptIsNeverStrictAndNeedsNoIntegration() {
+        PullRequestReview.ReviewPrompt prompt = PullRequestReview.ReviewPrompt.fixed("/sphinx review pr 664");
+        assertFalse(prompt.refusesWithoutIntegration());
+        assertEquals(Optional.of("/sphinx review pr 664"), prompt.resolve(null).join());
     }
 
     @Test

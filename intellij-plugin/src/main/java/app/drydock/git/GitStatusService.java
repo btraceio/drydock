@@ -745,7 +745,7 @@ public final class GitStatusService implements AutoCloseable {
      * counts as existing when EITHER the local or the remote-tracking ref
      * does (the fork must see a remote-only default, e.g. a fresh clone
      * whose HEAD sits on a local branch the remote deleted), and the
-     * {@code origin/HEAD} guess is gated by {@link #isRefComponent}. It
+     * {@code origin/HEAD} guess is gated by {@link GitReviewQueryRules#isRefComponent}. It
      * never looks at the checkout's current branch, like {@link
      * #defaultBranchBlocking}.
      */
@@ -757,11 +757,11 @@ public final class GitStatusService implements AutoCloseable {
                 continue;
             }
             String name = head.substring("origin/".length());
-            if (isRefComponent(name)) {
+            if (GitReviewQueryRules.isRefComponent(name)) {
                 return Optional.of(name);
             }
         }
-        for (String candidate : DEFAULT_BRANCH_CANDIDATES) {
+        for (String candidate : GitReviewQueryRules.DEFAULT_BRANCH_CANDIDATES) {
             if (resolves(git, repositoryRoot, "refs/heads/" + candidate)
                     || resolves(git, repositoryRoot, "refs/remotes/origin/" + candidate)) {
                 return Optional.of(candidate);
@@ -852,24 +852,13 @@ public final class GitStatusService implements AutoCloseable {
         }
         // No origin/HEAD (a local-only repository, or one never cloned): fall
         // back to the conventional names, and only to ones that exist.
-        for (String candidate : DEFAULT_BRANCH_CANDIDATES) {
+        for (String candidate : GitReviewQueryRules.DEFAULT_BRANCH_CANDIDATES) {
             if (resolves(git, repositoryRoot, "refs/heads/" + candidate)) {
                 return Optional.of(candidate);
             }
         }
         return Optional.empty();
     }
-
-    /** The well-known default-branch names, in preference order, shared by the fork-point and review-base resolution. */
-    private static final List<String> DEFAULT_BRANCH_CANDIDATES = List.of("main", "master", "trunk", "develop");
-
-    /**
-     * The branches a review base is looked for among when no pull request
-     * declares one, after the repository's own default. {@code develop}
-     * before {@code trunk} because a repository that has both almost always
-     * integrates on the former.
-     */
-    private static final List<String> INTEGRATION_BRANCHES = List.of("main", "master", "develop", "trunk");
 
     /**
      * The branch {@code checkoutRoot}'s work should be diffed against.
@@ -914,37 +903,20 @@ public final class GitStatusService implements AutoCloseable {
         // Preference order doubles as the tie-break: a branch cut from the
         // default branch scores identically against every integration branch
         // that has not moved since, and the default is then the right answer.
-        List<String> candidates = new ArrayList<>();
         // The default arrives as a bare local name or as origin/<name>
-        // (defaultBranch's own local-first rule); resolved through the same
-        // remote-first rule as every other candidate, or kept verbatim when
-        // it resolves to nothing, so the fallback below is unchanged.
-        String defaultName = defaultBranch.startsWith("origin/")
-                ? defaultBranch.substring("origin/".length()) : defaultBranch;
-        candidates.add(resolveBranch(git, checkoutRoot, defaultName).orElse(defaultBranch));
-        for (String name : INTEGRATION_BRANCHES) {
-            resolveBranch(git, checkoutRoot, name)
-                    .filter(resolved -> !candidates.contains(resolved))
-                    .ifPresent(candidates::add);
-        }
-
-        String best = defaultBranch;
-        long fewest = Long.MAX_VALUE;
-        for (String candidate : candidates) {
-            long ahead = commitsAhead(git, checkoutRoot, candidate);
-            if (ahead >= 0 && ahead < fewest) {
-                fewest = ahead;
-                best = candidate;
-            }
-        }
-        if (fewest == Long.MAX_VALUE) {
+        // (defaultBranch's own local-first rule); the rules resolve it through
+        // the same remote-first rule as every other candidate.
+        List<String> candidates = GitReviewQueryRules.reviewBaseCandidates(
+                defaultBranch, name -> resolveBranch(git, checkoutRoot, name));
+        ReviewBase chosen = GitReviewQueryRules.chooseBase(
+                candidates, candidate -> commitsAhead(git, checkoutRoot, candidate), defaultBranch);
+        if (chosen.origin() == ReviewBase.Origin.DEFAULT_UNMEASURED) {
             // Not a detail to bury: this is the path that renders a whole
             // integration branch as though it were the review.
             LOG.log(Level.WARNING, "No review base candidate could be measured in " + checkoutRoot
                     + " (tried " + candidates + "); falling back to " + defaultBranch);
-            return new ReviewBase(defaultBranch, ReviewBase.Origin.DEFAULT_UNMEASURED);
         }
-        return new ReviewBase(best, ReviewBase.Origin.FORKED_FROM);
+        return chosen;
     }
 
     /**
@@ -981,8 +953,7 @@ public final class GitStatusService implements AutoCloseable {
      * that is not a ref here), which the caller reads as "not a candidate".
      */
     private long commitsAhead(Path git, Path checkoutRoot, String base) {
-        List<String> lines = runLinesAllowingFailure(git, checkoutRoot, List.of(
-                "rev-list", "--count", "--end-of-options", base + "..HEAD"));
+        List<String> lines = runLinesAllowingFailure(git, checkoutRoot, GitReviewQueryRules.commitsAheadArguments(base));
         if (lines.isEmpty()) {
             return -1;
         }

@@ -10,6 +10,9 @@ import app.drydock.intellij.tasks.NewTaskPlan.FixedWorktree;
 import app.drydock.intellij.tasks.NewTaskPlan.OpenIn;
 import app.drydock.intellij.tasks.NewTaskPlan.WorkIn;
 import app.drydock.projects.SharedProject;
+import app.drydock.sdlc.SelectedWorkflow;
+import app.drydock.sdlc.WorkflowBundle;
+import app.drydock.sdlc.WorkflowTarget;
 
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +21,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -126,6 +130,78 @@ class NewTaskPlanTest {
         String prompt = NewTaskPlan.initialPrompt(choice).orElseThrow();
         assertTrue(prompt.contains(CreateContext.TASK_SEPARATOR), prompt);
         assertTrue(prompt.endsWith("/sphinx review\npay attention to the diff"), prompt);
+    }
+
+    private static Optional<SelectedWorkflow> workflow(String text) {
+        return Optional.of(new SelectedWorkflow(RepositoryId.newId(), WorkflowTarget.FREE_FORM_PRE_PROMPT,
+                new SelectedWorkflow.SourceDescriptor(SelectedWorkflow.SourceKind.INLINE, "newTask.prePrompt",
+                        Optional.empty()), text, WorkflowBundle.empty(), "d"));
+    }
+
+    private static Choice piChoice(String task, Optional<String> rule) {
+        return new Choice("t", Optional.of(task), AgentKind.PI, SessionMode.WRITES, WorkIn.MAIN_CHECKOUT, "",
+                "origin/main", ROOT, OpenIn.THIS_WINDOW, Optional.empty(), Optional.empty(), rule);
+    }
+
+    @Test
+    void unconfiguredLookupIsByteIdenticalToTheBuiltInFraming() {
+        for (Optional<String> rule : List.of(Optional.<String>empty(), Optional.of("RULE"))) {
+            for (String task : List.of("Add it.\nTwice.", "/sphinx review", " \n ", "  keep \r\n bytes\n")) {
+                Choice c = piChoice(task, rule);
+                assertEquals(NewTaskPlan.initialPrompt(c),
+                        NewTaskPlan.initialPrompt(c, () -> Optional.empty()), task);
+            }
+        }
+        assertEquals(CLARIFY_FIRST_FOR_TEST + "Quickly understand", NewTaskPlan.initialPrompt(piChoice("x", Optional.empty()))
+                .orElseThrow().substring(0, CLARIFY_FIRST_FOR_TEST.length() + "Quickly understand".length()));
+    }
+
+    private static final String CLARIFY_FIRST_FOR_TEST = "Before writing any code, thoroughly clarify this request: "
+            + "brainstorm to pin down the exact requirements, and confirm them before implementing.\n\n";
+
+    @Test
+    void nativeCommandAndBlankNeverAskForTheWorkflow() {
+        AtomicInteger asked = new AtomicInteger();
+        for (String task : List.of("/sphinx review", "  /sphinx review  ", "", " \n\t ")) {
+            Optional<String> out = NewTaskPlan.initialPrompt(piChoice(task, Optional.of("RULE")), () -> {
+                asked.incrementAndGet();
+                return workflow("POLICY");
+            });
+            assertEquals(task.isBlank() ? Optional.empty() : Optional.of(task), out, task);
+        }
+        assertEquals(0, asked.get());
+        assertEquals(1, askedFor("prose", asked));
+    }
+
+    private static int askedFor(String task, AtomicInteger asked) {
+        NewTaskPlan.initialPrompt(piChoice(task, Optional.empty()), () -> {
+            asked.incrementAndGet();
+            return Optional.empty();
+        });
+        return asked.get();
+    }
+
+    @Test
+    void configuredPolicyReplacesOnlyClarifyAndKeepsTitleSeparatorAndTaskBytes() {
+        String task = "  do it\r\n\tkeep  bytes \n";
+        String prompt = NewTaskPlan.initialPrompt(piChoice(task, Optional.empty()), () -> workflow("MY-POLICY\n"))
+                .orElseThrow();
+        assertTrue(prompt.startsWith("MY-POLICY\n\nQuickly understand the gist"), prompt);
+        assertFalse(prompt.contains("Before writing any code"), prompt);
+        int at = prompt.indexOf(CreateContext.TASK_SEPARATOR);
+        assertEquals(at, prompt.lastIndexOf(CreateContext.TASK_SEPARATOR));
+        assertEquals("\n" + task, prompt.substring(at + CreateContext.TASK_SEPARATOR.length()));
+    }
+
+    @Test
+    void configuredPromptDropsTheLegacyRoleRuleForANeutralOneOnlyWithSubagents() {
+        Choice withRule = new Choice("t", Optional.of("task"), AgentKind.CLAUDE, SessionMode.WRITES,
+                WorkIn.MAIN_CHECKOUT, "", "origin/main", ROOT, OpenIn.THIS_WINDOW, Optional.empty(),
+                Optional.of(new ModelTiers(Optional.of("opus"), Optional.empty(), Optional.empty())),
+                Optional.of("LEGACY-ROLE-RULE"));
+        String prompt = NewTaskPlan.initialPrompt(withRule, () -> workflow("P")).orElseThrow();
+        assertFalse(prompt.contains("LEGACY-ROLE-RULE"), prompt);
+        assertTrue(prompt.contains("If you choose to dispatch subagents"), prompt);
     }
 
     @Test

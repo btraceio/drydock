@@ -1374,19 +1374,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 return new AnAction[] {addRemoteRepository};
             }
             // The opt-in is read per menu build, so toggling it in Settings
-            // takes effect on the next popup: on, the workspace-box action is
-            // registered for this build; off, the entry is neither laid out
-            // (TaskMenu) nor registered, so no flag-off build can show it —
-            // TaskMenu skips an Item without one, never shows it broken.
+            // applies on the next popup: on, the workspace-box action is
+            // registered; off, it is neither laid out nor registered
+            // (TaskMenu skips an Item without an action).
             Map<TaskMenu.Item, AnAction> actions = this.actions;
             if (WorkspaceSettings.enabled()) {
                 actions = new EnumMap<>(this.actions);
                 actions.put(TaskMenu.Item.WORKSPACE_BOX, workspaceBoxSettings);
             }
-            return TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
+            return TaskActions.withRemoteReveal(e.getData(SELECTED_NODE),
+                    TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
                     root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get(),
-                    WorkspaceSettings.enabled())
-                    .getChildActionsOrStubs();
+                    WorkspaceSettings.enabled()).getChildActionsOrStubs());
         }
     }
 

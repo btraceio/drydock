@@ -5,15 +5,20 @@ import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
 import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.RemoteLaunchSupport;
+import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -224,6 +229,34 @@ class ClaudeAgentProviderTaskGuidanceTest {
         assertTrue(plainRemote.startsWith("ssh"), plainRemote);
         assertFalse(plainRemote.contains("--plugin-dir"), plainRemote);
         assertFalse(plainRemote.contains("tasks-guidance"), plainRemote);
+    }
+
+    /**
+     * The typed remote support never legitimizes a host guidance request: a
+     * persistent remote launch carrying both is still refused (create and
+     * resume), and one carrying only the support emits no plugin-dir or
+     * guidance path.
+     */
+    @Test
+    void persistentRemoteSupportDoesNotAcceptHostGuidance() {
+        ClaudeAgentProvider provider = newProviderNoExecutable();
+        Optional<SshRemote> remote = Optional.of(new SshRemote("build-box", "/srv"));
+        RemotePersistence persistence = new RemotePersistence(new ManagedSessionId(
+                UUID.fromString("00000000-0000-0000-0000-000000000001")), Map.of());
+        RemoteLaunchSupport support = RemoteLaunchSupport.ofReviewConnection(
+                new RemoteLaunchSupport.ReviewConnection("/home/u/mcp.json", "mcp-1", "l-1"));
+
+        assertFalse(provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"), remote, SOME_MCP)
+                .withPersistence(persistence).withRemoteLaunchSupport(support)
+                .withLaunchResources(guidance(GUIDANCE))).supported());
+        assertFalse(provider.buildResumeCommand(new ResumeContext(Optional.of("abc-123"), Optional.empty(),
+                Path.of("/tmp"), remote, SOME_MCP).withPersistence(persistence)
+                .withRemoteLaunchSupport(support).withLaunchResources(guidance(GUIDANCE))).supported());
+
+        String command = provider.buildCreateCommand(new CreateContext("S", "uuid", Path.of("/tmp"), remote,
+                SOME_MCP).withPersistence(persistence).withRemoteLaunchSupport(support)).command();
+        assertTrue(command.contains("--mcp-config") && command.contains("/home/u/mcp.json"), command);
+        assertFalse(command.contains("--plugin-dir") || command.contains("tasks-guidance"), command);
     }
 
     /**

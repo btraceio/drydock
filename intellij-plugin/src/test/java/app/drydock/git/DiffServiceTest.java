@@ -6,10 +6,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -275,6 +277,112 @@ class DiffServiceTest {
 
     private static UnifiedDiff.FileDiff fileByPath(UnifiedDiff diff, String path) {
         return diff.files().stream().filter(f -> f.path().equals(path)).findFirst().orElseThrow();
+    }
+
+    // ---- GitReviewQueryRules: the rules local and remote review share ----
+
+    @Test
+    void rulesCandidateOrderIsDefaultFirstThenMainMasterDevelopTrunk() {
+        Function<String, Optional<String>> remoteFirst = name -> Optional.of("origin/" + name);
+
+        List<String> candidates = GitReviewQueryRules.reviewBaseCandidates("origin/master", remoteFirst);
+
+        assertEquals(List.of("origin/master", "origin/main", "origin/develop", "origin/trunk"), candidates);
+        assertEquals(List.of("main", "master", "trunk", "develop"), GitReviewQueryRules.DEFAULT_BRANCH_CANDIDATES);
+    }
+
+    @Test
+    void rulesCandidateKeepsAnUnresolvableDefaultVerbatimAndSkipsMissingBranches() {
+        Function<String, Optional<String>> onlyDevelop =
+                name -> name.equals("develop") ? Optional.of("develop") : Optional.empty();
+
+        assertEquals(List.of("weird", "develop"), GitReviewQueryRules.reviewBaseCandidates("weird", onlyDevelop));
+    }
+
+    @Test
+    void rulesChooseBaseFewestCommitsAheadWinsAndTieKeepsEarlierCandidate() {
+        Map<String, Long> ahead = Map.of("origin/main", 5L, "origin/develop", 2L, "origin/trunk", 2L);
+
+        ReviewBase base = GitReviewQueryRules.chooseBase(
+                List.of("origin/main", "origin/develop", "origin/trunk"),
+                c -> ahead.get(c), "origin/main");
+
+        assertEquals(new ReviewBase("origin/develop", ReviewBase.Origin.FORKED_FROM), base);
+    }
+
+    @Test
+    void rulesChooseBaseIgnoresUnmeasurableAndFallsBackUnmeasured() {
+        assertEquals(new ReviewBase("main", ReviewBase.Origin.DEFAULT_UNMEASURED),
+                GitReviewQueryRules.chooseBase(List.of("a", "b"), c -> -1L, "main"));
+        assertEquals(new ReviewBase("b", ReviewBase.Origin.FORKED_FROM),
+                GitReviewQueryRules.chooseBase(List.of("a", "b"), c -> c.equals("a") ? -1L : 0L, "main"));
+    }
+
+    @Test
+    void rulesRefComponentRejectsOptionAndTraversalShapes() {
+        assertTrue(GitReviewQueryRules.isRefComponent("feat/x-1_a.b"));
+        assertFalse(GitReviewQueryRules.isRefComponent("-bad"));
+        assertFalse(GitReviewQueryRules.isRefComponent("a..b"));
+        assertFalse(GitReviewQueryRules.isRefComponent("a b"));
+        assertFalse(GitReviewQueryRules.isRefComponent(""));
+    }
+
+    @Test
+    void rulesDiffCommandsMatchTheScopeRanges() {
+        assertEquals(List.of("git", "-C", "/r", "diff", "--no-color", "--no-ext-diff", "-U3",
+                        "--end-of-options", "HEAD"),
+                GitReviewQueryRules.diffCommand("git", Path.of("/r"), DiffScope.WORKING_TREE, "main", 3, () -> "x"));
+        assertEquals("@{upstream}...HEAD", lastOf(
+                GitReviewQueryRules.diffCommand("git", Path.of("/r"), DiffScope.UPSTREAM, "main", 3, () -> "x")));
+        assertEquals("feat...HEAD", lastOf(
+                GitReviewQueryRules.diffCommand("git", Path.of("/r"), DiffScope.BASE, "feat", 3, () -> "x")));
+        assertEquals("abc123", lastOf(GitReviewQueryRules.diffCommand(
+                "git", Path.of("/r"), DiffScope.BRANCH_WORKING_TREE, "feat", 12, () -> "abc123")));
+        assertEquals(List.of("git", "-C", "/r", "merge-base", "--end-of-options", "-b", "HEAD"),
+                GitReviewQueryRules.mergeBaseCommand("git", Path.of("/r"), "-b"));
+        assertEquals(List.of("git", "-C", "/r", "ls-files", "--others", "--exclude-standard", "-z"),
+                GitReviewQueryRules.untrackedCommand("git", Path.of("/r")));
+        assertEquals(List.of("git", "-C", "/r", "diff", "--cached", "--name-only", "-z"),
+                GitReviewQueryRules.stagedCommand("git", Path.of("/r")));
+        assertEquals(List.of("rev-list", "--count", "--end-of-options", "origin/main..HEAD"),
+                GitReviewQueryRules.commitsAheadArguments("origin/main"));
+    }
+
+    @Test
+    void rulesWorkingTreeScopesAreTheOnesCarryingStagedAndUntrackedMetadata() {
+        assertTrue(GitReviewQueryRules.includesWorkingTree(DiffScope.WORKING_TREE));
+        assertTrue(GitReviewQueryRules.includesWorkingTree(DiffScope.BRANCH_WORKING_TREE));
+        assertFalse(GitReviewQueryRules.includesWorkingTree(DiffScope.BASE));
+        assertFalse(GitReviewQueryRules.includesWorkingTree(DiffScope.UPSTREAM));
+    }
+
+    @Test
+    void rulesParseNulPathsDropsEmptyEntries() {
+        assertEquals(Set.of("a b.txt", "d\u00e9.txt"), GitReviewQueryRules.parseNulPaths("a b.txt\0\0d\u00e9.txt\0"));
+        assertEquals(Set.of(), GitReviewQueryRules.parseNulPaths(""));
+    }
+
+    @Test
+    void rulesMetadataParseOverloadTagsStagedAndUntrackedLikeTheLocalParser() {
+        String diffText = """
+                diff --git a/New.java b/New.java
+                new file mode 100644
+                index 0000000..3333333
+                --- /dev/null
+                +++ b/New.java
+                @@ -0,0 +1 @@
+                +x
+                """;
+
+        UnifiedDiff viaRules = GitReviewQueryRules.parse(diffText, Set.of("New.java"), Set.of("New.java"));
+
+        assertEquals(DiffService.parse(diffText, Set.of("New.java"), Set.of("New.java")), viaRules);
+        assertTrue(viaRules.files().get(0).staged());
+        assertTrue(viaRules.files().get(0).untracked());
+    }
+
+    private static String lastOf(List<String> command) {
+        return command.get(command.size() - 1);
     }
 
     private static Path initCommittedRepo(Path parent, String readmeContent) throws IOException, InterruptedException {

@@ -47,12 +47,14 @@ import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -150,7 +152,7 @@ public final class McpToolRouter {
      */
     public static final Set<String> REVIEW_TOOLS_AND_RENAME;
     static {
-        Set<String> union = new java.util.LinkedHashSet<>(REVIEW_TOOLS);
+        Set<String> union = new LinkedHashSet<>(REVIEW_TOOLS);
         union.add("session_rename");
         REVIEW_TOOLS_AND_RENAME = Set.copyOf(union);
     }
@@ -400,6 +402,10 @@ public final class McpToolRouter {
                                 .put("maxBytes", schemaString("Byte budget for this page; default "
                                         + DEFAULT_SCOPE_BYTES + "."))
                                 .put("include", schemaString("Optional extras, comma-separated. "
+                                        + "\"instructions\" returns, on the first page only, "
+                                        + "{version, mode, text}: drydock's output rules for the tour or "
+                                        + "sections review (the mode is fixed by drydock, not chosen here), "
+                                        + "charged to the same budget and returned whole. "
                                         + "\"sections\" returns drydock's computed grouping: "
                                         + "accept and name it, or regroup deliberately. "
                                         + "\"impact\" returns, per changed declaration, its callers "
@@ -711,7 +717,13 @@ public final class McpToolRouter {
         // the number of changed declarations and their callers, not files.
         int sectionsBytes = sectionsJson.map(ReviewToolCodec::approximateBytes).orElse(0);
         int impactBytes = impactJson.map(ReviewToolCodec::approximateBytes).orElse(0);
-        int hunkBudget = Math.max(0, maxBytes - sectionsBytes - impactBytes);
+        // Instructions are authorized by the live-session and scope checks above and
+        // are charged like sections; the mode is the context's, never an argument.
+        Optional<JsonValue> instructionsJson = includes.contains("instructions")
+                ? Optional.of(instructionsJson(scope, caller))
+                : Optional.empty();
+        int instructionsBytes = instructionsJson.map(ReviewToolCodec::approximateBytes).orElse(0);
+        int hunkBudget = Math.max(0, maxBytes - sectionsBytes - impactBytes - instructionsBytes);
         ReviewToolCodec.ScopePage page = ReviewToolCodec.pageHunks(diff, cursor, hunkBudget);
 
         JsonObject result = JsonObject.empty()
@@ -742,6 +754,12 @@ public final class McpToolRouter {
                 result.put("sectionsOverBudget", new JsonBoolean(true));
             }
         }
+        if (instructionsJson.isPresent()) {
+            result.put("instructions", instructionsJson.get());
+            if (instructionsBytes > maxBytes) {
+                result.put("instructionsOverBudget", new JsonBoolean(true));
+            }
+        }
         if (impactJson.isPresent()) {
             result.put("impact", impactJson.get());
             // Absent, not empty: a failed caller search must not read as
@@ -750,6 +768,20 @@ public final class McpToolRouter {
                     .ifPresent(reason -> result.put("impactUnavailable", new JsonString(reason)));
         }
         return result;
+    }
+
+    /** Ceiling on the generated instructions; they are returned whole or refused, never cut. */
+    private static final int MAX_INSTRUCTIONS_BYTES = 32 * 1024;
+
+    private JsonValue instructionsJson(ReviewScope scope, ManagedSessionId caller) throws McpToolException {
+        McpSessionContext.ReviewIntegration integration = context.reviewIntegration(scope, caller);
+        if (integration.text().getBytes(StandardCharsets.UTF_8).length > MAX_INSTRUCTIONS_BYTES) {
+            throw new McpToolException("The review instructions exceed " + MAX_INSTRUCTIONS_BYTES + " bytes.");
+        }
+        return JsonObject.empty()
+                .put("version", new JsonNumber("1"))
+                .put("mode", new JsonString(integration.mode()))
+                .put("text", new JsonString(integration.text()));
     }
 
     /**

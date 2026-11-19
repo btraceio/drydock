@@ -2,6 +2,9 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.delayedtasks.TaskWorktreeUse;
 import app.drydock.domain.SshRemote;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -12,17 +15,21 @@ import app.drydock.intellij.agent.SessionCommandHandlers;
 import app.drydock.intellij.agent.SessionRename;
 import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.intellij.review.ReviewRequest;
+import app.drydock.intellij.review.ReviewTabOpener;
 import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.worktree.WorktreeErrors;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.tour.ReviewTour;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.Separator;
 import com.intellij.openapi.actionSystem.Presentation;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -38,6 +45,7 @@ import javax.swing.Icon;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
@@ -48,7 +56,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -328,12 +338,16 @@ final class TaskActions {
     }
 
     /**
-     * Asks {@code row}'s agent to review its changes. EDT. The request runs
-     * under a background progress that ends when it returns; any outcome but
-     * a sent prompt is shown in a warning dialog on the EDT.
+     * Asks {@code row}'s agent to review its changes. EDT. The progress names the review's source
+     * before anything is resolved or sent; the request runs under a background progress that ends
+     * on every exit, and its result (sent or not) names the same source. A sent prompt only updates
+     * the progress text; any other outcome is shown in a warning dialog on the EDT. The intent is
+     * explicit local changes: the session's PR association is incidental metadata and never selects
+     * the PR method.
      */
     static void reviewChanges(Project from, TaskRow row) {
-        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Starting review…", false) {
+        ReviewIntent intent = quickReviewIntent(row, Optional.empty());
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, quickReviewTitle(row, intent), false) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 DrydockPluginService plugin = DrydockPluginService.getInstance();
@@ -341,13 +355,130 @@ final class TaskActions {
                 ReviewRequest request = ReviewRequest.forBackend(plugin.initialization(), plugin::reviewBackend,
                         executions::isRunning, kind -> plugin.registry().supportsSubagents(kind),
                         executions::submitPrompt);
-                ReviewRequest.Outcome outcome = request.request(row.session());
-                ReviewRequest.message(row.session().displayName(), outcome).ifPresent(message ->
-                        ApplicationManager.getApplication().invokeLater(
-                                () -> Messages.showWarningDialog(from, message, "Drydock"),
-                                ModalityState.nonModal(), from.getDisposed()));
+                QuickReviewResult result = quickReview(request, () -> plugin.reviewBackend().map(backend ->
+                                new ReviewRequest.Delivery(backend.scopeAuthorizer(), backend.invocationBindings(),
+                                        id -> executions.execution(id).isPresent(), 1L, () -> 1L,
+                                        Optional.empty())),
+                        intent, row.session());
+                if (result.sent()) {
+                    indicator.setText(result.text());
+                } else {
+                    ApplicationManager.getApplication().invokeLater(
+                            () -> Messages.showWarningDialog(from, result.text(), "Drydock"),
+                            ModalityState.nonModal(), from.getDisposed());
+                }
             }
         });
+    }
+
+    /** Whether {@code node} is a remote (workspace-box) session row: the only row the remote entry serves. */
+    static boolean remoteSession(TaskNode node) {
+        return node instanceof TaskRow row && row.session().workspaceBox().isPresent();
+    }
+
+    /** The typed workbench context of a remote row: session identity and a safe label, never a path. Pure. */
+    static ReviewTabOpener.RemoteContext remoteContext(TaskRow row) {
+        return new ReviewTabOpener.RemoteContext(row.session().id(),
+                "Remote workspace " + row.session().workspaceBox().orElseThrow().boxName() + " · local changes");
+    }
+
+    /**
+     * Reveal-only entry for a remote row: hands its context to {@code opener} (production:
+     * {@link ReviewTabOpener#openRemote}), which neither invokes, enrolls nor submits and needs no
+     * attached console, so a detached session reveals too. A local row is ignored. EDT.
+     */
+    static void revealRemote(TaskNode node, Consumer<ReviewTabOpener.RemoteContext> opener) {
+        if (remoteSession(node)) {
+            opener.accept(remoteContext((TaskRow) node));
+        }
+    }
+
+    /** "Open in Review Workbench" on a remote session row, delegating to {@link ReviewTabOpener#openRemote}. */
+    private static final class RemoteEntry {
+        static final AnAction ACTION = new DumbAwareAction("Open in Review Workbench",
+                "Reveal this remote session's changes in the review workbench; nothing is sent to the agent",
+                AllIcons.Actions.Diff) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                present(e, remoteSession(e.getData(TaskTreePanel.SELECTED_NODE)));
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                Project project = e.getProject();
+                if (project != null) {
+                    revealRemote(e.getData(TaskTreePanel.SELECTED_NODE), ctx -> ReviewTabOpener.openRemote(project, ctx));
+                }
+            }
+        };
+    }
+
+    /** {@code menu} with the remote entry appended for a remote session row; any other node's menu unchanged. */
+    static AnAction[] withRemoteReveal(TaskNode node, AnAction[] menu) {
+        if (!remoteSession(node)) {
+            return menu;
+        }
+        AnAction[] out = Arrays.copyOf(menu, menu.length + 2);
+        out[menu.length] = Separator.getInstance();
+        out[menu.length + 1] = RemoteEntry.ACTION;
+        return out;
+    }
+
+    /** The result text of a Quick Review and whether the prompt was sent. */
+    record QuickReviewResult(String text, boolean sent) { }
+
+    /**
+     * The intent a Quick Review carries: this row's checkout (a remote row's placeholder, never a
+     * probed path), this session, and local changes unless the human explicitly selected
+     * {@code selectedPr}. The session's own PR association is deliberately not an input. Pure.
+     */
+    static ReviewIntent quickReviewIntent(TaskRow row, Optional<PullRequestTarget> selectedPr) {
+        ManagedAgentSession session = row.session();
+        ReviewIntent.Checkout checkout = session.workspaceBox().isPresent()
+                ? new ReviewIntent.Remote(session.workspace().workingDirectory().toString())
+                : new ReviewIntent.Local(session.workspace().worktreeRoot()
+                        .orElse(session.workspace().workingDirectory()));
+        Optional<ManagedSessionId> id = Optional.of(session.id());
+        return selectedPr.map(pr -> ReviewIntent.pullRequest(session.repositoryId(), checkout, id, pr,
+                        ReviewIntent.Origin.TASK_ACTION, ReviewTour.Kind.TOUR))
+                .orElseGet(() -> ReviewIntent.local(session.repositoryId(), checkout, id,
+                        ReviewIntent.Origin.TASK_ACTION, ReviewTour.Kind.TOUR));
+    }
+
+    /** The progress title: the task and the selected source with its workflow label, shown before dispatch. */
+    static String quickReviewTitle(TaskRow row, ReviewIntent intent) {
+        return "Starting review of " + row.session().displayName() + " (" + WorktreeReview.sourceOf(Optional.of(intent))
+                + ", " + WorkflowSourceLabel.of(WorkflowSourceLabel.Provenance.DEFAULT, "", null) + ")…";
+    }
+
+    /**
+     * Submits ONE {@link ReviewRequest} for {@code intent} to {@code session}, whatever the delivery
+     * wiring or the request does: an absent wiring is NotReady, a thrown failure is a not-sent
+     * result. Blocks; never throws.
+     */
+    static QuickReviewResult quickReview(ReviewRequest request,
+                                         Supplier<Optional<ReviewRequest.Delivery>> delivery,
+                                         ReviewIntent intent, ManagedAgentSession session) {
+        String name = session.displayName();
+        ReviewRequest.Outcome outcome;
+        try {
+            Optional<ReviewRequest.Delivery> wiring = delivery.get();
+            outcome = wiring.isEmpty() ? new ReviewRequest.NotReady()
+                    : request.request(intent, session, Optional.empty(), wiring.get());
+        } catch (RuntimeException e) {
+            outcome = new ReviewRequest.Failed(String.valueOf(e.getMessage()));
+        }
+        Optional<String> problem = ReviewRequest.message(name, outcome);
+        return problem.map(text -> new QuickReviewResult(text, false))
+                .orElseGet(() -> new QuickReviewResult("Review of " + name + " ("
+                        + WorktreeReview.sourceOf(Optional.of(intent)) + ", "
+                        + WorkflowSourceLabel.of(WorkflowSourceLabel.Provenance.DEFAULT, "", null)
+                        + ") sent to its agent.", true));
     }
 
     /**

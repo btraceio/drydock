@@ -4,23 +4,41 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.ModelTiers;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.intellij.agent.PromptOutcome;
 import app.drydock.intellij.review.ReviewRequest.Failed;
+import app.drydock.intellij.review.ReviewRequest.NoConsole;
 import app.drydock.intellij.review.ReviewRequest.NoTools;
 import app.drydock.intellij.review.ReviewRequest.NotReady;
 import app.drydock.intellij.review.ReviewRequest.Outcome;
 import app.drydock.intellij.review.ReviewRequest.Refused;
 import app.drydock.intellij.review.ReviewRequest.ScopeSource;
 import app.drydock.intellij.review.ReviewRequest.Sent;
+import app.drydock.mcp.ReviewInvocationBindings;
 import app.drydock.review.ReviewInstructions;
+import app.drydock.review.ReviewIntent;
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.sdlc.Cancellation;
+import app.drydock.sdlc.LocalWorkflowMaterializer;
+import app.drydock.sdlc.MaterializedWorkflow;
+import app.drydock.sdlc.ResourceManifestJournal;
+import app.drydock.sdlc.SelectedWorkflow;
+import app.drydock.sdlc.WorkflowBundle;
+import app.drydock.sdlc.WorkflowMaterializationRequest.Destination;
+import app.drydock.sdlc.WorkflowMaterializer;
+import app.drydock.sdlc.WorkflowResourceLease;
+import app.drydock.sdlc.WorkflowTarget;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.ReviewScopeRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -28,9 +46,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -186,6 +206,143 @@ class ReviewRequestTest {
         assertTrue(ReviewRequest.message("T", new Sent("rs_x")).isEmpty());
         assertEquals("Drydock could not start the review for T: why",
                 ReviewRequest.message("T", new Failed("why")).orElseThrow());
+    }
+
+    // ---- intent-driven workflow delivery ----
+
+    private static final String PROJECT_TEXT = "step 1\n\u001b[201~ step 2\r\n```sh\nrm -rf x\n```";
+
+    @TempDir
+    Path tmp;
+
+    private final AtomicLong generation = new AtomicLong(4);
+    private final ReviewInvocationBindings bindings = new ReviewInvocationBindings();
+    private final List<MaterializedWorkflow> staged = new ArrayList<>();
+    private final List<MaterializedWorkflow> retained = new ArrayList<>();
+    private int materializations;
+
+    private WorkflowMaterializer materializer() {
+        LocalWorkflowMaterializer local = new LocalWorkflowMaterializer(tmp.resolve("staging"), "s1",
+                ResourceManifestJournal.open(tmp.resolve("journal")), Path.of("/mnt"), generation::get, Runnable::run);
+        return (request, cancellation) -> {
+            materializations++;
+            return local.materialize(request, cancellation).thenApply(result -> {
+                if (result instanceof WorkflowMaterializer.Success success) {
+                    staged.add(success.workflow());
+                }
+                return result;
+            });
+        };
+    }
+
+    private ReviewRequest.Delivery delivery(boolean configured, boolean authorized, boolean console, long gen) {
+        Optional<ReviewRequest.Workflow> workflow = configured
+                ? Optional.of(new ReviewRequest.Workflow(selected(), Destination.LOCAL, "inv-1", materializer(),
+                        Cancellation.none(), (id, mw) -> retained.add(mw)))
+                : Optional.empty();
+        return new ReviewRequest.Delivery((id, scopeId) -> authorized, bindings, id -> console, gen,
+                generation::get, workflow);
+    }
+
+    private static SelectedWorkflow selected() {
+        return new SelectedWorkflow(RepositoryId.newId(), WorkflowTarget.LOCAL_CHANGES_REVIEW,
+                new SelectedWorkflow.SourceDescriptor(SelectedWorkflow.SourceKind.INLINE, "k", Optional.empty()),
+                PROJECT_TEXT, WorkflowBundle.empty(), "digest");
+    }
+
+    private static ReviewIntent intent(ManagedAgentSession s, ReviewTour.Kind kind) {
+        return ReviewIntent.local(s.repositoryId(), new ReviewIntent.Local(Path.of("/repo")),
+                Optional.of(s.id()), ReviewIntent.Origin.WORKBENCH, kind);
+    }
+
+    @Test
+    void configuredRunSubmitsOneSafeDirectiveAndStagesProjectTextByteExact() throws Exception {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        Outcome out = delivering(PromptOutcome.DELIVERED).request(intent(s, ReviewTour.Kind.TOUR), s,
+                Optional.empty(), delivery(true, true, true, 4));
+
+        assertEquals(new Sent(scope.id()), out);
+        assertEquals(1, prompts.size());
+        String line = prompts.get(0);
+        assertTrue(line.chars().noneMatch(c -> c == '\n' || c == '\r' || c == 0x1b));
+        assertTrue(line.contains(scope.id()));
+        Path file = ((MaterializedWorkflow.LocalReference) staged.get(0).references().stream()
+                .filter(r -> r.role() == MaterializedWorkflow.Role.INSTRUCTION_FILE).findFirst().orElseThrow()).path();
+        assertTrue(line.contains(file.toString()));
+        assertEquals(PROJECT_TEXT, Files.readString(file));
+        assertEquals(PROJECT_TEXT.getBytes(StandardCharsets.UTF_8).length, Files.readAllBytes(file).length);
+        assertEquals(ReviewTour.Kind.TOUR, bindings.bindingOf(s.id(), scope.id()).orElseThrow().kind());
+        assertEquals(WorkflowResourceLease.Owner.RETAINED_SESSION, staged.get(0).lease().owner());
+        assertEquals(1, retained.size());
+    }
+
+    @Test
+    void ambiguousSubmitKeepsBindingAndLease() {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        Outcome out = delivering(PromptOutcome.FAILED).request(intent(s, ReviewTour.Kind.TOUR), s,
+                Optional.empty(), delivery(true, true, true, 4));
+
+        assertEquals(new ReviewRequest.Ambiguous(scope.id()), out);
+        assertEquals(1, prompts.size());
+        assertTrue(bindings.bindingOf(s.id(), scope.id()).isPresent());
+        assertEquals(WorkflowResourceLease.Owner.RETAINED_SESSION, staged.get(0).lease().owner());
+        assertTrue(ReviewRequest.message("T", out).orElseThrow().contains("not retried"));
+    }
+
+    @Test
+    void knownNoSendRollsBackBindingAndReleasesLease() {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        Outcome out = delivering(PromptOutcome.REFUSED).request(intent(s, ReviewTour.Kind.TOUR), s,
+                Optional.empty(), delivery(true, true, true, 4));
+
+        assertInstanceOf(Refused.class, out);
+        assertEquals(1, prompts.size());
+        assertTrue(bindings.bindingOf(s.id(), scope.id()).isEmpty());
+        assertEquals(WorkflowResourceLease.Owner.RELEASED, staged.get(0).lease().owner());
+        assertTrue(retained.isEmpty());
+    }
+
+    @Test
+    void foreignScopeNoConsoleAndForeignIntentSendAndStageNothing() {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        ReviewRequest r = delivering(PromptOutcome.DELIVERED);
+
+        assertInstanceOf(Refused.class, r.request(intent(s, ReviewTour.Kind.TOUR), s, Optional.empty(),
+                delivery(true, false, true, 4)));
+        assertInstanceOf(NoConsole.class, r.request(intent(s, ReviewTour.Kind.TOUR), s, Optional.empty(),
+                delivery(true, true, false, 4)));
+        assertInstanceOf(Refused.class, r.request(intent(session(AgentKind.CLAUDE), ReviewTour.Kind.TOUR), s,
+                Optional.empty(), delivery(true, true, true, 4)));
+
+        assertTrue(prompts.isEmpty());
+        assertEquals(0, materializations);
+        assertTrue(bindings.bindingOf(s.id(), scope.id()).isEmpty());
+    }
+
+    @Test
+    void supersededRequestReleasesStagingAndSendsNothing() {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        Outcome out = delivering(PromptOutcome.DELIVERED).request(intent(s, ReviewTour.Kind.TOUR), s,
+                Optional.empty(), delivery(true, true, true, 3));
+
+        assertInstanceOf(Failed.class, out);
+        assertTrue(prompts.isEmpty());
+        assertTrue(bindings.bindingOf(s.id(), scope.id()).isEmpty());
+        assertTrue(staged.isEmpty());
+    }
+
+    @Test
+    void defaultSectionsRunKeepsSingleLineFormAndInstallsBinding() {
+        ManagedAgentSession s = session(AgentKind.CLAUDE);
+        Outcome out = delivering(PromptOutcome.DELIVERED).request(intent(s, ReviewTour.Kind.SECTIONS), s,
+                Optional.of(scope.id()), delivery(false, true, true, 4));
+
+        assertEquals(new Sent(scope.id()), out);
+        assertEquals(List.of(ReviewInstructions.forSections(scope.id(), true,
+                ModelTiers.EMPTY, Optional.empty())), prompts);
+        assertEquals(ReviewTour.Kind.SECTIONS, bindings.bindingOf(s.id(), scope.id()).orElseThrow().kind());
+        assertEquals(0, materializations);
+        assertFalse(prompts.get(0).contains("\n"));
     }
 
     private static ManagedAgentSession session(AgentKind kind) {

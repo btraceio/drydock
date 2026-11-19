@@ -230,6 +230,10 @@ public class ClaudeEvalContainer {
     /** Base URL rewritten to reach the host's omlx_proxy from inside the container. */
     private static final String CONTAINER_BASE_URL = "http://host.docker.internal:4000";
 
+    /** Where per-session workflow namespaces live under the state dir, and the shape of their opaque names. */
+    private static final String NAMESPACE_DIR = "workflow-namespaces";
+    private static final Pattern NAMESPACE_REF = Pattern.compile("[A-Za-z0-9._-]+");
+
     private static final String AUTH_TOKEN_ENV = "ANTHROPIC_API_KEY";
     private static final String CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
     private static final String CUSTOM_HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS";
@@ -389,6 +393,34 @@ public class ClaudeEvalContainer {
      */
     public String wrap(EvalSetup setup, String innerCommand, Path worktree, Optional<Path> mcpConfigFile,
                        Path hooksDir, Path activityDir) throws IOException {
+        return wrap(setup, innerCommand, worktree, mcpConfigFile, hooksDir, activityDir, Optional.empty());
+    }
+
+    /**
+     * As {@link #wrap(EvalSetup, String, Path, Optional, Path, Path)}, plus a
+     * read-only mount of the per-session workflow namespace named by
+     * {@code workflowNamespace}. This is the one narrow, typed seam through
+     * which a local eval container sees staged workflow resources: the
+     * reference is an opaque single path segment (never a host path), resolved
+     * to {@code <stateDir>/workflow-namespaces/<ref>}, created empty if absent
+     * so a later in-session invocation stages into a directory the running
+     * container already sees, and mounted {@code :ro} at its own path. No
+     * other host directory can be mounted through it.
+     *
+     * @throws IllegalArgumentException if the reference is not a plain segment
+     */
+    public String wrap(EvalSetup setup, String innerCommand, Path worktree, Optional<Path> mcpConfigFile,
+                       Path hooksDir, Path activityDir, Optional<String> workflowNamespace) throws IOException {
+        Optional<Path> namespaceDir = Optional.empty();
+        if (workflowNamespace.isPresent()) {
+            String ref = workflowNamespace.get();
+            if (!NAMESPACE_REF.matcher(ref).matches() || ref.equals(".") || ref.equals("..")) {
+                throw new IllegalArgumentException("workflow namespace must be a plain name: " + ref);
+            }
+            Path dir = stateDirectory.resolve(NAMESPACE_DIR).resolve(ref);
+            Files.createDirectories(dir);
+            namespaceDir = Optional.of(dir);
+        }
         // The auth token is written to an owner-only file in the mounted
         // config dir, and the entrypoint exports it from there -- it never
         // appears in `ps` on the host or in the command preview the UI
@@ -457,6 +489,8 @@ public class ClaudeEvalContainer {
                     .append(':').append(shellQuote(marketplace.toString()))
                     .append(":ro");
         }
+        namespaceDir.ifPresent(d -> cmd.append(" -v ").append(shellQuote(d.toString()))
+                .append(':').append(shellQuote(d.toString())).append(":ro"));
         mcpConfigFile.ifPresent(f -> cmd.append(" -v ").append(shellQuote(f.toString()))
                 .append(':').append(shellQuote(f.toString())));
         cmd.append(" -w ").append(shellQuote(worktree.toString()));

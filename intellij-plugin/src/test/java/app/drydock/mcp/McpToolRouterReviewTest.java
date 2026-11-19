@@ -8,10 +8,14 @@ import app.drydock.review.Confidence;
 import app.drydock.review.ReviewAnnotation;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Severity;
+import app.drydock.review.tour.ReviewTour;
+import app.drydock.review.tour.TourFingerprint;
+import app.drydock.review.tour.TourRecord;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
+import app.drydock.state.json.JsonValue.JsonNumber;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +23,8 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -406,6 +412,110 @@ class McpToolRouterReviewTest {
 
         JsonValue finding = ((JsonArray) field(result, "findings")).elements().get(0);
         assertTrue(((JsonBoolean) field(finding, "resolved")).value());
+    }
+
+    // ---- review_scope include=instructions ----------------------------------
+
+    @Test
+    void instructionsAreAbsentWithoutOptInAndWhenOtherExtrasAreAsked() throws Exception {
+        assertFalse(((JsonObject) router.call(caller, "review_scope", args("scopeId", SCOPE)))
+                .has("instructions"));
+        JsonValue other = router.call(caller, "review_scope", args("scopeId", SCOPE, "include", "sections"));
+        assertFalse(((JsonObject) other).has("instructions"));
+        assertFalse(((JsonObject) other).has("instructionsOverBudget"));
+    }
+
+    @Test
+    void instructionsComeOnTheFirstPageOnlyWithVersionModeAndText() throws Exception {
+        JsonValue first = router.call(caller, "review_scope",
+                args("scopeId", SCOPE, "include", "instructions", "maxBytes", "60000"));
+
+        JsonValue instructions = field(first, "instructions");
+        assertEquals("1", ((JsonNumber) field(instructions, "version")).literal());
+        assertEquals("tour", str(instructions, "mode"));
+        assertTrue(str(instructions, "text").contains("review_tour"));
+        assertTrue(str(instructions, "text").contains(SCOPE));
+
+        JsonValue paged = router.call(caller, "review_scope",
+                args("scopeId", SCOPE, "include", "instructions", "maxBytes", "1500"));
+        JsonValue next = router.call(caller, "review_scope", args("scopeId", SCOPE, "include", "instructions",
+                "maxBytes", "1500", "cursor", str(paged, "cursor")));
+        assertFalse(((JsonObject) next).has("instructions"));
+    }
+
+    @Test
+    void instructionsAreChargedToTheHunkBudgetAndReturnedWholeWhenOverBudget() throws Exception {
+        JsonValue without = router.call(caller, "review_scope", args("scopeId", SCOPE, "maxBytes", "6000"));
+        JsonValue with = router.call(caller, "review_scope",
+                args("scopeId", SCOPE, "include", "instructions", "maxBytes", "6000"));
+        assertTrue(((JsonArray) field(with, "hunks")).elements().size()
+                < ((JsonArray) field(without, "hunks")).elements().size(), "the instructions must displace hunks");
+
+        JsonValue tiny = router.call(caller, "review_scope",
+                args("scopeId", SCOPE, "include", "instructions", "maxBytes", "1"));
+        assertTrue(str(field(tiny, "instructions"), "text").endsWith("."), "never truncated");
+        assertTrue(((JsonBoolean) field(tiny, "instructionsOverBudget")).value());
+        assertFalse(((JsonObject) with).has("instructionsOverBudget"));
+    }
+
+    @Test
+    void theModeComesFromTheStoredTourKindAndNeverFromTheCaller() throws Exception {
+        UnifiedDiff diff = diff(1);
+        context.putTour(TourRecord.fresh(new ReviewTour(SCOPE, TourFingerprint.of(diff), List.of(),
+                Optional.empty(), List.of(), ReviewTour.Kind.SECTIONS), diff));
+
+        JsonObject request = args("scopeId", SCOPE, "include", "instructions", "mode", "tour", "kind", "tour");
+        JsonValue result = router.call(caller, "review_scope", request);
+
+        assertEquals("sections", str(field(result, "instructions"), "mode"));
+        assertTrue(str(field(result, "instructions"), "text").contains("kind sections"));
+    }
+
+    @Test
+    void instructionsAreRefusedForForeignUnknownEndedAndRevokedCallers() {
+        JsonObject foreign = args("scopeId", "rs_someone_else", "include", "instructions");
+        JsonObject unknown = args("scopeId", "rs_no_such_thing", "include", "instructions");
+        assertThrows(McpToolException.class, () -> router.call(caller, "review_scope", foreign));
+        assertThrows(McpToolException.class, () -> router.call(caller, "review_scope", unknown));
+
+        JsonObject own = args("scopeId", SCOPE, "include", "instructions");
+        context.addressableScopes.remove(caller);
+        assertThrows(McpToolException.class, () -> router.call(caller, "review_scope", own));
+        context.grant(caller, SCOPE);
+
+        context.sessionRunning = false;
+        assertThrows(McpToolException.class, () -> router.call(caller, "review_scope", own));
+        context.sessionRunning = true;
+        context.repositoryRoot = Optional.empty();
+        assertThrows(McpToolException.class, () -> router.call(caller, "review_scope", own));
+    }
+
+    @Test
+    void theIntegrationIsNotAskedForBeforeAuthorizationAndOversizeIsRefusedNotCut() throws Exception {
+        List<String> asked = new ArrayList<>();
+        McpSessionContext spy = (McpSessionContext) Proxy.newProxyInstance(
+                McpSessionContext.class.getClassLoader(), new Class<?>[] {McpSessionContext.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals("reviewIntegration")) {
+                        asked.add("asked");
+                        return new McpSessionContext.ReviewIntegration("tour", "x".repeat(32 * 1024 + 1));
+                    }
+                    try {
+                        return method.invoke(context, arguments);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        McpSessionRegistry registry = new McpSessionRegistry();
+        registry.mint(caller, Spawn.ALLOWED);
+        McpToolRouter spied = new McpToolRouter(spy, registry);
+
+        assertThrows(McpToolException.class, () -> spied.call(caller, "review_scope",
+                args("scopeId", "rs_someone_else", "include", "instructions")));
+        assertTrue(asked.isEmpty(), "authorization must come first");
+        assertThrows(McpToolException.class, () -> spied.call(caller, "review_scope",
+                args("scopeId", SCOPE, "include", "instructions")));
+        assertEquals(1, asked.size());
     }
 
     // ---- fixtures -----------------------------------------------------------

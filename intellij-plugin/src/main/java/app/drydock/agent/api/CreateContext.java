@@ -62,12 +62,26 @@ import java.util.Optional;
  * rather than a plain SSH launch. It is present only together with
  * {@code remote}; the constructor rejects persistence without a remote.
  * Empty means exactly the launches of today.</p>
+ *
+ * <p>{@code workflowAccess}, when present, is the typed read access to this
+ * launch's isolated local workflow resources (see {@link
+ * LocalWorkflowAccess}). It is separate from {@code launchResources}, which
+ * it never aliases or merges into. Empty means exactly the launches of
+ * today.</p>
+ *
+ * <p>{@code remoteLaunchSupport}, when present, is the typed remote review
+ * connection / workflow access and preparation leases for a remote launch
+ * (see {@link RemoteLaunchSupport}); it requires {@code remote} and is
+ * separate from {@code mcp}, {@code launchResources} and {@code
+ * workflowAccess}. Empty means exactly the launches of today.</p>
  */
 public record CreateContext(String displayName, String sessionId, Path workingDirectory,
                             Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
                             boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
                             List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources,
-                            Optional<RemotePersistence> persistence) {
+                            Optional<RemotePersistence> persistence,
+                            Optional<LocalWorkflowAccess> workflowAccess,
+                            Optional<RemoteLaunchSupport> remoteLaunchSupport) {
 
     /**
      * Separates drydock's framing from the user's task inside a composed
@@ -93,14 +107,40 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
         stdioMcpServers = List.copyOf(Objects.requireNonNull(stdioMcpServers, "stdioMcpServers"));
         Objects.requireNonNull(launchResources, "launchResources");
         Objects.requireNonNull(persistence, "persistence");
+        Objects.requireNonNull(workflowAccess, "workflowAccess");
+        Objects.requireNonNull(remoteLaunchSupport, "remoteLaunchSupport");
         // A persistent session lives on a remote box; persistence without
         // a remote is a wiring mistake, never a launch mode.
         if (persistence.isPresent() && remote.isEmpty()) {
             throw new IllegalArgumentException("persistence requires a remote");
         }
+        if (remoteLaunchSupport.isPresent() && remote.isEmpty()) {
+            throw new IllegalArgumentException("remote launch support requires a remote");
+        }
         // A blank task is no task: rendering it would launch the agent with
         // an empty first message.
         initialPrompt = initialPrompt.filter(prompt -> !prompt.isBlank());
+    }
+
+    /** As the canonical constructor with no remote launch support. */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                         boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
+                         List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources,
+                         Optional<RemotePersistence> persistence,
+                         Optional<LocalWorkflowAccess> workflowAccess) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources, persistence, workflowAccess, Optional.empty());
+    }
+
+    /** As the canonical constructor with no workflow access. */
+    public CreateContext(String displayName, String sessionId, Path workingDirectory,
+                         Optional<SshRemote> remote, Optional<McpAccess> mcp, Optional<String> model,
+                         boolean evalMode, boolean readOnly, Optional<String> initialPrompt,
+                         List<StdioMcpServer> stdioMcpServers, Optional<LaunchResources> launchResources,
+                         Optional<RemotePersistence> persistence) {
+        this(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources, persistence, Optional.empty());
     }
 
     /** As the canonical constructor with no persistence. */
@@ -112,24 +152,39 @@ public record CreateContext(String displayName, String sessionId, Path workingDi
                 initialPrompt, stdioMcpServers, launchResources, Optional.empty());
     }
 
+    /** This context, with {@code access} as the local workflow access. */
+    public CreateContext withWorkflowAccess(LocalWorkflowAccess access) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources, persistence,
+                Optional.of(Objects.requireNonNull(access, "access")), remoteLaunchSupport);
+    }
+
     /** This context, with {@code servers} as the stdio MCP servers the agent starts. */
     public CreateContext withStdioMcpServers(List<StdioMcpServer> servers) {
         return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
-                initialPrompt, servers, launchResources, persistence);
+                initialPrompt, servers, launchResources, persistence, workflowAccess, remoteLaunchSupport);
     }
 
     /** This context, with {@code resources} as the launch resources. */
     public CreateContext withLaunchResources(LaunchResources resources) {
         return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
                 initialPrompt, stdioMcpServers, Optional.of(Objects.requireNonNull(resources, "resources")),
-                persistence);
+                persistence, workflowAccess, remoteLaunchSupport);
     }
 
     /** This context, with {@code persistence} as the remote box persistence. */
     public CreateContext withPersistence(RemotePersistence persistence) {
         return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
                 initialPrompt, stdioMcpServers, launchResources,
-                Optional.of(Objects.requireNonNull(persistence, "persistence")));
+                Optional.of(Objects.requireNonNull(persistence, "persistence")), workflowAccess,
+                remoteLaunchSupport);
+    }
+
+    /** This context, with {@code support} as the remote launch support. */
+    public CreateContext withRemoteLaunchSupport(RemoteLaunchSupport support) {
+        return new CreateContext(displayName, sessionId, workingDirectory, remote, mcp, model, evalMode, readOnly,
+                initialPrompt, stdioMcpServers, launchResources, persistence, workflowAccess,
+                Optional.of(Objects.requireNonNull(support, "support")));
     }
 
     /** As the canonical constructor with no launch resources. */

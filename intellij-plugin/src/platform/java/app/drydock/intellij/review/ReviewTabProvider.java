@@ -29,6 +29,7 @@ import app.drydock.review.PendingQuestions;
 import app.drydock.review.ReviewInstructions;
 import app.drydock.review.AnnotationStore;
 import app.drydock.review.ReviewAnnotation;
+import app.drydock.review.ReviewDataSource;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.Triage;
 import app.drydock.review.ReviewVerdict;
@@ -115,35 +116,36 @@ import java.util.function.UnaryOperator;
  * {@link ReviewContents}, built into a request by {@link
  * ReviewDiffRequests} with fragments from {@link ReviewFragments}; the
  * finding cards' write side is {@link ReviewTriageActions} (T4), wired
- * through {@link TriageCards} below; the human verdicts' writer is {@link
- * ReviewVerdictCommands}, behind the finish screen's Approve. The annotation store and the diff
- * service are the backend's own instances (one writer, and digests
- * measured by the same diff an agent sees).</p>
+ * through {@link TriageCards}; mark/unmark is {@link ReviewVerdictCommands}
+ * (navigator toolbar and row menu). The annotation store and diff service
+ * are the backend's own (one writer; digests measured by the diff an agent
+ * sees). A remote session's loading, selection and lifecycle are delegated
+ * to {@link RemoteReviewWorkbenchController}.</p>
  *
- * <p><strong>A hunk's diff.</strong> The flow asks for the hunk's request
- * ({@link FlowActions#hunkContext}): the file's git reads (both texts, the
- * row checks, the fragments of that hunk only) run on the plugin's
- * background executor. When a text no longer matches the diff's rows
- * (AC15: the file changed after the diff), the hunk shows the
- * changed-since notice and one reload is scheduled; {@link MismatchMemo}
- * keeps a file that can never match from reloading in a loop.</p>
+ * <p><strong>The selection pipeline.</strong> A navigator selection runs the
+ * file's git reads on the plugin's background executor; the EDT
+ * continuation builds the titled {@link ReviewDiffRequests.RequestContext},
+ * feeds the inlay layer the file's {@link ReviewDiffInlays.Decorations}
+ * (every unresolved finding, CONFIRMED and DISMISSED included, so Undo
+ * stays reachable) and sends only the current selection's request through
+ * {@link ReviewDiffEditor#selection}/{@link ReviewDiffEditor#requestReady}.
+ * A build that lands after a newer selection is dropped by the editor and
+ * the generation gate ({@link DecorationGate}): a late completion never
+ * repaints the previous file, overwrites fresher decorations, or applies
+ * another scope's or file's decorations.</p>
  *
  * <p><strong>Gutter navigation.</strong> The opener ({@link
  * ReviewTabOpener}, T8) records a finding target on the project before the
- * window's content exists; a snapshot arrival or a flow attaching consumes
- * it ({@link ReviewTabOpener#takePendingFinding}) once a workbench flow
- * exists, and every flow shows the hunk the finding starts on
- * ({@link ReviewWorkbenchFlow#showLine}).</p>
+ * window's content exists; a snapshot arrival or a navigator attaching
+ * consumes it ({@link ReviewTabOpener#takePendingFinding}) and hands it to
+ * every navigator's {@link ReviewTabBrowser#selectFinding}.</p>
  *
  * <p><strong>Threading.</strong> Everything blocking — scope resolution,
  * contents, the diff, digests, store reads, prompt submission — runs on the
  * plugin's background executor or the services' own executors, never the
- * EDT and never inside the tree builder; the EDT receives only Swing: the
- * editor's selection/request handoff, the inlay layer's decorations, the
- * header and the status placeholder. The first user-triggered load shows
- * the loading placeholder synchronously, before any background work
- * starts, and every terminal state replaces it — nothing stays stranded
- * (AC22).</p>
+ * EDT; the EDT receives only Swing work. The first user-triggered load shows
+ * the loading placeholder synchronously and every terminal state replaces
+ * it — nothing stays stranded (AC22).</p>
  *
  * <p><strong>Visibility.</strong> The window is available only in projects
  * a Drydock session covers (Q8): see {@link ReviewTabVisibility} and
@@ -166,12 +168,7 @@ final class ReviewTabProvider {
     private final Project project;
     private final DrydockPluginService plugin;
 
-    /**
-     * How an ask-to-fix prompt reaches the scope's bound session: the P1
-     * {@link AgentExecutionRegistry#submitPrompt} (a blocking PTY write, so
-     * it runs on the triage actions' executor, never the EDT), injected as
-     * a seam so the wiring is testable with a fake submitter.
-     */
+    /** How an ask-to-fix prompt reaches the bound session (P1 {@link AgentExecutionRegistry#submitPrompt}, blocking: never on the EDT); a test seam. */
     private final BiFunction<ManagedSessionId, String, PromptOutcome> promptSubmitter;
 
     // ---- assembled in initContent, on the EDT ----
@@ -214,6 +211,9 @@ final class ReviewTabProvider {
     /** Volatile: the file/activity listeners and the Changes link read it from any thread. */
     private volatile ReviewTabRefresher refresher;
     private final AtomicBoolean wired = new AtomicBoolean();
+    /** Remote scopes: loading/selection/lifecycle belong to the controller (INV-60); disposed with the content. */
+    private volatile RemoteReviewWorkbenchController remote;
+    volatile RemoteReviewWorkbenchController.State remoteState;
 
     /**
      * The live provider of a project's Review content, so the Changes link
@@ -229,11 +229,7 @@ final class ReviewTabProvider {
      * is replaced only by the fresh result's terminal state.
      */
     private volatile boolean changedSincePending;
-    /**
-     * P2-A: the AC15 mismatch memo — the file and both contents of the
-     * last mismatch that scheduled an automatic reload, so a repeat of
-     * that exact failure is not reloaded again. See {@link MismatchMemo}.
-     */
+    /** P2-A: the last AC15 mismatch that scheduled an automatic reload, so a repeat is not reloaded again. See {@link MismatchMemo}. */
     private final MismatchMemo mismatchMemo = new MismatchMemo();
     /** The last refresh state rendered (EDT only): a catalog change re-runs a load stranded in NO_SESSION. */
     private ReviewTabStatus lastState = ReviewTabStatus.LOADING;
@@ -277,12 +273,10 @@ final class ReviewTabProvider {
     private volatile ReviewScope scope;
     /** The latest snapshot; a finding's or a hunk's file row is looked up in it. */
     private volatile ReviewTabModel.Snapshot snapshot;
+    /** The latest selected row (a model FileRow or FindingRow); the commands target it. */
+    private volatile Object selectionRow;
 
-    /**
-     * The production provider, created by {@link ReviewToolWindowFactory}
-     * when the dedicated window's single content is first shown: prompts
-     * reach the bound session through the P1 execution registry.
-     */
+    /** The production provider, created by {@link ReviewToolWindowFactory}; prompts go through the P1 execution registry. */
     ReviewTabProvider(Project project) {
         this(project, (sessionId, prompt) -> AgentExecutionRegistry.getInstance().submitPrompt(sessionId, prompt));
     }
@@ -296,10 +290,12 @@ final class ReviewTabProvider {
     }
 
     /**
-     * The window's whole content: the progress header, Open Workbench, the
-     * batched decisions bar and the status line. The review itself is the
-     * workbench's ({@link #hostedFlow}); this content owns the review's
-     * wiring and the listeners, disposed with it.
+    /**
+     * The window's whole content: header, tree, status — and the one
+     * reusable editor-area diff plus its inlay layer, disposed with this
+     * content. No splitter, no in-panel preview: the file's diff opens in
+     * the editor area (T6's reusable
+     * tab) and the finding cards render inside it.
      */
     public @NotNull JComponent initContent() {
         if (panel != null && !disposed.get()) {
@@ -369,7 +365,11 @@ final class ReviewTabProvider {
         if (refresher != null) {
             refresher.dispose();
         }
-        // The source-editor marks also end with contentParent below; this hop clears the field on the EDT that owns it.
+        RemoteReviewWorkbenchController remote = this.remote;
+        if (remote != null) {
+            remote.dispose();
+        }
+        // The source-editor marks also end with diffParent below; this hop clears the field on the EDT that owns it.
         onEdt(() -> {
             if (editorMarks != null) {
                 editorMarks.dispose();
@@ -471,6 +471,19 @@ final class ReviewTabProvider {
                     // terminal (T11) — the placeholder always clears.
                     refresher.reload(scope);
                 });
+    }
+
+    /** Selects a remote session's review through the controller, created once and fenced by it. */
+    void selectRemote(ReviewDataSource source, ReviewTabRefresher.Scheduler scheduler, ManagedSessionId session,
+                      String selection) {
+        RemoteReviewWorkbenchController c = remote;
+        if (c == null) {
+            c = remote = new RemoteReviewWorkbenchController(source, scheduler, state -> remoteState = state);
+        }
+        c.select(session, selection);
+        if (disposed.get()) {
+            c.dispose(); // disposed concurrently: fence what was just started
+        }
     }
 
     /**

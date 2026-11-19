@@ -1,10 +1,13 @@
 package app.drydock.intellij.review;
 
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.tasks.WorktreeReview;
+import app.drydock.review.ReviewIntent;
 import app.drydock.review.ReviewScope;
 import app.drydock.review.tour.ReviewTour;
 
@@ -27,6 +30,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -185,6 +189,59 @@ public final class ReviewTabOpener {
         PRODUCTION.openFindingIn(project, file, findingId);
     }
 
+    private static final Key<RemoteContext> REMOTE_CONTEXT = Key.create("drydock.review.remoteContext");
+
+    /**
+     * The typed workbench context of a remote session: which session and the safe label shown
+     * ("Remote workspace box · target"); never a path, endpoint or token. The hosting window is the
+     * registered project's own local one, so this, not the base path, says what the workbench shows.
+     */
+    public record RemoteContext(ManagedSessionId session, String label) {
+        public RemoteContext {
+            Objects.requireNonNull(session, "session");
+            Objects.requireNonNull(label, "label");
+        }
+    }
+
+    /**
+     * Reveals the remote session's workbench: reveal-only — it records the context and shows the
+     * workbench, never invokes, enrolls or submits, and needs no attached console. EDT.
+     */
+    public static void openRemote(Project project, RemoteContext context) {
+        PRODUCTION.openRemoteIn(project, context);
+    }
+
+    /** The project's remote workbench context, if the workbench shows a remote session. */
+    public static Optional<RemoteContext> remoteContext(Project project) {
+        synchronized (project) {
+            return Optional.ofNullable(project.getUserData(REMOTE_CONTEXT));
+        }
+    }
+
+    /** Returns the workbench to local scope (the next open takes the local path). */
+    public static void clearRemoteContext(Project project) {
+        synchronized (project) {
+            project.putUserData(REMOTE_CONTEXT, null);
+        }
+    }
+
+    /**
+     * The remote branch: before document saves, scope minting, checkout paths and the local
+     * diff re-run. No fake local checkout is resolved or opened.
+     */
+    void openRemoteIn(Project project, RemoteContext context) {
+        Objects.requireNonNull(project, "project");
+        Objects.requireNonNull(context, "context");
+        if (project.isDisposed()) {
+            return;
+        }
+        synchronized (project) {
+            project.putUserData(REMOTE_CONTEXT, context);
+        }
+        host.prepareContent(project, ReviewToolWindowFactory.TOOL_WINDOW_ID);
+        host.openWorkbench(project);
+    }
+
     /** The open path over the seams; see {@link #open}. */
     void openIn(Project project, Optional<ManagedAgentSession> linkSession) {
         openIn(project, linkSession, true);
@@ -195,6 +252,11 @@ public final class ReviewTabOpener {
         Objects.requireNonNull(project, "project");
         Objects.requireNonNull(linkSession, "linkSession");
         if (project.isDisposed()) {
+            return;
+        }
+        Optional<RemoteContext> remote = remoteContext(project);
+        if (remote.isPresent()) {
+            openRemoteIn(project, remote.get()); // reveal only: no save, mint or local checkout
             return;
         }
         // Q9: a user-triggered load saves open documents first, on the EDT,
@@ -516,6 +578,54 @@ public final class ReviewTabOpener {
         }
     }
 
+    // ---- the review intent carried through the workbench (INV-20) -----------
+
+    /** The project user-data key carrying the explicit review intent a workbench was opened with. */
+    private static final Key<ReviewIntent> RECORDED_INTENT = Key.create("drydock.review.intent");
+
+    /**
+     * Records the explicit intent a workbench window was opened with (a PR row's PR), on the
+     * project, before the open. A later record replaces it.
+     */
+    public static void recordIntent(Project project, ReviewIntent intent) {
+        Objects.requireNonNull(project, "project");
+        Objects.requireNonNull(intent, "intent");
+        synchronized (project) {
+            project.putUserData(RECORDED_INTENT, intent);
+        }
+    }
+
+    /** The intent recorded on {@code project}, if any; never consumed. */
+    static Optional<ReviewIntent> recordedIntent(Project project) {
+        Objects.requireNonNull(project, "project");
+        synchronized (project) {
+            return Optional.ofNullable(project.getUserData(RECORDED_INTENT));
+        }
+    }
+
+    /**
+     * The intent a review start carries. A recorded intent for the same checkout is the explicit
+     * context and wins (with the kind this start asks for); anything else — no context, or context
+     * recorded for another checkout — is explicit local changes, with {@code localOrigin}. The
+     * scope's PR metadata and the branch name are deliberately not inputs. Throws when there is
+     * neither a recorded intent nor a registered repository to name.
+     */
+    static ReviewIntent resolveIntent(Optional<ReviewIntent> recorded, Path checkout, ReviewStart start,
+                                      ReviewIntent.Origin localOrigin,
+                                      Supplier<Optional<RepositoryId>> registeredRepository) {
+        ReviewTour.Kind kind = start == ReviewStart.SECTIONS ? ReviewTour.Kind.SECTIONS : ReviewTour.Kind.TOUR;
+        Optional<ReviewIntent> explicit = recorded.filter(intent ->
+                intent.checkout() instanceof ReviewIntent.Local local && samePath(local.path(), checkout));
+        if (explicit.isPresent()) {
+            ReviewIntent intent = explicit.get();
+            return new ReviewIntent(intent.repository(), intent.checkout(), intent.session(), intent.target(),
+                    intent.origin(), kind);
+        }
+        RepositoryId repository = registeredRepository.get().orElseThrow(() -> new IllegalStateException(
+                "The repository of " + checkout + " is not registered with Drydock, so its review has no target."));
+        return ReviewIntent.local(repository, new ReviewIntent.Local(checkout), Optional.empty(), localOrigin, kind);
+    }
+
     /**
      * The production host calls: the dedicated Review window's content by
      * its pinned id, created and the window hidden, then the diff re-run.
@@ -639,9 +749,47 @@ public final class ReviewTabOpener {
      * it, off the EDT. EDT.
      */
     static void startReview(Project project, Path checkout, ReviewScope scope, ReviewStart start) {
-        if (project.isDisposed()) {
+        startReview(project, checkout, scope, start, ReviewIntent.Origin.LOCAL_TREE);
+    }
+
+    /**
+     * As {@link #startReview(Project, Path, ReviewScope, ReviewStart)}; {@code localOrigin} is the
+     * origin of the explicit local intent used when the project has no recorded PR context. The
+     * intent is resolved here, from the context recorded for this checkout
+     * ({@link #recordIntent}) and the registered repository, never from the scope's PR metadata
+     * or the branch name. EDT.
+     */
+    static void startReview(Project project, Path checkout, ReviewScope scope, ReviewStart start,
+                            ReviewIntent.Origin localOrigin) {
+        if (project.isDisposed() || remoteContext(project).isPresent()) {
+            return; // a remote scope has no local checkout to review
+        }
+        ReviewIntent intent;
+        try {
+            intent = resolveIntent(recordedIntent(project), checkout, start, localOrigin, () ->
+                    DrydockPluginService.getInstance().sharedProjects().byRoot(scope.repoRoot())
+                            .map(registered -> registered.id()));
+        } catch (IllegalStateException e) {
+            LOG.log(Level.WARNING, "No review intent for " + checkout, e);
+            Messages.showErrorDialog(project, e.getMessage(), "Drydock Review");
             return;
         }
+        startReview(project, checkout, scope, start, intent);
+    }
+
+    /**
+     * Starts the review for {@code intent}. The task window's Review flow
+     * ({@link WorktreeReview}) is handed the intent, so its origin decides whether an existing
+     * session is re-invoked (workbench Run) or only joined, never the incidental PR metadata.
+     */
+    static void startReview(Project project, Path checkout, ReviewScope scope, ReviewStart start,
+                            ReviewIntent intent) {
+        Objects.requireNonNull(intent, "intent");
+        if (remoteContext(project).isPresent()) {
+            return;
+        }
+        LOG.log(Level.DEBUG, () -> "Starting " + start + " review for " + checkout + " with " + intent.target()
+                + " from " + intent.origin());
         Path target = scope.diffRoot();
         WorktreeService worktrees = new WorktreeService();
         worktrees.list(checkout)
@@ -667,11 +815,9 @@ public final class ReviewTabOpener {
                     Path worktree = Path.of(rootAndBranch[1]);
                     WorktreeReview review = new WorktreeReview();
                     switch (start) {
-                        case SECTIONS -> review.reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2],
-                                ReviewTour.Kind.SECTIONS);
-                        case TOUR -> review.reviewWithModelDialog(project, mainRoot, worktree, rootAndBranch[2],
-                                ReviewTour.Kind.TOUR);
-                        case SPHINX -> review.reviewSphinx(project, mainRoot, worktree, rootAndBranch[2]);
+                        case SECTIONS, TOUR -> review.reviewWithModelDialog(project, mainRoot, worktree,
+                                rootAndBranch[2], intent);
+                        case SPHINX -> review.reviewSphinx(project, mainRoot, worktree, rootAndBranch[2], intent);
                     }
                 }, ModalityState.nonModal()))
                 .exceptionally(error -> {

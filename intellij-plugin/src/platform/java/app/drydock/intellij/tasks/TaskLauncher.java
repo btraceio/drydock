@@ -9,6 +9,7 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionMode;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.git.BranchListing;
 import app.drydock.git.BranchRef;
@@ -52,6 +53,7 @@ import com.intellij.notification.Notification;
 import com.intellij.notification.NotificationGroupManager;
 import com.intellij.notification.NotificationType;
 import com.intellij.openapi.application.Application;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.progress.ProgressIndicator;
@@ -72,6 +74,18 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import app.drydock.sdlc.Cancellation;
+import app.drydock.sdlc.LocalWorkflowMaterializer;
+import app.drydock.sdlc.ProjectWorkflowResolver;
+import app.drydock.sdlc.SelectedWorkflow;
+import app.drydock.sdlc.WorkflowBundle;
+import app.drydock.sdlc.WorkflowMaterializationRequest;
+import app.drydock.sdlc.WorkflowMaterializer;
+import app.drydock.sdlc.WorkflowResolution;
+import app.drydock.sdlc.WorkflowTarget;
+import app.drydock.intellij.tasks.WorkflowInvocationController;
+import app.drydock.intellij.tasks.WorkflowInvocationState;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -80,12 +94,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.Function;
@@ -971,11 +989,13 @@ public final class TaskLauncher {
                 chosen.complete(Optional.empty());
                 return;
             }
-            NewTaskDialog dialog = new NewTaskDialog(from, preparedTask.inputs(), refChooser, preset);
+            NewTaskDialog dialog = new NewTaskDialog(from, preparedTask.inputs(), refChooser, preset,
+                    Optional.ofNullable(workflowWiring(preparedTask, preset)));
             if (dialog.showAndGet()) {
                 NewTaskLauncherResult result = dialog.launcherResult();
                 if (result.isLaunch()) {
-                    chosen.complete(Optional.of(new ChosenTask(result.choice())));
+                    chosen.complete(Optional.of(new ChosenTask(result.choice(),
+                            workflowHandoff(dialog))));
                 } else {
                     saveTask(from, result.saved());
                     chosen.complete(Optional.empty());
@@ -1031,6 +1051,9 @@ public final class TaskLauncher {
                     return;
                 }
                 try {
+                    // The staged-plan segment path (T38) launches through the plan coordinator, whose
+                    // Choice is opaque and carries no workflow hand-off; wiring here would strand the
+                    // accepted controller, so this path stays workflow-less (T18 limitation, recorded).
                     NewTaskDialog dialog = new NewTaskDialog(from, preparedTask.inputs(), refChooser, preset);
                     if (dialog.showAndGet()) {
                         NewTaskLauncherResult result = dialog.launcherResult();
@@ -1065,7 +1088,7 @@ public final class TaskLauncher {
      * launch chain takes it back through this wrapper, never re-inspected.
      */
     public static ChosenTask chosen(Choice choice) {
-        return new ChosenTask(Objects.requireNonNull(choice, "choice"));
+        return new ChosenTask(Objects.requireNonNull(choice, "choice"), null);
     }
 
     /**
@@ -1090,7 +1113,7 @@ public final class TaskLauncher {
     public static CompletableFuture<ManagedAgentSession> launchChosen(Project from, PreparedTask preparedTask,
                                                                       ChosenTask chosen,
                                                                       SessionDialogs.PreparedSessionCallback preparedSession) {
-        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession);
+        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession, List.of(), chosen.workflow());
     }
 
     /**
@@ -1105,7 +1128,7 @@ public final class TaskLauncher {
                                                                         ChosenTask chosen,
                                                                         SessionDialogs.PreparedSessionCallback preparedSession,
                                                                         List<TaskLaunchBinding> bindings) {
-        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession, bindings);
+        return start(from, preparedTask.inputs(), chosen.choice(), preparedSession, bindings, chosen.workflow());
     }
 
     /**
@@ -1146,9 +1169,11 @@ public final class TaskLauncher {
     public static final class ChosenTask {
 
         private final Choice choice;
+        private final WorkflowHandoff workflow;
 
-        ChosenTask(Choice choice) {
+        ChosenTask(Choice choice, WorkflowHandoff workflow) {
             this.choice = Objects.requireNonNull(choice, "choice");
+            this.workflow = workflow;
         }
 
         /** The accepted launch choice. Widened for the stacked launch
@@ -1158,6 +1183,123 @@ public final class TaskLauncher {
           * and only the launcher's launch chain needs it. */
         public Choice choice() {
             return choice;
+        }
+
+        /** The accepted workflow's controller hand-off (T18), or null when the dialog prepared none. */
+        WorkflowHandoff workflow() {
+            return workflow;
+        }
+    }
+
+    /**
+     * The accepted workflow's controller, held by the {@link ChosenTask} across the dialog-to-launch
+     * boundary (T18). The bundle id is derived exactly as the materializer names its staged bundles
+     * ("wf-" + sha256(invocationId)[0:24]) — pinned by TaskLauncherWorkflowTest, because the invocation
+     * id is minted inside the controller and never travels.
+     */
+    record WorkflowHandoff(WorkflowInvocationController controller, String invocationId, long bytes) {
+
+        WorkflowHandoff {
+            Objects.requireNonNull(controller, "controller");
+            Objects.requireNonNull(invocationId, "invocationId");
+        }
+
+        String bundleId() {
+            return LocalWorkflowMaterializer.bundleName(invocationId);
+        }
+    }
+
+    /** The dialog wiring for one site, or null when the preset carries no workflow target (T18). */
+    private static NewTaskDialog.Workflow workflowWiring(PreparedTask preparedTask, NewTaskPreset preset) {
+        if (preset.workflowTarget().isEmpty()) {
+            return null;
+        }
+        return new WorkflowWiring(DrydockPluginService.getInstance(), preparedTask.inputs().project().root())
+                .workflow(preset).orElse(null);
+    }
+
+    /** The accepted workflow's hand-off from a closed dialog, or null when nothing was staged (T18). */
+    private static WorkflowHandoff workflowHandoff(NewTaskDialog dialog) {
+        return dialog.acceptedWorkflow()
+                .map(accepted -> accepted.selection().workflow()
+                        .map(m -> new WorkflowHandoff(dialog.workflowController(), m.invocationId(),
+                                accepted.selection().bytes()))
+                        .orElse(null))
+                .orElse(null);
+    }
+
+    /**
+     * T18's user-approved wiring (Recovery-T18), nested because the frozen execution helper derives task
+     * ownership from the plan and cannot admit a new file: the wiring resolves the REGISTERED checkout via
+     * {@code byRoot} (an unregistered root is Missing — the synthetic {@code RepositoryId.newId()} project
+     * from {@code prepare} is never resolved), assembles the invocation controller over the plugin's
+     * materializer factory, and hands the accepted controller back through the {@link ChosenTask}. The
+     * pending namespace key stands in for the post-launch session until the owner re-key follow-up lands.
+     */
+    static final class WorkflowWiring {
+
+        private static final long TIMEOUT_MILLIS = 20_000;
+
+        private final DrydockPluginService plugin;
+        private final Path projectRoot;
+        private final ProjectWorkflowResolver resolver = new ProjectWorkflowResolver();
+        private final AtomicReference<SelectedWorkflow.SourceDescriptor> source = new AtomicReference<>();
+        private final String namespaceKey = "wf-pending-" + UUID.randomUUID();
+        /** The live request generation, recorded by the wrapper below before delegating (see its contract). */
+        private final AtomicLong generation = new AtomicLong();
+        private WorkflowInvocationController controller;
+
+        WorkflowWiring(DrydockPluginService plugin, Path projectRoot) {
+            this.plugin = Objects.requireNonNull(plugin, "plugin");
+            this.projectRoot = Objects.requireNonNull(projectRoot, "projectRoot");
+        }
+
+        /** The dialog wiring for {@code preset}; empty when the preset carries no workflow target. */
+        Optional<NewTaskDialog.Workflow> workflow(NewTaskPreset preset) {
+            if (preset.workflowTarget().isEmpty()) {
+                return Optional.empty();
+            }
+            WorkflowTarget target = preset.workflowTarget().get();
+            LocalWorkflowMaterializer delegate = plugin.localWorkflowMaterializer(namespaceKey, generation::get);
+            // Records each request's generation before delegating. The materializer's staleness check
+            // compares against this holder; per-prepare supersession is enforced by the controller's own
+            // Cancellation (prepare cancels the prior request and releases its lease), not by this holder.
+            WorkflowMaterializer materializer = new WorkflowMaterializer() {
+                @Override
+                public CompletableFuture<WorkflowMaterializer.Result> materialize(
+                        WorkflowMaterializationRequest request, Cancellation cancellation) {
+                    generation.set(request.generation());
+                    return delegate.materialize(request, cancellation);
+                }
+            };
+            return Optional.of(new NewTaskDialog.Workflow(
+                    ui -> {
+                        // Deliver on the Ui's own modality: the dialog is modal, and a nonModal
+                        // hop would starve behind it (Start grey behind "Preparing workflow…").
+                        var c = new WorkflowInvocationController(AppExecutorUtil.getAppExecutorService(),
+                                r -> ApplicationManager.getApplication().invokeLater(r, ui.modality()),
+                                this::resolve, materializer, plugin.workflowResources(), ui,
+                                TIMEOUT_MILLIS, "", new WorkflowInvocationState.Input(target.name(), ""));
+                        controller = c;
+                        return c;
+                    },
+                    kind -> new WorkflowInvocationController.Request(target, WorkflowMaterializationRequest.Destination.LOCAL,
+                            SessionMode.WRITES, Optional.empty()),
+                    String.valueOf(projectRoot.getFileName()),
+                    () -> Optional.ofNullable(source.get())));
+        }
+
+        private WorkflowResolution resolve(WorkflowTarget target, Cancellation cancellation) {
+            Optional<SharedProject> registered = plugin.sharedProjects().byRoot(projectRoot);
+            if (registered.isEmpty() || registered.get().isRemote()) {
+                return new WorkflowResolution.Missing(
+                        "no registered checkout for this project; add it to Drydock to use a project workflow");
+            }
+            WorkflowResolution resolution = resolver.resolve(registered.get(), target, cancellation);
+            if (resolution instanceof WorkflowResolution.Selected s) {
+                source.set(s.workflow().source());
+            }
+            return resolution;
         }
     }
 
@@ -1438,11 +1580,27 @@ n     * git scans (the placeholder root is not a local checkout, and every
     static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice,
                                                         SessionDialogs.PreparedSessionCallback preparedSession,
                                                         List<TaskLaunchBinding> bindings) {
+        return start(from, inputs, choice, preparedSession, bindings, null);
+    }
+
+    /** As above, with the T18 accepted-workflow hand-off (null when the dialog prepared none). */
+    static CompletableFuture<ManagedAgentSession> start(Project from, NewTaskPlan.Inputs inputs, Choice choice,
+                                                        SessionDialogs.PreparedSessionCallback preparedSession,
+                                                        List<TaskLaunchBinding> bindings,
+                                                        WorkflowHandoff workflow) {
         Objects.requireNonNull(bindings, "bindings");
         if (choice.onWorkspaceBox()) {
             // The remote arm (T20): the whole box chain, then the same
             // launch chain with a binding. The local half below runs
-            // byte-identically for every local choice (INV-1).
+            // byte-identically for every local choice (INV-1). A staged
+            // workflow's references are host paths a box cannot see (T18),
+            // so a hand-off here is refused rather than silently launched
+            // without it -- the same refusal stance as host-path resources.
+            if (workflow != null) {
+                workflow.controller().launchFailed();
+                return CompletableFuture.failedFuture(new IllegalStateException(
+                        "the configured workflow stages local references, which a workspace box cannot see"));
+            }
             return startRemote(from, inputs, choice, preparedSession, bindings);
         }
         if (inputs.project().isRemote()) {
@@ -1510,11 +1668,27 @@ n     * git scans (the placeholder root is not a local checkout, and every
                         // adds no outcome of its own. The bindings compose
                         // the pre-spawn bind step (T31a); an empty list is
                         // the byte-identical no-binding chain.
-                        tracked.launched(SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
-                                choice.agent(), choice.name(), choice.mode(),
-                                NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
-                                preparedSession, bindings, Optional.empty(), choice.targetPullRequest(),
-                                choice.eval()));
+                        CompletableFuture<ManagedAgentSession> launched =
+                                SessionDialogs.launchNewSession(target, steps.workingDirectory(), mainRoot,
+                                        choice.agent(), choice.name(), choice.mode(),
+                                        NewTaskPlan.initialPrompt(choice), choice.model(), choice.tiers(), fresh,
+                                        preparedSession, bindings, Optional.empty(), choice.targetPullRequest(),
+                                        choice.eval());
+                        // T18: once the session is RUNNING, the accepted workflow's pending lease moves to the
+                        // session owner (commitLaunch); a launch refusal/cancel is a known no-send, so the
+                        // pending lease is released instead. A post-spawn outcome-unknown refinement is the
+                        // recorded follow-up.
+                        if (workflow != null) {
+                            launched.whenComplete((session, error) -> {
+                                if (error == null) {
+                                    workflow.controller().commitLaunch(session.id().value().toString(),
+                                            workflow.bundleId());
+                                } else {
+                                    workflow.controller().launchFailed();
+                                }
+                            });
+                        }
+                        tracked.launched(launched);
                     } catch (RuntimeException e) {
                         LOG.log(Level.WARNING, "Could not open the task's window", e);
                         report(from, "Could not start \"" + choice.name() + "\": " + WorktreeErrors.visibleMessage(e));
