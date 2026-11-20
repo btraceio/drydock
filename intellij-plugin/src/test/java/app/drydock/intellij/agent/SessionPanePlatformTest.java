@@ -14,6 +14,7 @@ import javax.swing.JPanel;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -207,5 +208,33 @@ public class SessionPanePlatformTest extends BasePlatformTestCase {
         assertTrue(bodyText(pane).endsWith("two"));
         pane.show(SessionPaneFacts.deleted(), false);
         assertNotSame("a real transition builds the new placeholder", label, bodyComponent(pane));
+    }
+
+    /** The host hears about real console mounts (live and stopped), never about placeholder rounds. */
+    public void testConsoleMountedFiresOnRealMountsOnly() throws Exception {
+        AgentExecution execution = start();
+        List<ManagedSessionId> mounted = new ArrayList<>();
+        SessionPane pane = new SessionPane(getProject(), id, new SessionPane.Host() {
+            @Override public boolean focusPermitted(long epoch) { return epoch == 7; }
+            @Override public long epoch() { return 7; }
+            @Override public void paneFocused(ManagedSessionId focused) { }
+            @Override public Optional<SessionPaneFacts> facts(ManagedSessionId asked) {
+                return asked.equals(id) ? Optional.of(known()) : Optional.empty();
+            }
+            @Override public void onStripAction(SessionPane pane, AgentConsoleStrip.StripAction action) { }
+            @Override public void consoleMounted(ManagedSessionId mountedId) { mounted.add(mountedId); }
+        });
+
+        pane.show(SessionPaneFacts.loading(), false);
+        assertEquals("a placeholder is no console", List.of(), mounted);
+        assertEquals(SessionPane.Body.LIVE, pane.show(known(), false));
+        assertEquals(List.of(id), mounted);
+        assertEquals(SessionPane.Body.LIVE, pane.show(known(), false));
+        assertEquals("same console, same body: no second mount", List.of(id), mounted);
+
+        execution.handler().destroyProcess();
+        waitFor(() -> !execution.isRunning());
+        assertEquals(SessionPane.Body.STOPPED, pane.show(known(), false));
+        assertEquals("the stopped view wraps the console: a mount again", List.of(id, id), mounted);
     }
 }

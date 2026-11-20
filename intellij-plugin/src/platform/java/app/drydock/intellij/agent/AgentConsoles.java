@@ -29,8 +29,12 @@ import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.terminal.JBTerminalWidget;
+import com.intellij.terminal.TerminalExecutionConsole;
 import com.intellij.util.messages.MessageBusConnection;
 import org.jetbrains.annotations.NotNull;
+
+import javax.swing.JComponent;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -128,31 +132,72 @@ public final class AgentConsoles {
     /**
      * Brings {@code sessionId}'s tab to the front and puts the keyboard in its
      * terminal. Called once an execution the user asked for (create, Start,
-     * Resume) is live. EDT only.
+     * Resume) is live, and by every activation (Show, double-click, Enter).
+     * EDT only.
      *
-     * <p>Opening the tab earlier is not enough: at that point there is no
-     * terminal yet, so the tab's preferred focus is the strip's primary
-     * button, and nothing moves focus when the console arrives. Two things
-     * were seen going wrong in {@code runIde}: after Resume the focus stayed
-     * on the Stop button, so the first thing typed to the agent went nowhere;
-     * and in a freshly opened worktree window the IDE's own open-README-on-
-     * first-open put {@code README.md} in front of the agent the user had
-     * just created.</p>
+     * <p>The keyboard goes to the terminal panel, never to what {@code
+     * getPreferredFocusableComponent} names: that is the {@code
+     * JediTermWidget} itself, whose constructor calls {@code
+     * setFocusable(false)}, and {@code IdeFocusManager.requestFocus} is a
+     * raw {@code Component.requestFocus()} — silently denied for a
+     * non-focusable component. Every focus request aimed at the wrapper was
+     * lost, on every path that asked.</p>
+     *
+     * <p>A console the pane has not mounted yet (a pane just created still
+     * waits for its facts load) cannot take focus either, so the intent
+     * stays armed with the controller and fires one EDT hop after the pane
+     * mounts the console — fenced by the permission epoch this focus call
+     * issued, so a hide, a departure or a newer request (for any session)
+     * in between cancels it. Two things were seen going wrong in {@code
+     * runIde} before this: after Resume the focus stayed on the Stop
+     * button, so the first thing typed to the agent went nowhere; and in a
+     * freshly opened worktree window the IDE's own open-README-on-first-
+     * open put {@code README.md} in front of the agent the user had just
+     * created.</p>
      */
     public static void focusConsole(Project project, ManagedSessionId sessionId) {
         if (project.isDisposed()) {
             return;
         }
-        AgentExecutionService.getInstance(project).execution(sessionId).flatMap(AgentExecution::console)
-                .ifPresent(console -> {
-                    // An intentional focus of a session that is on screen; one
-                    // that is in neither slot is no target.
-                    if (SessionHostController.getInstance(project).focus(sessionId) == Outcome.UNAVAILABLE) {
-                        return;
-                    }
-                    openHost(project);
-                    IdeFocusManager.getInstance(project).requestFocus(console.getPreferredFocusableComponent(), true);
-                });
+        SessionHostController controller = SessionHostController.getInstance(project);
+        Optional<TerminalExecutionConsole> console =
+                AgentExecutionService.getInstance(project).execution(sessionId).flatMap(AgentExecution::console);
+        if (console.isEmpty()) {
+            return;
+        }
+        // An intentional focus of a session that is on screen; one
+        // that is in neither slot is no target.
+        if (controller.focus(sessionId) == Outcome.UNAVAILABLE) {
+            return;
+        }
+        openHost(project);
+        TerminalExecutionConsole shown = console.get();
+        if (controller.isConsoleMounted(sessionId, shown)) {
+            IdeFocusManager.getInstance(project).requestFocus(focusTarget(shown), true);
+        } else {
+            // The permission of THIS request, captured now: a later focus
+            // request for any session re-issues permission under a new epoch,
+            // so an empty-token fire would pass the fence and steal the
+            // keyboard from the newer request. Any revoke (hide, departure,
+            // newer request) bumps the epoch and cancels this arm. One EDT
+            // hop before the fire: consoleMounted runs inside the pane's own
+            // show transition, and a synchronous focus re-entry can drive
+            // facts/refresh back into that pane mid-transition.
+            long issued = controller.epoch();
+            controller.awaitConsoleMounted(sessionId, () -> ApplicationManager.getApplication()
+                    .invokeLater(() -> focusIfPermitted(project, sessionId, OptionalLong.of(issued)),
+                            ModalityState.nonModal(), project.getDisposed()));
+        }
+    }
+
+    /**
+     * The component that can take the keyboard in {@code console}: the
+     * terminal panel. The widget {@code getPreferredFocusableComponent}
+     * returns is not focusable — see {@link #focusConsole}.
+     */
+    private static JComponent focusTarget(TerminalExecutionConsole console) {
+        JBTerminalWidget widget = console.getTerminalWidget();
+        return widget != null ? widget.getTerminalPanel() : console.getPreferredFocusableComponent();
     }
 
     /**
