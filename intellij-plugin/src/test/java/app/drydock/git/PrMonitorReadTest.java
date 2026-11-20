@@ -2,6 +2,7 @@ package app.drydock.git;
 
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.PrMonitorRead.Check;
+import app.drydock.git.PrMonitorRead.Core;
 import app.drydock.git.PrMonitorRead.Mergeable;
 import app.drydock.git.PrMonitorRead.PrSnapshot;
 
@@ -13,7 +14,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,71 +28,151 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The monitor's read of one PR: the pure parse of {@code gh pr view --json}
- * output, and the run around it driven by a scripted gh.
+ * The monitor's read of one PR: the pure parse of the REST answers
+ * ({@code pulls/{n}}, {@code check-runs}, {@code status}, {@code reviews}),
+ * and the conditional four-endpoint read around them driven by a scripted
+ * gh that answers 200 the first time and 304 once the ETags are back.
  */
 class PrMonitorReadTest {
 
     private static final String SHA = "ba3a460f9b85ef9d6c0db61880904311ded36f81";
 
-    /** Everything but the rollup, which each test supplies. */
-    private static String view(String extraMembers) {
-        return "{\"baseRefName\":\"main\",\"headRefName\":\"topic\",\"headRefOid\":\"" + SHA + "\""
+    /** The pulls/{n} body with mergeability and lifecycle supplied per test. */
+    private static String pull(String extraMembers) {
+        return "{\"state\":\"open\",\"merged\":false,\"draft\":false,"
+                + "\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\",\"sha\":\"" + SHA + "\"}"
                 + (extraMembers.isEmpty() ? "" : "," + extraMembers) + "}";
     }
 
-    private static PrSnapshot.Snapshot snapshot(String stdout) {
-        return assertInstanceOf(PrSnapshot.Snapshot.class, PrMonitorRead.parse(7, stdout));
+    private static Core core(String body) {
+        return assertInstanceOf(Core.class, PrMonitorRead.parsePullCore(body));
     }
 
     @Test
-    void parsesEveryFieldOfARealShapedView() {
-        String stdout = """
-                {"baseRefName":"main","headRefName":"rk/topic","headRefOid":"%s","isDraft":true,
-                 "mergeStateStatus":"UNSTABLE","mergeable":"MERGEABLE","state":"OPEN",
-                 "statusCheckRollup":[
-                  {"__typename":"CheckRun","completedAt":"2026-11-18T13:34:42Z","conclusion":"FAILURE",
-                   "detailsUrl":"https://github.com/o/r/actions/runs/44315117281/job/134839058118",
-                   "name":"tests","startedAt":"2026-11-18T13:34:41Z","status":"COMPLETED","workflowName":"CI Run"},
-                  {"__typename":"StatusContext","context":"DDCI Status","startedAt":"2026-11-18T14:11:01Z",
-                   "state":"PENDING","targetUrl":"https://ci.example/change/1"}]}
-                """.formatted(SHA);
+    void parsesEveryFieldOfARealShapedPull() {
+        Core core = core(pull("\"merged\":false,\"mergeable\":false,\"mergeable_state\":\"dirty\""));
 
-        PrSnapshot.Snapshot snapshot = snapshot(stdout);
+        assertEquals(PrLifecycle.OPEN, core.lifecycle());
+        assertFalse(core.draft());
+        assertEquals("main", core.baseRefName());
+        assertEquals("topic", core.headRefName());
+        assertEquals(SHA, core.headRefOid());
+        assertEquals(Mergeable.CONFLICTING, core.mergeable());
+        assertEquals("DIRTY", core.mergeStateStatus());
+    }
 
-        assertEquals(7, snapshot.prNumber());
-        assertEquals(PrLifecycle.OPEN, snapshot.lifecycle());
-        assertTrue(snapshot.draft());
-        assertEquals("main", snapshot.baseRefName());
-        assertEquals("rk/topic", snapshot.headRefName());
-        assertEquals(SHA, snapshot.headRefOid());
-        assertEquals(Mergeable.MERGEABLE, snapshot.mergeable());
-        assertEquals("UNSTABLE", snapshot.mergeStateStatus());
+    @Test
+    void aMergedPullIsTheMergedLifecycleNotClosed() {
+        assertEquals(PrLifecycle.MERGED, core("{\"state\":\"closed\",\"merged\":true,\"base\":{\"ref\":\"main\"},"
+                + "\"head\":{\"ref\":\"topic\",\"sha\":\"" + SHA + "\"}}").lifecycle());
+        assertEquals(PrLifecycle.CLOSED, core("{\"state\":\"closed\",\"merged\":false,\"base\":{\"ref\":\"main\"},"
+                + "\"head\":{\"ref\":\"topic\",\"sha\":\"" + SHA + "\"}}").lifecycle());
+        assertEquals(PrLifecycle.OPEN, core(pull("")).lifecycle());
+        assertEquals(PrLifecycle.UNKNOWN, core("{\"merged\":false,\"base\":{\"ref\":\"main\"},"
+                + "\"head\":{\"ref\":\"topic\",\"sha\":\"" + SHA + "\"}}").lifecycle());
+    }
+
+    @Test
+    void mergeabilityKeepsUnknownApartFromMergeable() {
+        assertEquals(Mergeable.MERGEABLE, core(pull("\"mergeable\":true")).mergeable());
+        assertEquals(Mergeable.CONFLICTING, core(pull("\"mergeable\":false")).mergeable());
+        assertEquals(Mergeable.UNKNOWN, core(pull("\"mergeable\":null")).mergeable());
+        assertEquals(Mergeable.UNKNOWN, core(pull("")).mergeable());
+    }
+
+    @Test
+    void mergeStateIsUpperCasedOrUnknown() {
+        assertEquals("CLEAN", core(pull("\"mergeable_state\":\"clean\"")).mergeStateStatus());
+        assertEquals("BEHIND", core(pull("\"mergeable_state\":\"behind\"")).mergeStateStatus());
+        assertEquals("UNSTABLE", core(pull("\"mergeable_state\":\"unstable\"")).mergeStateStatus());
+        assertEquals("HAS_HOOKS", core(pull("\"mergeable_state\":\"has_hooks\"")).mergeStateStatus());
+        assertEquals("SOMETHING_NEW", core(pull("\"mergeable_state\":\"something_new\"")).mergeStateStatus());
+        for (String absent : List.of("", "\"mergeable_state\":null", "\"mergeable_state\":\"  \"")) {
+            assertEquals(PrMonitorRead.MERGE_STATE_UNKNOWN, core(pull(absent)).mergeStateStatus(), absent);
+        }
+    }
+
+    @Test
+    void aPullWithoutRefsOrAUsableHeadCommitIsUnusable() {
+        for (String body : List.of(
+                "{\"state\":\"open\",\"head\":{\"ref\":\"topic\",\"sha\":\"" + SHA + "\"}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\" \",\"sha\":\"" + SHA + "\"}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\"}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\",\"sha\":null}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\",\"sha\":\"--force\"}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\",\"sha\":\"ba3a460\"}}",
+                "{\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"ref\":\"topic\",\"sha\":\""
+                        + SHA.toUpperCase() + "\"}}")) {
+            assertThrows(PrMonitorRead.Unusable.class, () -> PrMonitorRead.parsePullCore(body), body);
+        }
+    }
+
+    @Test
+    void malformedPullOutputIsUnusableAndNeverAnEmptyAnswer() {
+        for (String body : List.of("not json", "", "{\"base\":{\"ref\":\"main\"}", "[" + pull("") + "]")) {
+            assertThrows(PrMonitorRead.Unusable.class, () -> PrMonitorRead.parsePullCore(body), body);
+        }
+    }
+
+    @Test
+    void checkRunsAreParsedWithRestSpellingsUpperCased() {
+        List<Check> checks = PrMonitorRead.parseCheckRuns("""
+                [{"name":"tests","status":"completed","conclusion":"failure",
+                  "details_url":"https://github.com/o/r/actions/runs/44315117281/job/134839058118"},
+                 {"name":"lint","status":"in_progress","conclusion":null},
+                 {"name":"docs","status":"queued","conclusion":"timed_out","details_url":null}]""");
+
         assertEquals(List.of(
-                new Check(Check.Kind.CHECK_RUN, "tests", "COMPLETED", "FAILURE", Optional.of("CI Run"),
+                new Check(Check.Kind.CHECK_RUN, "tests", "COMPLETED", "FAILURE", Optional.empty(),
                         Optional.of("https://github.com/o/r/actions/runs/44315117281/job/134839058118")),
+                new Check(Check.Kind.CHECK_RUN, "lint", "IN_PROGRESS", "", Optional.empty(), Optional.empty()),
+                new Check(Check.Kind.CHECK_RUN, "docs", "QUEUED", "TIMED_OUT", Optional.empty(), Optional.empty())),
+                checks);
+        assertEquals(Optional.of(44315117281L), checks.get(0).runId());
+        assertEquals(1, checks.stream().filter(Check::failing).count());
+    }
+
+    @Test
+    void aMissingOrMalformedCheckRunsPageIsNoChecks() {
+        assertEquals(List.of(), PrMonitorRead.parseCheckRuns("not json"));
+        assertEquals(List.of(), PrMonitorRead.parseCheckRuns(""));
+        assertEquals(List.of(), PrMonitorRead.parseCheckRuns("{\"check_runs\":[]}"));
+        assertEquals(List.of(), PrMonitorRead.parseCheckRuns("[1,\"FAILURE\",null,[]]"));
+        assertTrue(PrMonitorRead.parseCheckRuns("[{\"name\":\"no fields\"}]").stream().noneMatch(Check::failing));
+    }
+
+    @Test
+    void legacyStatusesAreParsedAsStatusContexts() {
+        List<Check> checks = PrMonitorRead.parseLegacyStatuses(
+                "{\"state\":\"pending\",\"statuses\":["
+                        + "{\"context\":\"DDCI Status\",\"state\":\"pending\",\"target_url\":\"https://ci.example/change/1\"},"
+                        + "{\"context\":\"docs\",\"state\":\"error\",\"target_url\":null}]}");
+
+        assertEquals(List.of(
                 new Check(Check.Kind.STATUS_CONTEXT, "DDCI Status", "PENDING", "", Optional.empty(),
-                        Optional.of("https://ci.example/change/1"))), snapshot.checks());
-        assertEquals(Optional.of(44315117281L), snapshot.checks().get(0).runId());
-        assertEquals(Optional.empty(), snapshot.checks().get(1).runId());
-        assertEquals(1, snapshot.checks().stream().filter(Check::failing).count());
+                        Optional.of("https://ci.example/change/1")),
+                new Check(Check.Kind.STATUS_CONTEXT, "docs", "ERROR", "", Optional.empty(), Optional.empty())),
+                checks);
+        assertEquals(1, checks.stream().filter(Check::failing).count());
+    }
+
+    @Test
+    void aMissingOrMalformedStatusBodyIsNoStatuses() {
+        assertEquals(List.of(), PrMonitorRead.parseLegacyStatuses("not json"));
+        assertEquals(List.of(), PrMonitorRead.parseLegacyStatuses("{\"state\":\"pending\"}"));
+        assertEquals(List.of(), PrMonitorRead.parseLegacyStatuses("{\"statuses\":null}"));
     }
 
     @Test
     void reviewsAreParsedByAuthorStateTimeAndBodyAndNonActionableOnesAreSkipped() {
-        String stdout = view("\"reviews\":["
-                + "{\"author\":{\"login\":\"alice\"},\"state\":\"CHANGES_REQUESTED\","
-                + "\"submittedAt\":\"2026-11-18T10:00:00Z\",\"body\":\"Please fix the tests.\"},"
-                + "{\"author\":{\"login\":\"bob\"},\"state\":\"APPROVED\","
-                + "\"submittedAt\":\"2026-11-18T11:00:00Z\",\"body\":\"Nice.\"},"
-                + "{\"author\":{\"login\":\"carol\"},\"state\":\"PENDING\","
-                + "\"submittedAt\":\"2026-11-18T12:00:00Z\",\"body\":\"draft\"},"
-                + "{\"author\":{\"login\":\"dave\"},\"state\":\"DISMISSED\","
-                + "\"submittedAt\":\"2026-11-18T13:00:00Z\",\"body\":\"stale\"},"
-                + "{\"author\":null,\"state\":\"COMMENTED\",\"submittedAt\":null,\"body\":null},"
-                + "42,null]");
-
-        List<PrMonitorRead.Review> reviews = snapshot(stdout).reviews();
+        List<PrMonitorRead.Review> reviews = PrMonitorRead.parseReviews("""
+                [{"user":{"login":"alice"},"state":"CHANGES_REQUESTED",
+                  "submitted_at":"2026-11-18T10:00:00Z","body":"Please fix the tests."},
+                 {"user":{"login":"bob"},"state":"APPROVED","submitted_at":"2026-11-18T11:00:00Z","body":"Nice."},
+                 {"user":{"login":"carol"},"state":"PENDING","submitted_at":"2026-11-18T12:00:00Z","body":"draft"},
+                 {"user":{"login":"dave"},"state":"DISMISSED","submitted_at":"2026-11-18T13:00:00Z","body":"stale"},
+                 {"user":null,"state":"COMMENTED","submitted_at":null,"body":null},
+                 42,null]""");
 
         assertEquals(List.of(
                 new PrMonitorRead.Review("alice", "CHANGES_REQUESTED", "2026-11-18T10:00:00Z", "Please fix the tests."),
@@ -99,9 +182,8 @@ class PrMonitorReadTest {
 
     @Test
     void aMissingOrMalformedReviewsArrayIsNoReviews() {
-        assertEquals(List.of(), snapshot(view("\"reviews\":null")).reviews());
-        assertEquals(List.of(), snapshot(view("\"reviews\":\"approved\"")).reviews());
-        assertEquals(List.of(), snapshot(view("")).reviews());
+        assertEquals(List.of(), PrMonitorRead.parseReviews("not json"));
+        assertEquals(List.of(), PrMonitorRead.parseReviews("[]"));
     }
 
     @Test
@@ -111,10 +193,10 @@ class PrMonitorReadTest {
             if (i > 0) {
                 entries.append(',');
             }
-            entries.append("{\"author\":{\"login\":\"u").append(i).append("\"},\"state\":\"COMMENTED\",")
-                    .append("\"submittedAt\":\"t").append(i).append("\",\"body\":\"\"}");
+            entries.append("{\"user\":{\"login\":\"u").append(i).append("\"},\"state\":\"COMMENTED\",")
+                    .append("\"submitted_at\":\"t").append(i).append("\",\"body\":\"\"}");
         }
-        List<PrMonitorRead.Review> reviews = snapshot(view("\"reviews\":[" + entries + "]")).reviews();
+        List<PrMonitorRead.Review> reviews = PrMonitorRead.parseReviews("[" + entries + "]");
 
         assertEquals(PrMonitorRead.MAX_REVIEWS, reviews.size());
         assertEquals("u" + 5, reviews.get(0).author());
@@ -122,115 +204,23 @@ class PrMonitorReadTest {
     }
 
     @Test
-    void mergeabilityKeepsUnknownApartFromMergeable() {
-        assertEquals(Mergeable.MERGEABLE, snapshot(view("\"mergeable\":\"MERGEABLE\"")).mergeable());
-        assertEquals(Mergeable.CONFLICTING, snapshot(view("\"mergeable\":\"CONFLICTING\"")).mergeable());
-        assertEquals(Mergeable.UNKNOWN, snapshot(view("\"mergeable\":\"UNKNOWN\"")).mergeable());
-        assertEquals(Mergeable.UNKNOWN, snapshot(view("\"mergeable\":null")).mergeable());
-        assertEquals(Mergeable.UNKNOWN, snapshot(view("\"mergeable\":true")).mergeable());
-        assertEquals(Mergeable.UNKNOWN, snapshot(view("")).mergeable());
-    }
-
-    @Test
-    void mergeStateStatusIsRawOrUnknown() {
-        assertEquals("BEHIND", snapshot(view("\"mergeStateStatus\":\"BEHIND\"")).mergeStateStatus());
-        assertEquals("DIRTY", snapshot(view("\"mergeStateStatus\":\"DIRTY\"")).mergeStateStatus());
-        assertEquals("SOMETHING_NEW", snapshot(view("\"mergeStateStatus\":\"SOMETHING_NEW\"")).mergeStateStatus());
-        for (String absent : List.of("", "\"mergeStateStatus\":null", "\"mergeStateStatus\":\"  \"",
-                "\"mergeStateStatus\":3")) {
-            assertEquals(PrMonitorRead.MERGE_STATE_UNKNOWN, snapshot(view(absent)).mergeStateStatus(), absent);
-        }
-    }
-
-    @Test
-    void closedIsNotFoldedIntoOpenAndAMissingStateIsUnknown() {
-        assertEquals(PrLifecycle.CLOSED, snapshot(view("\"state\":\"CLOSED\"")).lifecycle());
-        assertEquals(PrLifecycle.MERGED, snapshot(view("\"state\":\"MERGED\"")).lifecycle());
-        assertEquals(PrLifecycle.UNKNOWN, snapshot(view("\"state\":null")).lifecycle());
-        assertEquals(PrLifecycle.UNKNOWN, snapshot(view("")).lifecycle());
-        assertFalse(snapshot(view("\"isDraft\":null")).draft());
-    }
-
-    @Test
-    void aViewWithoutRefsOrAUsableHeadCommitFails() {
-        for (String stdout : List.of(
-                "{\"headRefName\":\"topic\",\"headRefOid\":\"" + SHA + "\"}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\" \",\"headRefOid\":\"" + SHA + "\"}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\"topic\"}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\"topic\",\"headRefOid\":null}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\"topic\",\"headRefOid\":\"--force\"}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\"topic\",\"headRefOid\":\"ba3a460\"}",
-                "{\"baseRefName\":\"main\",\"headRefName\":\"topic\",\"headRefOid\":\"" + SHA.toUpperCase() + "\"}")) {
-            assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, stdout), stdout);
-        }
-    }
-
-    @Test
-    void malformedOutputFailsAndIsNeverAnEmptyAnswer() {
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, "not json"));
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, ""));
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, "{\"baseRefName\":\"main\""));
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, "[" + view("") + "]"));
-        String deep = "[".repeat(10_000) + "]".repeat(10_000);
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.parse(7, view("\"statusCheckRollup\":" + deep)));
-    }
-
-    @Test
-    void aMissingOrMalformedRollupIsNoChecks() {
-        assertEquals(List.of(), snapshot(view("")).checks());
-        assertEquals(List.of(), snapshot(view("\"statusCheckRollup\":null")).checks());
-        assertEquals(List.of(), snapshot(view("\"statusCheckRollup\":{\"state\":\"FAILURE\"}")).checks());
-        assertEquals(List.of(), snapshot(view("\"statusCheckRollup\":[1,\"FAILURE\",null,[]]")).checks());
-    }
-
-    @Test
-    void unknownEntryTypesAreSkippedAndUntypedOnesGoByShape() {
-        List<Check> checks = snapshot(view("\"statusCheckRollup\":["
-                + "{\"__typename\":\"Mystery\",\"name\":\"m\",\"state\":\"FAILURE\"},"
-                + "{\"__typename\":7,\"conclusion\":\"FAILURE\"},"
-                + "{\"name\":\"untyped run\",\"status\":\"COMPLETED\",\"conclusion\":\"ERROR\"},"
-                + "{\"__typename\":null,\"context\":\"untyped status\",\"state\":\"FAILURE\"},"
-                + "{\"name\":\"no shape\"}]")).checks();
-
-        assertEquals(List.of(
-                new Check(Check.Kind.CHECK_RUN, "untyped run", "COMPLETED", "ERROR", Optional.empty(), Optional.empty()),
-                new Check(Check.Kind.STATUS_CONTEXT, "untyped status", "FAILURE", "", Optional.empty(),
-                        Optional.empty())), checks);
-    }
-
-    @Test
-    void missingAndNullCheckFieldsReadAsEmpty() {
-        List<Check> checks = snapshot(view("\"statusCheckRollup\":["
-                + "{\"__typename\":\"CheckRun\",\"name\":null,\"status\":\"IN_PROGRESS\",\"conclusion\":\"\","
-                + "\"workflowName\":\"\",\"detailsUrl\":null},"
-                + "{\"__typename\":\"CheckRun\"},"
-                + "{\"__typename\":\"StatusContext\",\"name\":\"ignored\",\"detailsUrl\":\"https://x/actions/runs/5\"}]"))
-                .checks();
-
-        assertEquals(List.of(
-                new Check(Check.Kind.CHECK_RUN, "", "IN_PROGRESS", "", Optional.empty(), Optional.empty()),
-                new Check(Check.Kind.CHECK_RUN, "", "", "", Optional.empty(), Optional.empty()),
-                new Check(Check.Kind.STATUS_CONTEXT, "", "", "", Optional.empty(), Optional.empty())), checks);
-        assertTrue(checks.stream().noneMatch(Check::failing));
-    }
-
-    @Test
     void failingMatchesTheBadgeSignal() {
-        PrSnapshot.Snapshot snapshot = snapshot(view("\"statusCheckRollup\":["
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"FAILURE\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"ERROR\"},"
-                + "{\"__typename\":\"StatusContext\",\"state\":\"FAILURE\"},"
-                + "{\"__typename\":\"StatusContext\",\"state\":\"ERROR\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"IN_PROGRESS\",\"conclusion\":\"FAILURE\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"failure\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"TIMED_OUT\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"conclusion\":\"CANCELLED\"},"
-                + "{\"__typename\":\"CheckRun\",\"status\":\"COMPLETED\",\"state\":\"FAILURE\",\"conclusion\":\"SUCCESS\"},"
-                + "{\"__typename\":\"StatusContext\",\"state\":\"PENDING\"},"
-                + "{\"__typename\":\"StatusContext\",\"state\":\"SUCCESS\"}]"));
+        List<Check> checks = PrMonitorRead.parseCheckRuns("["
+                + "{\"name\":\"a\",\"status\":\"completed\",\"conclusion\":\"failure\"},"
+                + "{\"name\":\"b\",\"status\":\"completed\",\"conclusion\":\"error\"},"
+                + "{\"name\":\"c\",\"status\":\"in_progress\",\"conclusion\":\"failure\"},"
+                + "{\"name\":\"d\",\"status\":\"completed\",\"conclusion\":\"success\"},"
+                + "{\"name\":\"e\",\"status\":\"completed\",\"conclusion\":\"timed_out\"},"
+                + "{\"name\":\"f\",\"status\":\"completed\",\"conclusion\":\"cancelled\"}]");
+        List<Check> statuses = PrMonitorRead.parseLegacyStatuses("{\"statuses\":["
+                + "{\"context\":\"a\",\"state\":\"failure\"},"
+                + "{\"context\":\"b\",\"state\":\"error\"},"
+                + "{\"context\":\"c\",\"state\":\"pending\"},"
+                + "{\"context\":\"d\",\"state\":\"success\"}]}");
 
-        assertEquals(List.of(true, true, true, true, false, false, false, false, false, false, false),
-                snapshot.checks().stream().map(Check::failing).toList());
+        assertEquals(List.of(true, true, false, false, false, false),
+                checks.stream().map(Check::failing).toList());
+        assertEquals(List.of(true, true, false, false), statuses.stream().map(Check::failing).toList());
     }
 
     @Test
@@ -251,13 +241,28 @@ class PrMonitorReadTest {
     }
 
     @Test
+    void theBodyStartsAfterTheFirstBlankLineWhereverTheLineEndingsSit() {
+        assertEquals("{\"a\":1}", PrMonitorRead.bodyAfterHeaders("HTTP/2.0 200 OK\nETag: \"e\"\n\n{\"a\":1}"));
+        assertEquals("{\"a\":1}",
+                PrMonitorRead.bodyAfterHeaders("HTTP/2.0 200 OK\r\nETag: \"e\"\r\n\r\n{\"a\":1}"));
+        assertEquals("", PrMonitorRead.bodyAfterHeaders("HTTP/2.0 304 Not Modified\nETag: \"e\"\n"));
+    }
+
+    @Test
+    void theEtagHeaderIsFoundCaseInsensitivelyAndOnlyInTheHeaders() {
+        assertEquals(Optional.of("\"e1\""), PrMonitorRead.etagOf("HTTP/2.0 200 OK\nETag: \"e1\"\n\nbody"));
+        assertEquals(Optional.of("\"e2\""), PrMonitorRead.etagOf("HTTP/2.0 200 OK\nEtag: \"e2\"\n\nbody"));
+        assertEquals(Optional.empty(), PrMonitorRead.etagOf("HTTP/2.0 200 OK\nX-Other: etag: no\n\nbody"));
+        assertEquals(Optional.empty(), PrMonitorRead.etagOf("HTTP/2.0 200 OK\n\nbody"));
+    }
+
+    @Test
     void aNonPositivePrNumberIsRefused() {
         try (PrMonitorRead read = new PrMonitorRead()) {
             for (int number : new int[] {0, -1}) {
                 assertThrows(IllegalArgumentException.class, () -> read.read(Path.of("."), Optional.empty(), number));
                 assertThrows(IllegalArgumentException.class, () -> PrMonitorRead.readWith(Optional.empty(),
-                        Path.of("."), Optional.empty(), number, Duration.ofSeconds(15)));
-                assertThrows(IllegalArgumentException.class, () -> PrMonitorRead.parse(number, view("")));
+                        Path.of("."), Optional.empty(), number, Duration.ofSeconds(15), Map.of()));
             }
         }
     }
@@ -265,7 +270,7 @@ class PrMonitorReadTest {
     @Test
     void missingGhIsUnsupported() {
         assertInstanceOf(PrSnapshot.Unsupported.class, PrMonitorRead.readWith(Optional.empty(), Path.of("."),
-                Optional.of("o/r"), 7, Duration.ofSeconds(15)));
+                Optional.of("o/r"), 7, Duration.ofSeconds(15), Map.of()));
     }
 
     @Test
@@ -281,29 +286,79 @@ class PrMonitorReadTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void oneViewCallCarriesEveryFieldAndTheRepository(@TempDir Path dir) throws Exception {
+    void oneReadAssemblesTheSnapshotFromTheFourEndpoints(@TempDir Path dir) throws Exception {
         Path receipt = dir.resolve("receipt.txt");
-        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
-                + "printf '%s' '" + view("\"state\":\"OPEN\",\"mergeable\":\"CONFLICTING\","
-                + "\"mergeStateStatus\":\"DIRTY\"") + "'\n");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, apiScript(receipt, false));
 
         PrSnapshot.Snapshot snapshot = assertInstanceOf(PrSnapshot.Snapshot.class,
-                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.of("o/r"), 42, Duration.ofSeconds(15)));
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.of("o/r"), 42,
+                        Duration.ofSeconds(15), new HashMap<>()));
 
-        assertEquals(List.of("args=pr view 42 --json state,isDraft,baseRefName,headRefName,headRefOid,"
-                + "mergeable,mergeStateStatus,statusCheckRollup,reviews --repo o/r"), Files.readAllLines(receipt));
         assertEquals(42, snapshot.prNumber());
+        assertEquals(PrLifecycle.OPEN, snapshot.lifecycle());
+        assertFalse(snapshot.draft());
+        assertEquals("main", snapshot.baseRefName());
+        assertEquals("topic", snapshot.headRefName());
+        assertEquals(SHA, snapshot.headRefOid());
         assertEquals(Mergeable.CONFLICTING, snapshot.mergeable());
         assertEquals("DIRTY", snapshot.mergeStateStatus());
+        assertEquals(List.of(
+                new Check(Check.Kind.CHECK_RUN, "tests", "COMPLETED", "FAILURE", Optional.empty(),
+                        Optional.of("https://github.com/o/r/actions/runs/44315117281/job/134839058118")),
+                new Check(Check.Kind.STATUS_CONTEXT, "DDCI Status", "PENDING", "", Optional.empty(),
+                        Optional.of("https://ci.example/change/1"))), snapshot.checks());
+        assertEquals(List.of(new PrMonitorRead.Review("alice", "APPROVED", "2026-11-18T11:00:00Z", "Nice.")),
+                snapshot.reviews());
+        assertEquals(List.of(
+                "args=api repos/o/r/pulls/42 --include",
+                "args=api repos/o/r/commits/" + SHA + "/check-runs?per_page=100&page=1 --include",
+                "args=api repos/o/r/commits/" + SHA + "/status --include",
+                "args=api repos/o/r/pulls/42/reviews?per_page=100&page=1 --include"), Files.readAllLines(receipt));
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aHostQualifiedRepositoryNamesItsHost(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, apiScript(receipt, false));
+
+        PrSnapshot.Snapshot snapshot = assertInstanceOf(PrSnapshot.Snapshot.class,
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.of("ghe.example.com/o/r"), 42,
+                        Duration.ofSeconds(15), new HashMap<>()));
+
+        assertEquals(42, snapshot.prNumber());
+        assertTrue(Files.readAllLines(receipt).get(0).contains("--hostname ghe.example.com"));
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void anUnchangedEndpointReusesItsCachedAnswer(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, apiScript(receipt, true));
+
+        Map<String, PrMonitorRead.CachedResponse> etags = new HashMap<>();
+        PrSnapshot first = PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42,
+                Duration.ofSeconds(15), etags);
+        PrSnapshot second = PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42,
+                Duration.ofSeconds(15), etags);
+
+        assertInstanceOf(PrSnapshot.Snapshot.class, first);
+        assertEquals(first, second, "a 304-answered poll reads as the same snapshot");
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(8, calls.size(), "the second read still asked all four endpoints, conditionally");
+        for (int i = 4; i < 8; i++) {
+            assertTrue(calls.get(i).contains("If-None-Match"), calls.get(i));
+        }
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
     void stdinIsDiscardedSoAPromptCannotHangTheRead(@TempDir Path dir) throws Exception {
-        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "cat > /dev/null\nprintf '%s' '" + view("") + "'\n");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "cat > /dev/null\n" + apiScript(null, false));
 
         assertInstanceOf(PrSnapshot.Snapshot.class,
-                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 7, Duration.ofSeconds(10)));
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42, Duration.ofSeconds(10),
+                        new HashMap<>()));
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
@@ -314,38 +369,51 @@ class PrMonitorReadTest {
 
         for (String repository : List.of("--repo", "o", "o/r/x/y", "o/ r", "o/-r")) {
             assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.readWith(Optional.of(gh), dir,
-                    Optional.of(repository), 7, Duration.ofSeconds(15)), repository);
+                    Optional.of(repository), 7, Duration.ofSeconds(15), new HashMap<>()), repository);
         }
         assertFalse(Files.exists(receipt));
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void aNonzeroExitFailsWithTheStderrExcerpt(@TempDir Path dir) throws Exception {
+    void aFailedEndpointFailsTheWholeReadWithTheStderrExcerpt(@TempDir Path dir) throws Exception {
         Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "echo 'HTTP 502: bad gateway' >&2\nexit 1\n");
 
         assertEquals("HTTP 502: bad gateway", assertInstanceOf(PrSnapshot.Failed.class,
-                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 7, Duration.ofSeconds(15))).message());
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 7, Duration.ofSeconds(15),
+                        new HashMap<>())).message());
     }
 
-    @EnabledOnOs({OS.MAC, OS.LINUX})
-    @Test
-    void aTimeoutOrALaunchFailureFails(@TempDir Path dir) throws Exception {
-        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "exec sleep 30\n");
-
-        PrSnapshot.Failed timedOut = assertInstanceOf(PrSnapshot.Failed.class,
-                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 7, Duration.ofMillis(300)));
-        assertTrue(timedOut.message().contains("timed out"), timedOut.message());
-        assertInstanceOf(PrSnapshot.Failed.class, PrMonitorRead.readWith(Optional.of(dir.resolve("missing-gh")),
-                dir, Optional.empty(), 7, Duration.ofSeconds(15)));
-    }
-
-    @EnabledOnOs({OS.MAC, OS.LINUX})
-    @Test
-    void malformedOutputFromGhFails(@TempDir Path dir) throws Exception {
-        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, "printf '%s' '{\"baseRefName\":\"main\"'\n");
-
-        assertInstanceOf(PrSnapshot.Failed.class,
-                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 7, Duration.ofSeconds(15)));
+    /**
+     * A scripted {@code gh} answering the monitor's four endpoints. With
+     * {@code conditionally}, any call carrying {@code If-None-Match} is
+     * answered 304 (gh's real behavior: non-2xx exit, headers on stdout, no
+     * body); without it, every call is answered 200 with a fresh body.
+     */
+    private static String apiScript(Path receipt, boolean conditionally) {
+        String log = receipt == null ? "" : "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n";
+        String conditional = conditionally
+                ? "case \"$*\" in *If-None-Match*) "
+                    + "printf 'HTTP/2.0 304 Not Modified\\nEtag: \"e1\"\\n\\n'; exit 1;; esac\n"
+                : "";
+        return log + conditional + "case \"$2\" in\n"
+                + "  pulls/42|repos/o/r/pulls/42)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"ep\"\\n\\n%s' '"
+                + pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"") + "'\n    ;;\n"
+                + "  *" + SHA + "/check-runs*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"ec\"\\n\\n%s' "
+                + "'[{\"name\":\"tests\",\"status\":\"completed\",\"conclusion\":\"failure\","
+                + "\"details_url\":\"https://github.com/o/r/actions/runs/44315117281/job/134839058118\"}]'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/status)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"es\"\\n\\n%s' "
+                + "'{\"state\":\"pending\",\"statuses\":[{\"context\":\"DDCI Status\",\"state\":\"pending\","
+                + "\"target_url\":\"https://ci.example/change/1\"}]}'\n    ;;\n"
+                + "  *pulls/42/reviews*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"er\"\\n\\n%s' "
+                + "'[{\"user\":{\"login\":\"alice\"},\"state\":\"APPROVED\",\"submitted_at\":\"2026-11-18T11:00:00Z\","
+                + "\"body\":\"Nice.\"}]'\n    ;;\n"
+                + "  *) echo \"unexpected call: $*\" >&2; exit 1 ;;\n"
+                + "esac\n";
     }
 }
