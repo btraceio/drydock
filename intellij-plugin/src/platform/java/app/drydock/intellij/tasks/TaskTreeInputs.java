@@ -93,6 +93,8 @@ final class TaskTreeInputs implements AutoCloseable {
 
     private static final long GIT_TIMEOUT_SECONDS = 15;
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
+    /** How long a failed pull-request listing is served instead of refetched. */
+    private static final long FAILED_LISTING_NANOS = TimeUnit.SECONDS.toNanos(30);
     // Deliberately mirrors but does NOT share ISSUE_CACHE_NANOS: the two
     // caches must stay free to diverge.
     private static final long WORKTREE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -777,7 +779,21 @@ final class TaskTreeInputs implements AutoCloseable {
         PullRequestKey key = new PullRequestKey(root, repository);
         long now = System.nanoTime();
         CachedPullRequests cached = pullRequestCache.get(key);
-        if (cached != null && cached.expiresAt() > now && !failed(cached.listing())) {
+        if (cached != null && cached.expiresAt() > now) {
+            if (!failed(cached.listing())) {
+                return cached.listing();
+            }
+            // A failed listing is served for a bounded backoff instead of
+            // refetching on every rebuild pass. GitHub's GraphQL 502/504s on
+            // heavy listing queries for minutes at a stretch, and the old
+            // refetch-on-every-pass rule -- with the failure's own rebuild
+            // trigger -- turned one failing repository into a retry storm
+            // that also burned the rate budget every other repository's
+            // listing shares. During the backoff the section keeps its
+            // error row; after it the retry gets one bounded run (the
+            // listing itself retries once without its heaviest fields).
+            pullRequestCache.replace(key, cached,
+                    new CachedPullRequests(Math.min(cached.expiresAt(), now + FAILED_LISTING_NANOS), cached.listing()));
             return cached.listing();
         }
         CompletableFuture<PullRequestListing> listing = github.openPullRequests(root, repository);
@@ -786,10 +802,12 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     /**
-     * A failed listing is never served from the cache: the tree rebuilds on
-     * every session or activity event, so a transient {@code gh} failure is
-     * retried on the next pass instead of pinning the error for a minute and
-     * leaving the section a dead "GitHub pull requests: …" row.
+     * Whether a cached pull-request listing failed. A failed listing is
+     * served from the cache only for {@link #FAILED_LISTING_NANOS}: a
+     * transient {@code gh} failure is retried after the backoff instead of
+     * pinning the error forever, and the section's error row stays up
+     * while a backoff-expired refetch is in flight (the last shown answer
+     * is served until the new one completes).
      */
     private static boolean failed(CompletableFuture<PullRequestListing> listing) {
         // openPullRequestsBlocking never completes exceptionally (every
