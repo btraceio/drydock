@@ -159,6 +159,23 @@ class GhCliBranchPullRequestsTest {
         assertTrue(!Files.exists(receipt));
     }
 
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void theRowLookupForOneSessionIsLightOnHeavyFields(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "printf '%s' '[{\"number\":5,\"state\":\"OPEN\",\"headRefName\":\"h\",\"title\":\"t\"}]'\n");
+
+        Map<String, BranchPullRequest> byBranch = GhCliService.branchPullRequestRowsWith(Optional.of(gh), dir,
+                Optional.of("o/r"), Duration.ofSeconds(15));
+
+        assertEquals(List.of("args=pr list --state all --limit 100 --json "
+                + "number,state,isDraft,headRefName,title,url,isCrossRepository --repo o/r"),
+                Files.readAllLines(receipt), "the match-only lookup asks no rollup fields");
+        assertEquals(new BranchPullRequest(5, PrLifecycle.OPEN, false, "h", "t", Optional.empty()),
+                byBranch.get("h"));
+    }
+
     @Test
     void missingGhReadsAsNoBadgesWithoutAWarning() throws Exception {
         List<LogRecord> warnings = new ArrayList<>();

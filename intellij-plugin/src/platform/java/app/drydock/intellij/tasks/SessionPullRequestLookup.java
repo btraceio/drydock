@@ -110,7 +110,10 @@ public final class SessionPullRequestLookup {
 
     private static Map<String, BranchPullRequest> listing(GhCliService github, TaskTreeInputs.BadgeSource source) {
         try {
-            return github.branchPullRequests(source.root(), source.repository())
+            // Light rows: this lookup matches by number, state and head
+            // branch and renders nothing, so the babysit-tool calls and
+            // actions that each run it must not each pay the rollup query.
+            return github.branchPullRequestRows(source.root(), source.repository())
                     .get(GH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
