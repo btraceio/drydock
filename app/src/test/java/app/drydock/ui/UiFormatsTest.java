@@ -36,4 +36,55 @@ class UiFormatsTest extends FxTest {
         List<String> texts = nodes.stream().map(node -> ((Label) node).getText()).toList();
         assertEquals(List.of("docs", "›", "README.md"), texts);
     }
+
+    @Test
+    void wrapLeavesShortLinesAlone() {
+        assertEquals("one two three", UiFormats.wrap("one two three", 72));
+    }
+
+    @Test
+    void wrapBreaksLongLinesOnSpaces() {
+        assertEquals("alpha beta gamma\ndelta", UiFormats.wrap("alpha beta gamma delta", 18));
+    }
+
+    @Test
+    void wrapHardBreaksATokenWithNoSeparators() {
+        assertEquals("aaaaa\naaaaa\nbbbbb\nbbbbb\nccccc\nccccc",
+                UiFormats.wrap("aaaaaaaaaabbbbbbbbbbcccccccccc", 5));
+    }
+
+    @Test
+    void wrapBreaksALongPathAtSlashes() {
+        assertEquals("/one/two/\nthree/four", UiFormats.wrap("/one/two/three/four", 10));
+    }
+
+    @Test
+    void wrapPreservesEmbeddedNewlines() {
+        assertEquals("short\nalpha beta gamma\ndelta", UiFormats.wrap("short\nalpha beta gamma delta", 18));
+    }
+
+    @Test
+    void labeledLinePadsContinuationsToTheLabelColumn() {
+        assertEquals("Dir: alpha\n     beta\n     gamma", UiFormats.labeledLine("Dir", "alpha beta gamma", 12));
+    }
+
+    @Test
+    void labeledLineHandlesWidthsShorterThanItsPrefix() {
+        String expected = "Long: a\n      b\n      c";
+        assertEquals(expected, UiFormats.labeledLine("Long", "abc", 0));
+        assertEquals(expected, UiFormats.labeledLine("Long", "abc", -5));
+    }
+
+    @Test
+    void abbreviateHomeReplacesTheUserPrefixWithTilde() {
+        String home = System.getProperty("user.home");
+        assertEquals("~", UiFormats.abbreviateHome(home));
+        assertEquals("~/go/src/demo", UiFormats.abbreviateHome(home + "/go/src/demo"));
+    }
+
+    @Test
+    void abbreviateHomeLeavesOtherPrefixesAlone() {
+        assertEquals("/opt/work/demo", UiFormats.abbreviateHome("/opt/work/demo"));
+        assertEquals("host:/home/user/demo", UiFormats.abbreviateHome("host:/home/user/demo"));
+    }
 }

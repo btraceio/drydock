@@ -21,7 +21,100 @@ import java.util.List;
  */
 public final class UiFormats {
 
+    /** Wrapping width for tooltips: wide enough for paths, narrow enough to scan. */
+    public static final int TOOLTIP_LINE_WIDTH = 72;
+
     private UiFormats() {
+    }
+
+    /**
+     * Word-wraps {@code value} to {@code width} columns. Embedded newlines
+     * are intentional structure, not overflow, and are preserved. Words
+     * break on spaces; a token wider than the line (a path, typically — no
+     * spaces) breaks at path separators, falling back to a hard break.
+     */
+    public static String wrap(String value, int width) {
+        List<String> out = new ArrayList<>();
+        for (String line : value.split("\n", -1)) {
+            if (line.length() <= width) {
+                out.add(line);
+                continue;
+            }
+            StringBuilder current = new StringBuilder();
+            for (String word : line.split(" ")) {
+                for (String piece : breakLongToken(word, width)) {
+                    if (current.length() == 0) {
+                        current.append(piece);
+                    } else if (current.length() + 1 + piece.length() <= width) {
+                        current.append(' ').append(piece);
+                    } else {
+                        out.add(current.toString());
+                        current.setLength(0);
+                        current.append(piece);
+                    }
+                }
+            }
+            out.add(current.toString());
+        }
+        return String.join("\n", out);
+    }
+
+    /** A token wider than the line breaks at path separators (keeping the slash); a token with none hard-breaks at the width. */
+    private static List<String> breakLongToken(String token, int width) {
+        if (token.length() <= width) {
+            return List.of(token);
+        }
+        List<String> pieces = new ArrayList<>();
+        int start = 0;
+        while (start < token.length()) {
+            int end = Math.min(start + width, token.length());
+            if (end < token.length()) {
+                int slash = token.lastIndexOf('/', end - 1);
+                if (slash > start) {
+                    end = slash + 1;
+                }
+            }
+            pieces.add(token.substring(start, end));
+            start = end;
+        }
+        return pieces;
+    }
+
+    /**
+     * One tooltip field line: {@code label: value}, with continuation lines
+     * padded to the label column so a long value reads as one indented field
+     * instead of spilling into unlabeled lines. (The pad is approximate in a
+     * proportional font; it is still clearly better than column 0.)
+     */
+    public static String labeledLine(String label, String value, int width) {
+        String prefix = label + ": ";
+        int valueWidth = Math.max(1, width - prefix.length());
+        String[] lines = wrap(value, valueWidth).split("\n", -1);
+        String pad = " ".repeat(prefix.length());
+        StringBuilder out = new StringBuilder(prefix).append(lines[0]);
+        for (int i = 1; i < lines.length; i++) {
+            out.append('\n').append(pad).append(lines[i]);
+        }
+        return out.toString();
+    }
+
+    /**
+     * Replaces the user-home prefix of a local absolute path with {@code ~}
+     * so a tooltip's directory line stays short. A path outside (or without)
+     * the home prefix — notably {@code host:/remote/path} — is unchanged.
+     */
+    public static String abbreviateHome(String pathText) {
+        String home = System.getProperty("user.home", "");
+        if (home.isBlank() || home.equals("/")) {
+            return pathText;
+        }
+        if (pathText.equals(home)) {
+            return "~";
+        }
+        if (pathText.startsWith(home + "/")) {
+            return "~" + pathText.substring(home.length());
+        }
+        return pathText;
     }
 
     /** Relative "time ago" for session meta lines (design: {@code branch · 2h ago}). */
