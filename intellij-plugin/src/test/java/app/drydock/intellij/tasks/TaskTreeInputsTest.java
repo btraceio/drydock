@@ -65,6 +65,32 @@ class TaskTreeInputsTest {
         assertFalse(TaskTreeInputs.githubIssuesWanted(Set.of(OTHER), ROOT));
     }
 
+    // --- Badge join: the light listings take their conflict/CI signals from the badge listing ---
+
+    @Test
+    void badgeSignalsJoinOntoListingRowsByNumber() {
+        GhCliService.OpenPullRequest light = pr(12, "newest", "feature/x");
+        GhCliService.OpenPullRequest unknown = pr(13, "brand new", "feature/y");
+        BranchPullRequest badge = pr(12, "feature/x", true, FAILING);
+
+        GhCliService.PullRequestListing joined = TaskTreeInputs.withBadges(
+                new GhCliService.PullRequestListing.Listed(List.of(light, unknown)),
+                Map.of("feature/x", badge));
+
+        List<GhCliService.OpenPullRequest> rows =
+                assertInstanceOf(GhCliService.PullRequestListing.Listed.class, joined).pullRequests();
+        assertEquals(new GhCliService.OpenPullRequest(12, "newest", "feature/x", "main", false,
+                Optional.empty(), Optional.empty(), true, FAILING), rows.get(0));
+        assertEquals(unknown, rows.get(1), "a row the badge map does not know keeps its no-signal row");
+    }
+
+    @Test
+    void aFailedListingPassesThroughTheBadgeJoinUnchanged() {
+        GhCliService.PullRequestListing failed = new GhCliService.PullRequestListing.Failed("gh broke");
+
+        assertSame(failed, TaskTreeInputs.withBadges(failed, Map.of("b", pr(1, "b", false, Set.of()))));
+    }
+
     // --- Search beyond the fetch limit: the search rows only widen the pool ---
 
     @Test

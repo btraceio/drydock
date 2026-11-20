@@ -95,6 +95,17 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final long ISSUE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
     /** How long a failed pull-request listing is served instead of refetched. */
     private static final long FAILED_LISTING_NANOS = TimeUnit.SECONDS.toNanos(30);
+    /**
+     * The badge listing's cadence. It is the one fetch that still carries
+     * {@code mergeable,statusCheckRollup} -- a query whose cost grows with
+     * every check of every listed PR and the consumer that exhausted the
+     * 5,000 points/hour GraphQL budget -- so it refreshes on a slower
+     * cadence than the light listings it badges: five minutes, not one.
+     * The manual Refresh gesture drops this cache along with the listings'
+     * ({@link #invalidatePullRequests}), so "show me now" is never more
+     * stale than the gesture.
+     */
+    private static final long BADGE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(5);
     // Deliberately mirrors but does NOT share ISSUE_CACHE_NANOS: the two
     // caches must stay free to diverge.
     private static final long WORKTREE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
@@ -435,10 +446,18 @@ final class TaskTreeInputs implements AutoCloseable {
                 badgeSources.put(root, new BadgeSource(root, githubSettings.repository()));
                 // Only once the user opened the project's pull requests here.
                 if (requestedPullRequests.contains(root)) {
+                    // The badge map lookup rides the same fetch the session
+                    // badges use: the one heavy listing, on its slower TTL.
+                    // A fetch still running serves the previous answer (none
+                    // on the first pass) and its completion requests one
+                    // more rebuild, when the joined signals appear.
+                    Map<String, BranchPullRequest> badges =
+                            branchPullRequestsNow(root, githubSettings.repository());
                     listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
                                     pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
-                            .ifPresent(listing -> pullRequests.put(root,
-                                    searchedPullRequests(root, githubSettings.repository(), listing, search)));
+                            .ifPresent(listing -> pullRequests.put(root, withBadges(
+                                    searchedPullRequests(root, githubSettings.repository(), listing, search),
+                                    badges)));
                     // Dedup needs the worktree list even when the user has never
                     // opened the Worktrees section (byMain is filled lazily), but
                     // only once pull requests themselves have been requested.
@@ -682,6 +701,9 @@ final class TaskTreeInputs implements AutoCloseable {
      * The head-branch PR map for {@code root} as far as it is known now.
      * A missing or expired entry starts a lookup whose completion calls
      * {@link #lateData}; until it completes the previous answer is served.
+     * The badge listing refreshes on {@link #BADGE_CACHE_NANOS}, not the
+     * listings' one-minute TTL: it is the heavy fetch every light listing's
+     * conflict and CI signals join from.
      */
     private Map<String, BranchPullRequest> branchPullRequestsNow(Path root, Optional<String> repository) {
         PullRequestKey key = new PullRequestKey(root, repository);
@@ -690,7 +712,7 @@ final class TaskTreeInputs implements AutoCloseable {
         if (cached == null || cached.expiresAt() <= now) {
             Map<String, BranchPullRequest> previous = cached == null ? Map.of() : current(cached);
             CompletableFuture<Map<String, BranchPullRequest>> lookup = github.branchPullRequests(root, repository);
-            cached = new CachedBranchPullRequests(now + ISSUE_CACHE_NANOS, lookup, previous);
+            cached = new CachedBranchPullRequests(now + BADGE_CACHE_NANOS, lookup, previous);
             branchPullRequestCache.put(key, cached);
             if (!lookup.isDone()) {
                 lookup.whenComplete((answer, failure) -> lateData.run());
@@ -876,6 +898,34 @@ final class TaskTreeInputs implements AutoCloseable {
             merged.putIfAbsent(row.number(), row);
         }
         return List.copyOf(merged.values());
+    }
+
+    /**
+     * The listing's rows carrying the conflict and CI signals of the badge
+     * listing ({@link #branchPullRequestsNow}, the one fetch that still
+     * asks for the heavy fields), joined by PR number. A row the badge map
+     * does not know yet -- a PR listed in the last minute that the badge
+     * fetch has not seen, or a badge fetch that failed -- keeps the light
+     * row's "no signal", which the renderer treats as neither red nor
+     * conflicting. A failed listing passes through unchanged: the section's
+     * error row is not something a badge join can repair. Pure.
+     */
+    static PullRequestListing withBadges(PullRequestListing listing,
+                                         Map<String, BranchPullRequest> byHeadBranch) {
+        if (!(listing instanceof PullRequestListing.Listed listed)) {
+            return listing;
+        }
+        Map<Integer, BranchPullRequest> byNumber = new HashMap<>();
+        for (BranchPullRequest pullRequest : byHeadBranch.values()) {
+            byNumber.put(pullRequest.number(), pullRequest);
+        }
+        List<OpenPullRequest> rows = new ArrayList<>();
+        for (OpenPullRequest row : listed.pullRequests()) {
+            BranchPullRequest badge = byNumber.get(row.number());
+            rows.add(badge == null ? row
+                    : row.withSignals(badge.conflicting(), badge.ciFailures()));
+        }
+        return new PullRequestListing.Listed(rows);
     }
 
     /**

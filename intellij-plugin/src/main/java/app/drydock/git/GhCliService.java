@@ -100,6 +100,12 @@ public final class GhCliService implements AutoCloseable {
             ciFailures = Set.copyOf(ciFailures);
         }
 
+        /** The same row with the conflict and CI signals a badge join supplies. */
+        public OpenPullRequest withSignals(boolean conflicting, Set<CiFailure> ciFailures) {
+            return new OpenPullRequest(number, title, headRefName, baseRefName, draft, author, url,
+                    conflicting, ciFailures);
+        }
+
         /** The shape before the listing carried CI results: no failure signal. */
         public OpenPullRequest(int number, String title, String headRefName, String baseRefName,
                                boolean draft, Optional<String> author, Optional<String> url,
@@ -415,33 +421,30 @@ public final class GhCliService implements AutoCloseable {
 
     /**
      * One {@code gh pr list} run and its parsed rows; the plain and the
-     * searched listing share every field, bound and failure answer. A
-     * server-side 5xx failure or timeout gets exactly one retry without the heavy
-     * {@code mergeable,statusCheckRollup} fields: on repositories whose PR
-     * listing queries outgrow the API, that retry is the difference between
-     * a listing that loads and a section that never does -- the rows lose
-     * their CI and mergeability badges, which the parsers read as no signal.
+     * searched listing share every field, bound and failure answer. The
+     * listing is deliberately light -- no {@code mergeable} or
+     * {@code statusCheckRollup}: those two fields are what makes a listing
+     * query's cost grow with every check of every listed PR, and a task tree
+     * refreshing several listings a minute against the 5,000 points/hour
+     * GraphQL budget was exhausting it. The rows leave here without
+     * conflict or CI signals, which read as "no signal", and the task tree
+     * joins them from the slower badge listing
+     * ({@link #branchPullRequests}, the one fetch that still carries the
+     * heavy fields). A server-side 5xx failure is therefore not retried
+     * with reduced fields -- there are no fields left to drop; the failed
+     * listing's own backoff governs the retry.
      */
     private static PullRequestListing pullRequestListing(Path gh, Path root, Optional<String> repository,
                                                          List<String> selection, Duration timeout) {
         List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "list", "--state", "open"));
         command.addAll(selection);
         command.addAll(List.of("--limit", String.valueOf(PR_LIST_LIMIT),
-                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup"));
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url"));
         repository.ifPresent(value -> {
             command.add("--repo");
             command.add(value);
         });
-        ListingRun run = pullRequestListingRun(root, command, timeout);
-        List<String> reduced = withoutOptionalListingFields(command);
-        if (!(run.listing() instanceof PullRequestListing.Failed failed)
-                || command.equals(reduced)
-                || !(run.timedOut() || serverSideFailure(failed.message()))) {
-            return run.listing();
-        }
-        LOG.log(Level.WARNING, "gh pr list in " + root
-                + " failed with a server-side error; retrying without mergeability and CI badges");
-        return pullRequestListingRun(root, reduced, timeout).listing();
+        return pullRequestListingRun(root, command, timeout).listing();
     }
 
     /** One listing run: its parsed answer and whether the run was killed by the timeout. */
@@ -460,7 +463,7 @@ public final class GhCliService implements AutoCloseable {
         }
     }
 
-    /** One {@code gh pr list} run and its parse; the retry bookkeeping lives in {@link #pullRequestListing}. */
+    /** One {@code gh pr list} run and its parse; the reduced-field retry lives in {@link #branchPullRequestsWith}. */
     private static ListingRun pullRequestListingRun(Path root, List<String> command, Duration timeout) {
         ProcessResult result;
         try {
@@ -495,7 +498,11 @@ public final class GhCliService implements AutoCloseable {
         return lower.contains("http 5");
     }
 
-    /** The pure half: {@code gh pr list --json} output to a listing. */
+    /**
+     * The pure half: {@code gh pr list --json} output to a listing. The
+     * conflict and CI members may be absent -- the light listings ask for
+     * none -- and then read as no signal, the same as a PR that has none.
+     */
     static PullRequestListing parsePullRequestListing(String stdout) {
         try {
             if (!(JsonParser.parse(stdout) instanceof JsonArray array)) {
@@ -555,10 +562,11 @@ public final class GhCliService implements AutoCloseable {
     }
 
     /**
-     * Reads one PR by number with the full row fields the listing carries
-     * (mergeability and CI included), so an exact-number search hit renders
-     * as the same row a listing row does — including PRs absent from the
-     * newest-{@link #PR_LIST_LIMIT} listing window.
+     * Reads one PR by number with the listing's row fields, so an
+     * exact-number search hit renders as the same row a listing row does --
+     * including PRs absent from the newest-{@link #PR_LIST_LIMIT} listing
+     * window. Deliberately light, like the listings: the conflict and CI
+     * signals join from the badge listing in the task tree, not here.
      */
     public CompletableFuture<Optional<OpenPullRequest>> pullRequestDetail(Path root, Optional<String> repository,
                                                                           int number) {
@@ -573,7 +581,7 @@ public final class GhCliService implements AutoCloseable {
             throw new IllegalArgumentException("Use a positive PR number and a valid repository");
         }
         List<String> command = new ArrayList<>(List.of(gh.toString(), "pr", "view", String.valueOf(number),
-                "--json", "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup"));
+                "--json", "number,title,headRefName,baseRefName,isDraft,author,url"));
         repository.ifPresent(value -> {
             command.add("--repo");
             command.add(value);
@@ -591,7 +599,11 @@ public final class GhCliService implements AutoCloseable {
 
     /**
      * The repository's recent pull requests of every state, keyed by head
-     * branch (see {@link #byHeadBranch}). Empty when {@code gh} is not
+     * branch (see {@link #byHeadBranch}). The one listing that still carries
+     * the heavy {@code mergeable,statusCheckRollup} fields: it is the badge
+     * source -- both for the session badges and, joined by number in the
+     * task tree, for the light listings' rows -- and is refetched on a
+     * slower cadence than they are. Empty when {@code gh} is not
      * installed (logged at DEBUG) or when the query fails (logged at
      * WARNING with the stderr excerpt): a missing badge is the only
      * fallback a session row has, so no failure row is produced.
