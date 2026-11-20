@@ -22,39 +22,39 @@ import java.util.function.Function;
  * command is stored verbatim (whitespace-stripped); it is not a secret and it
  * does not run at save time.</p>
  */
-record AgentIdentitySettings(boolean enabled, String credentialCommand) {
+public record AgentIdentitySettings(boolean enabled, String credentialCommand) {
 
     private static final String PREFIX = "drydock.agentIdentity.";
 
-    AgentIdentitySettings {
+    public AgentIdentitySettings {
         credentialCommand = credentialCommand == null ? "" : credentialCommand.strip();
     }
 
     /** The defaults: off, no command. */
-    static AgentIdentitySettings defaults() {
+    public static AgentIdentitySettings defaults() {
         return new AgentIdentitySettings(false, "");
     }
 
     /** Lenient read: missing values read as the defaults, never as broken. */
-    static AgentIdentitySettings read(Function<String, String> get, RepositoryId id) {
+    public static AgentIdentitySettings read(Function<String, String> get, RepositoryId id) {
         String prefix = prefix(id);
         return new AgentIdentitySettings(
                 Boolean.parseBoolean(get.apply(prefix + ".enabled")),
                 Optional.ofNullable(get.apply(prefix + ".credentialCommand")).orElse(""));
     }
 
-    static AgentIdentitySettings load(RepositoryId id) {
+    public static AgentIdentitySettings load(RepositoryId id) {
         return read(PropertiesComponent.getInstance()::getValue, id);
     }
 
     /** Writes both keys; a null value means unset, leaving no trace behind. */
-    void write(BiConsumer<String, String> put, RepositoryId id) {
+    public void write(BiConsumer<String, String> put, RepositoryId id) {
         String prefix = prefix(id);
         put.accept(prefix + ".enabled", Boolean.toString(enabled));
         put.accept(prefix + ".credentialCommand", credentialCommand.isEmpty() ? null : credentialCommand);
     }
 
-    void save(RepositoryId id) {
+    public void save(RepositoryId id) {
         write(PropertiesComponent.getInstance()::setValue, id);
     }
 
@@ -63,7 +63,7 @@ record AgentIdentitySettings(boolean enabled, String credentialCommand) {
      * is usable. A disabled configuration never refuses; an enabled one needs
      * a command to mint anything at all.
      */
-    static Optional<String> refusal(boolean enabled, String credentialCommand) {
+    public static Optional<String> refusal(boolean enabled, String credentialCommand) {
         if (!enabled) {
             return Optional.empty();
         }
