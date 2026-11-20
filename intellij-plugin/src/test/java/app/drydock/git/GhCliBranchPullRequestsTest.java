@@ -172,6 +172,45 @@ class GhCliBranchPullRequestsTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
+    void aServerSideErrorRetriesTheBadgesWithoutTheHeavyFields(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "case \"$*\" in\n"
+                + "  *statusCheckRollup*) echo 'HTTP 502: 502 Bad Gateway' >&2\n"
+                + "    exit 1 ;;\n"
+                + "  *) printf '%s' '[{\"number\":5,\"state\":\"OPEN\",\"headRefName\":\"h\","
+                + "\"title\":\"t\"}]' ;;\n"
+                + "esac\n");
+
+        Map<String, BranchPullRequest> byBranch = GhCliService.branchPullRequestsWith(Optional.of(gh), dir,
+                Optional.empty(), Duration.ofSeconds(15));
+
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(2, calls.size(), "a server-side error gets exactly one reduced-field retry");
+        assertTrue(calls.get(1).contains("isCrossRepository") && !calls.get(1).contains("mergeable"),
+                calls::toString);
+        assertEquals(new BranchPullRequest(5, PrLifecycle.OPEN, false, "h", "t", Optional.empty(),
+                false, Set.of()), byBranch.get("h"));
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aRateLimitDoesNotRetryTheBranchListing(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "echo 'API rate limit exceeded' >&2\nexit 1\n");
+        List<LogRecord> warnings = new ArrayList<>();
+
+        Map<String, BranchPullRequest> byBranch = warningsDuring(warnings, () -> GhCliService.branchPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
+
+        assertEquals(Map.of(), byBranch);
+        assertEquals(1, Files.readAllLines(receipt).size(), "a quota failure does not issue a reduced-query retry");
+        assertTrue(warnings.stream().noneMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
     void executionFailuresReadAsNoBadgesWithDistinctWarnings(@TempDir Path dir) throws Exception {
         List<LogRecord> nonzero = new ArrayList<>();
         Path failing = scriptedGh(dir.resolve("nonzero"), "echo 'gh: not authenticated' >&2\nexit 4\n");

@@ -415,7 +415,12 @@ public final class GhCliService implements AutoCloseable {
 
     /**
      * One {@code gh pr list} run and its parsed rows; the plain and the
-     * searched listing share every field, bound and failure answer.
+     * searched listing share every field, bound and failure answer. A
+     * server-side 5xx failure or timeout gets exactly one retry without the heavy
+     * {@code mergeable,statusCheckRollup} fields: on repositories whose PR
+     * listing queries outgrow the API, that retry is the difference between
+     * a listing that loads and a section that never does -- the rows lose
+     * their CI and mergeability badges, which the parsers read as no signal.
      */
     private static PullRequestListing pullRequestListing(Path gh, Path root, Optional<String> repository,
                                                          List<String> selection, Duration timeout) {
@@ -427,18 +432,67 @@ public final class GhCliService implements AutoCloseable {
             command.add("--repo");
             command.add(value);
         });
-        ProcessResult result = runListing(root, command, timeout);
+        ListingRun run = pullRequestListingRun(root, command, timeout);
+        List<String> reduced = withoutOptionalListingFields(command);
+        if (!(run.listing() instanceof PullRequestListing.Failed failed)
+                || command.equals(reduced)
+                || !(run.timedOut() || serverSideFailure(failed.message()))) {
+            return run.listing();
+        }
+        LOG.log(Level.WARNING, "gh pr list in " + root
+                + " failed with a server-side error; retrying without mergeability and CI badges");
+        return pullRequestListingRun(root, reduced, timeout).listing();
+    }
+
+    /** One listing run: its parsed answer and whether the run was killed by the timeout. */
+    private record ListingRun(PullRequestListing listing, boolean timedOut) {
+
+        static ListingRun of(PullRequestListing listing) {
+            return new ListingRun(listing, false);
+        }
+
+        static ListingRun timeout() {
+            return new ListingRun(new PullRequestListing.Failed("gh did not run to completion"), true);
+        }
+
+        static ListingRun failed(String message) {
+            return new ListingRun(new PullRequestListing.Failed(message), false);
+        }
+    }
+
+    /** One {@code gh pr list} run and its parse; the retry bookkeeping lives in {@link #pullRequestListing}. */
+    private static ListingRun pullRequestListingRun(Path root, List<String> command, Duration timeout) {
+        ProcessResult result;
+        try {
+            result = runListing(root, command, timeout);
+        } catch (ProcessTimeoutException e) {
+            return ListingRun.timeout();
+        }
         if (result == null) {
-            return new PullRequestListing.Failed("gh did not run to completion");
+            return ListingRun.failed("gh did not run to completion");
         }
         if (result.exitCode() != 0) {
             String excerpt = ProcessRunner.excerpt(result.stderr());
             LOG.log(Level.WARNING, "gh pr list in " + root + " exited " + result.exitCode()
                     + (excerpt.isBlank() ? "" : ": " + excerpt));
-            return new PullRequestListing.Failed(excerpt.isBlank()
+            return ListingRun.failed(excerpt.isBlank()
                     ? "gh pr list exited " + result.exitCode() : excerpt);
         }
-        return parsePullRequestListing(result.stdout());
+        return ListingRun.of(parsePullRequestListing(result.stdout()));
+    }
+
+    /**
+     * Whether a failed {@code gh pr list} looks like GitHub's side buckling
+     * rather than the command being wrong: a 5xx gateway error. Rate-limit
+     * failures are not retried because reducing the query cannot dodge quota
+     * exhaustion. (A timeout is signaled separately, by the run's outcome, so a
+     * gh that could not even launch is not retried.) These are the failures
+     * the reduced field set can dodge; an auth or repository error would
+     * only fail twice as slow if retried.
+     */
+    private static boolean serverSideFailure(String message) {
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("http 5");
     }
 
     /** The pure half: {@code gh pr list --json} output to a listing. */
@@ -572,18 +626,54 @@ public final class GhCliService implements AutoCloseable {
             command.add("--repo");
             command.add(value);
         });
-        ProcessResult result = runListing(root, command, timeout);
+        BadgeRun first = branchPullRequestsRun(root, command, timeout);
+        List<String> reduced = withoutOptionalListingFields(command);
+        if (first.result() != null || command.equals(reduced)) {
+            return first.badges();
+        }
+        // The first run failed; when the failure is GitHub's side (same rule
+        // as the listings), one retry without the heavy fields -- otherwise
+        // every repository whose PR listing outgrows the API loses its
+        // session badges along with the sidebar's rows.
+        if (!first.timedOut() && !serverSideFailure(first.failureStderr())) {
+            return first.badges();
+        }
+        LOG.log(Level.WARNING, "gh pr list --state all in " + root
+                + " failed with a server-side error; retrying without mergeability and CI badges");
+        return branchPullRequestsRun(root, reduced, timeout).badges();
+    }
+
+    /** One badge listing run: its result, or why there is none. */
+    private record BadgeRun(ProcessResult result, Map<String, BranchPullRequest> badges, String failureStderr,
+                            boolean timedOut) {
+
+        static BadgeRun failed(String stderr) {
+            return new BadgeRun(null, Map.of(), stderr == null ? "" : stderr, false);
+        }
+
+        static BadgeRun timeout() {
+            return new BadgeRun(null, Map.of(), "", true);
+        }
+    }
+
+    private static BadgeRun branchPullRequestsRun(Path root, List<String> command, Duration timeout) {
+        ProcessResult result;
+        try {
+            result = runListing(root, command, timeout);
+        } catch (ProcessTimeoutException e) {
+            return BadgeRun.timeout();
+        }
         if (result == null) {
             LOG.log(Level.WARNING, "gh pr list --state all in " + root + " did not run to completion");
-            return Map.of();
+            return BadgeRun.failed("");
         }
         if (result.exitCode() != 0) {
             String excerpt = ProcessRunner.excerpt(result.stderr());
             LOG.log(Level.WARNING, "gh pr list --state all in " + root + " exited " + result.exitCode()
                     + (excerpt.isBlank() ? "" : ": " + excerpt));
-            return Map.of();
+            return BadgeRun.failed(excerpt);
         }
-        return byHeadBranch(parseBranchPullRequests(result.stdout()));
+        return new BadgeRun(result, byHeadBranch(parseBranchPullRequests(result.stdout())), "", false);
     }
 
     /**
@@ -911,9 +1001,12 @@ public final class GhCliService implements AutoCloseable {
      * per stream, and every way it can fail to produce a result -- launch
      * failure, output overflow, timeout, interrupt -- is logged at WARNING
      * with its reason (the badge or listing it feeds silently goes
-     * missing otherwise). Null when it did not run to completion.
+     * missing otherwise). Null when it did not run to completion, except
+     * that a timeout is rethrown after its warning: the caller decides
+     * whether the reduced-field retry is worth one more bounded run.
      */
-    private static ProcessResult runListing(Path workingDirectory, List<String> command, Duration timeout) {
+    private static ProcessResult runListing(Path workingDirectory, List<String> command, Duration timeout)
+            throws ProcessTimeoutException {
         String what = String.join(" ", command.subList(1, Math.min(command.size(), 5)));
         try {
             return ProcessRunner.run(command, listingOptions(workingDirectory, timeout), PR_LIST_MAX_OUTPUT_BYTES);
@@ -947,7 +1040,7 @@ public final class GhCliService implements AutoCloseable {
         } catch (ProcessTimeoutException e) {
             LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory + " timed out after "
                     + timeout.toSeconds() + "s and was killed");
-            return null;
+            throw e;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.log(Level.WARNING, "gh " + what + " in " + workingDirectory + " was interrupted");

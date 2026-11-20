@@ -334,16 +334,97 @@ class GhCliPullRequestListingTest {
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
     void aNonzeroExitFailsWithTheStderrExcerptAndAWarning(@TempDir Path dir) throws Exception {
-        Path gh = scriptedGh(dir, "echo 'HTTP 502: bad gateway' >&2\nexit 1\n");
+        Path gh = scriptedGh(dir, "echo 'gh: not logged into any host' >&2\nexit 1\n");
         List<LogRecord> warnings = new ArrayList<>();
 
         GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
                 Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
 
-        assertEquals("HTTP 502: bad gateway",
+        assertEquals("gh: not logged into any host",
                 assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing).message());
         assertTrue(warnings.stream().anyMatch(r -> r.getMessage().contains("exited 1")
-                && r.getMessage().contains("bad gateway")), warnings::toString);
+                && r.getMessage().contains("not logged in")), warnings::toString);
+        assertTrue(warnings.stream().noneMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aServerSideErrorRetriesWithoutBadgesAndKeepsThePrRow(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "case \"$*\" in\n"
+                + "  *statusCheckRollup*) echo 'HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)' >&2\n"
+                + "    exit 1 ;;\n"
+                + "  *) printf '%s' '[{\"number\":7,\"title\":\"kept\",\"headRefName\":\"topic\","
+                + "\"baseRefName\":\"main\"}]' ;;\n"
+                + "esac\n");
+        List<LogRecord> warnings = new ArrayList<>();
+
+        GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
+
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(2, calls.size(), "a server-side error gets exactly one reduced-field retry");
+        assertTrue(calls.get(0).contains("mergeable,statusCheckRollup"), calls::toString);
+        assertTrue(!calls.get(1).contains("mergeable") && !calls.get(1).contains("statusCheckRollup"),
+                calls::toString);
+        List<GhCliService.OpenPullRequest> prs = assertInstanceOf(GhCliService.PullRequestListing.Listed.class,
+                listing).pullRequests();
+        assertEquals(1, prs.size());
+        assertEquals("kept", prs.get(0).title());
+        assertTrue(warnings.stream().anyMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aRateLimitDoesNotRetryTheListing(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "echo 'API rate limit exceeded' >&2\nexit 1\n");
+        List<LogRecord> warnings = new ArrayList<>();
+
+        GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
+
+        assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing);
+        assertEquals(1, Files.readAllLines(receipt).size(), "a quota failure does not issue a reduced-query retry");
+        assertTrue(warnings.stream().noneMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aTimeoutRetriesWithoutBadges(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "case \"$*\" in\n"
+                + "  *statusCheckRollup*) exec sleep 30 ;;\n"
+                + "  *) printf '%s' '[{\"number\":3,\"title\":\"late\",\"headRefName\":\"h\","
+                + "\"baseRefName\":\"main\"}]' ;;\n"
+                + "esac\n");
+
+        GhCliService.PullRequestListing listing = GhCliService.openPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofMillis(300));
+
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(2, calls.size(), "a stall gets exactly one reduced-field retry");
+        assertTrue(!calls.get(1).contains("statusCheckRollup"), calls::toString);
+        assertEquals("late", assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
+                .pullRequests().get(0).title());
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aReducedListingThatStillFailsIsTheFailureItRetried(@TempDir Path dir) throws Exception {
+        Path gh = scriptedGh(dir, "echo 'HTTP 502: 502 Bad Gateway' >&2\nexit 1\n");
+        List<LogRecord> warnings = new ArrayList<>();
+
+        GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
+
+        assertEquals("HTTP 502: 502 Bad Gateway",
+                assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing).message());
+        assertTrue(warnings.stream().filter(r -> r.getMessage().contains("exited 1")).count() == 2,
+                warnings::toString);
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
