@@ -262,4 +262,73 @@ class TaskStoreTest {
         assertEquals(source.replace("extra: keep\n", "extra: keep\nmirrors: [\"" + github + "\", \"" + jira + "\"]\n"),
                 readTask(REPO_A, "mirror-me-a1b2"));
     }
+
+    /** 11: a move relocates the file, keeps every byte, and publishes the moved snapshot. */
+    @Test
+    void moveRelocatesTheFileKeepingEveryByte() throws Exception {
+        String source = "---\ntitle: Moved task\nstatus: open\nextra: keep\nsessions: []\n---\nBody stays.\n";
+        writeTask(REPO_A, "moved-task-a1b2", source);
+        TaskId id = TaskId.of("moved-task-a1b2");
+        TaskStore store = store();
+        List<TaskSnapshot> received = Collections.synchronizedList(new ArrayList<>());
+        store.addListener(received::add);
+
+        TaskDocument moved = store.move(id, RepositoryId.of(REPO_B));
+
+        assertEquals(RepositoryId.of(REPO_B), moved.repository());
+        assertEquals("Moved task", moved.title());
+        assertEquals(source, readTask(REPO_B, "moved-task-a1b2"), "the move carried every byte");
+        assertFalse(Files.exists(root.resolve(REPO_A).resolve("moved-task-a1b2.md")),
+                "the move left no copy behind");
+        assertEquals(1, received.size(), "a committed move publishes one snapshot");
+        assertEquals(RepositoryId.of(REPO_B), received.get(0).byId().get(id).repository());
+        assertEquals(RepositoryId.of(REPO_B), TaskFiles.scan(root).byId().get(id).repository());
+        store.close();
+    }
+
+    /** 12: a move to the task's own repository is a no-op publishing nothing. */
+    @Test
+    void moveWithinTheSameRepositoryChangesNothing() throws Exception {
+        writeTask(REPO_A, "stay-put-a1b2", validTask("Stay put"));
+        TaskId id = TaskId.of("stay-put-a1b2");
+        String before = readTask(REPO_A, "stay-put-a1b2");
+        TaskStore store = store();
+        AtomicInteger publishes = new AtomicInteger();
+        store.addListener(snapshot -> publishes.incrementAndGet());
+
+        assertEquals(RepositoryId.of(REPO_A), store.move(id, RepositoryId.of(REPO_A)).repository());
+
+        assertEquals(before, readTask(REPO_A, "stay-put-a1b2"), "the no-op touched no file");
+        assertEquals(0, publishes.get(), "a no-op publishes no snapshot");
+        store.close();
+    }
+
+    /** 13: a move refuses visibly on an unsaved source and on a missing id -- publishing
+      * nothing and moving nothing. An occupied target cannot arise through a healthy
+      * store's own scan (a same-stem file in the target directory makes the locate
+      * refusal fire first), so the move's own existence check is a defensive backstop
+      * no fixture reaches; it stays in production for a file placed between the
+      * in-lock scan and the move by something outside the store's writer protocol. */
+    @Test
+    void moveRefusalsAreVisibleAndTouchNothing() throws Exception {
+        writeTask(REPO_A, "guarded-task-a1b2", validTask("Guarded task"));
+        TaskId guarded = TaskId.of("guarded-task-a1b2");
+        TaskStore guardedStore = new TaskStore(root,
+                file -> file.getFileName().toString().startsWith("guarded-task"));
+        TaskStore.TaskStoreException sourceConflict = assertThrows(TaskStore.TaskStoreException.class,
+                () -> guardedStore.move(guarded, RepositoryId.of(REPO_B)));
+        assertTrue(sourceConflict.getMessage().contains("unsaved changes"));
+        guardedStore.close();
+
+        TaskStore store = store();
+        AtomicInteger publishes = new AtomicInteger();
+        store.addListener(snapshot -> publishes.incrementAndGet());
+        assertThrows(TaskStore.TaskStoreException.class,
+                () -> store.move(TaskId.of("no-such-task"), RepositoryId.of(REPO_B)));
+        assertEquals(0, publishes.get(), "a refused move publishes no snapshot");
+        try (var entries = Files.list(root.resolve(REPO_A))) {
+            assertEquals(1, entries.count(), "the refused move moved nothing");
+        }
+        store.close();
+    }
 }
