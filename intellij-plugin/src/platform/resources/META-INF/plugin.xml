@@ -137,6 +137,9 @@
         <!-- "PR #n needs you: ...": a babysitter escalated to the session it
              watches (BabysitEscalations). -->
         <notificationGroup id="Drydock babysitting" displayType="BALLOON"/>
+        <!-- "Agent identity not applied": a configured identity that a fish or
+             Windows launch shell cannot carry (AgentIdentityLauncher). -->
+        <notificationGroup id="Drydock agent identity" displayType="BALLOON"/>
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>

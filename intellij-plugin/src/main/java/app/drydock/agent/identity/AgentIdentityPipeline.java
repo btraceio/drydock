@@ -42,7 +42,7 @@ public final class AgentIdentityPipeline {
     }
 
     /** Test seam: inject a canned credential runner or a different base directory. */
-    AgentIdentityPipeline(CredentialRunner command, AgentIdentityEnvFile envFile, Path baseDirectory) {
+    public AgentIdentityPipeline(CredentialRunner command, AgentIdentityEnvFile envFile, Path baseDirectory) {
         this.command = command;
         this.envFile = envFile;
         this.baseDirectory = baseDirectory;

@@ -1,8 +1,10 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.identity.AgentIdentityException;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.identity.AgentIdentityLauncher;
 import app.drydock.intellij.project.ProjectIdentity;
 import app.drydock.intellij.terminal.ShellCommandAdapter;
 
@@ -359,13 +361,64 @@ public final class AgentExecutionRegistry implements Disposable {
      *
      * <p>MUST be called off the EDT.</p>
      */
+    /**
+     * This session's identity preparation, resolved once. Production uses the
+     * plugin service's launcher; tests inject their own with {@link
+     * #identityLauncherForTests}. Resolving the production launcher cannot
+     * fail in a live IDE (the service is constructed at startup), so any
+     * failure here degrades to "no identity" behind a warning rather than
+     * failing launches of repositories that never configured identity.
+     */
+    private AgentIdentityLauncher identityLauncher() {
+        AgentIdentityLauncher launcher = identityLauncher;
+        if (launcher != null) {
+            return launcher;
+        }
+        try {
+            launcher = DrydockPluginService.getInstance().agentIdentityLauncher();
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Resolving the agent-identity launcher failed; sessions launch without identity", e);
+            launcher = AgentIdentityLauncher.NONE;
+        }
+        identityLauncher = launcher;
+        return launcher;
+    }
+
+    private volatile AgentIdentityLauncher identityLauncher;
+
+    /** Test seam: replaces the launcher this registry consults at {@link #start}. */
+    void identityLauncherForTests(AgentIdentityLauncher launcher) {
+        this.identityLauncher = launcher;
+    }
+
     public CompletableFuture<AgentExecution> start(ManagedSessionId sessionId, Path workingDirectory,
                                                    LaunchPlan plan, Project host, AgentExecutionListener owner) {
         Objects.requireNonNull(plan, "plan");
         // The plan's command is a POSIX shell string (env assignment
         // prefixes, quoted arguments), so it reaches the shell whole as one
         // -c argument -- ShellCommandAdapter owns that expansion.
-        return startArgv(sessionId, workingDirectory, ShellCommandAdapter.shellArgv(plan), host, owner);
+        Optional<AgentIdentityLauncher.Prepared> identity;
+        try {
+            identity = identityLauncher().prepare(sessionId, workingDirectory, plan.command());
+        } catch (AgentIdentityException e) {
+            // A configured identity that cannot be minted fails the launch,
+            // loudly: no silent fall-through to the human's own identity.
+            return CompletableFuture.failedFuture(e);
+        }
+        String command = identity.map(AgentIdentityLauncher.Prepared::command).orElse(plan.command());
+        CompletableFuture<AgentExecution> started = startArgv(sessionId, workingDirectory,
+                ShellCommandAdapter.shellArgv(command, identity.map(AgentIdentityLauncher.Prepared::wrapperBin)),
+                host, owner);
+        return identity.isPresent()
+                ? started.whenComplete((execution, failure) -> {
+                    if (failure != null) {
+                        // The env file's normal death is the prefix's own rm
+                        // -f after sourcing; a launch that never sourced it
+                        // (or was killed before doing so) deletes it here.
+                        identity.orElseThrow().cleanupAfterFailure();
+                    }
+                })
+                : started;
     }
 
     /** {@link #start} for a ready argv: the same path minus the shell expansion. Test seam. */
