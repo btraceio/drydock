@@ -1257,6 +1257,137 @@ class DelayedTaskServiceTest {
         }
     }
 
+    // ---- edit: the dialog's write seam -------------------------------------------------
+
+    /** The edit seam rewrites title, done_by and refs, and appends only the body lines
+      * not already stored as notes -- a second identical edit appends nothing. */
+    @Test
+    void editRewritesFieldsAndAppendsOnlyNewNotes(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskId blocker = await(service.create("Clear the blocker", List.of(), alpha)).document().id();
+            TaskId task = await(service.create("Fix the login redirect", List.of(), alpha)).document().id();
+            await(service.appendNote(task, "first note"));
+
+            TaskToolContext.Outcome edited = await(service.edit(new DelayedTaskService.TaskEdit(
+                    task, "Fix the login redirect", DoneBy.AGENT, List.of(blocker.text()),
+                    List.of("first note", "second note", "third note"), alpha)));
+            assertFalse(edited.refused(), edited.refusal());
+            TaskDocument stored = await(service.snapshot()).byId().get(task);
+            assertEquals("Fix the login redirect", stored.title());
+            assertEquals(DoneBy.AGENT, stored.doneBy());
+            assertEquals(List.of(blocker.text()), stored.after());
+            String body = Files.readString(committedFile(root, alpha, task));
+            assertEquals(1, body.split("first note", -1).length - 1,
+                    "an already stored note is not appended again");
+            assertTrue(body.contains("second note") && body.contains("third note"),
+                    "the new lines land as notes: " + body);
+
+            TaskToolContext.Outcome again = await(service.edit(new DelayedTaskService.TaskEdit(
+                    task, stored.title(), DoneBy.AGENT, stored.after(),
+                    List.of("first note", "second note", "third note"), alpha)));
+            assertFalse(again.refused(), again.refusal());
+            String unchanged = Files.readString(committedFile(root, alpha, task));
+            assertEquals(body, unchanged, "a second identical edit writes nothing");
+        }
+    }
+
+    /** An unresolved prerequisite refuses the edit and the file stays byte-identical. */
+    @Test
+    void editRefusesAnUnresolvedRefAndWritesNothing(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskId task = await(service.create("Fix the login redirect", List.of(), alpha)).document().id();
+            String before = Files.readString(committedFile(root, alpha, task));
+            TaskToolContext.Outcome refused = await(service.edit(new DelayedTaskService.TaskEdit(
+                    task, "New title", DoneBy.HUMAN, List.of("no-such-task-x"), List.of(), alpha)));
+            assertTrue(refused.refused(), "an unresolved reference refuses the edit");
+            assertTrue(refused.refusal().contains("'no-such-task-x'"), refused.refusal());
+            assertEquals(before, Files.readString(committedFile(root, alpha, task)),
+                    "the refused edit wrote nothing");
+        }
+    }
+
+    /** Editing can close a cycle between two stored tasks; the refusal names the cycle
+      * and nothing is written. */
+    @Test
+    void editRefusesACycleBetweenExistingTasks(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskId first = await(service.create("First task", List.of(), alpha)).document().id();
+            TaskId second = await(service.create("Second task", List.of(first.text()), alpha))
+                    .document().id();
+            String before = Files.readString(committedFile(root, alpha, second));
+            // Close the cycle from the other side while second still depends on first.
+            TaskToolContext.Outcome cycle = await(service.edit(new DelayedTaskService.TaskEdit(
+                    first, "First task", DoneBy.HUMAN, List.of(second.text()), List.of(), alpha)));
+            assertTrue(cycle.refused(), "a prerequisite cycle refuses the edit");
+            assertTrue(cycle.refusal().contains("cycle"), cycle.refusal());
+            assertEquals(before, Files.readString(committedFile(root, alpha, second)),
+                    "the refused cycle edit wrote nothing");
+            // Removing the edge is the legitimate fix and commits.
+            TaskToolContext.Outcome cleared = await(service.edit(new DelayedTaskService.TaskEdit(
+                    second, "Second task", DoneBy.HUMAN, List.of(), List.of(), alpha)));
+            assertFalse(cleared.refused(), "removing the ref cannot cycle");
+        }
+    }
+
+    /** A project change moves the file into the picked project's directory, id kept. */
+    @Test
+    void editMovesTheTaskFileToThePickedProject(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        RepositoryId beta = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(
+                        SharedProject.local(alpha, root.resolve("alpha"), "Alpha", Instant.EPOCH),
+                        SharedProject.local(beta, root.resolve("beta"), "Beta", Instant.EPOCH)))) {
+            await(service.initialize());
+            TaskId task = await(service.create("Fix the login redirect", List.of(), alpha)).document().id();
+            TaskToolContext.Outcome moved = await(service.edit(new DelayedTaskService.TaskEdit(
+                    task, "Fix the login redirect", DoneBy.HUMAN, List.of(), List.of("carried body"), beta)));
+            assertFalse(moved.refused(), moved.refusal());
+            assertEquals(beta, moved.document().repository());
+            assertTrue(Files.exists(committedFile(root, beta, task)), "the file moved to the new project");
+            assertFalse(Files.exists(committedFile(root, alpha, task)), "no copy stayed behind");
+            assertTrue(Files.readString(committedFile(root, beta, task)).contains("carried body"),
+                    "the body note moved with the file");
+        }
+    }
+
+    /** A move is refused while another task's qualified reference points at the task
+      * through the old project's slug; with the ref a bare id the same move commits. */
+    @Test
+    void editRefusesAMoveThatStrandsAQualifiedReference(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        RepositoryId beta = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(
+                        SharedProject.local(alpha, root.resolve("alpha"), "Alpha", Instant.EPOCH),
+                        SharedProject.local(beta, root.resolve("beta"), "Beta", Instant.EPOCH)))) {
+            await(service.initialize());
+            TaskId blocker = await(service.create("Clear the blocker", List.of(), beta)).document().id();
+            TaskId dependent = await(service.create("Dependent work",
+                    List.of("beta:" + blocker.text()), alpha)).document().id();
+            TaskToolContext.Outcome refused = await(service.edit(new DelayedTaskService.TaskEdit(
+                    blocker, "Clear the blocker", DoneBy.HUMAN, List.of(), List.of(), alpha)));
+            assertTrue(refused.refused(), "a stranded qualified reference refuses the move");
+            assertTrue(refused.refusal().contains(dependent.text()), refused.refusal());
+            assertTrue(Files.exists(committedFile(root, beta, blocker)), "the refused move moved nothing");
+
+            // The same move with a bare-id reference commits: bare ids survive any move (D4).
+            await(service.edit(new DelayedTaskService.TaskEdit(dependent, "Dependent work",
+                    DoneBy.HUMAN, List.of(blocker.text()), List.of(), alpha)));
+            TaskToolContext.Outcome moved = await(service.edit(new DelayedTaskService.TaskEdit(
+                    blocker, "Clear the blocker", DoneBy.HUMAN, List.of(), List.of(), alpha)));
+            assertFalse(moved.refused(), moved.refusal());
+            assertEquals(alpha, moved.document().repository());
+            assertTrue(Files.exists(committedFile(root, alpha, blocker)));
+        }
+    }
+
     private static <T> T await(CompletableFuture<T> future) throws Exception {
         return future.get(LIMIT.toMillis(), TimeUnit.MILLISECONDS);
     }
