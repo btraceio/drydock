@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 /**
  * READ-ONLY state of one pull request as a babysitting monitor polls it:
  * one {@code gh pr view <n> --json state,isDraft,baseRefName,headRefName,
- * headRefOid,mergeable,mergeStateStatus,statusCheckRollup} per read.
+ * headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews} per read.
  *
  * <p>Unlike {@link GhCliService#branchPullRequests}, a failed read is a
  * {@link PrSnapshot.Failed}, never an empty answer: the monitor keeps its
@@ -59,10 +59,13 @@ public final class PrMonitorRead implements AutoCloseable {
     static final Duration PROCESS_TIMEOUT = Duration.ofSeconds(15);
 
     static final String FIELDS =
-            "state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus,statusCheckRollup";
+            "state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews";
 
     /** What {@link Snapshot#mergeStateStatus} reads when gh reported none. */
     public static final String MERGE_STATE_UNKNOWN = "UNKNOWN";
+
+    /** How many reviews one read keeps (the latest). */
+    static final int MAX_REVIEWS = 50;
 
     private static final Pattern RUN_ID = Pattern.compile("/actions/runs/(\\d{1,19})(?!\\d)");
 
@@ -118,6 +121,25 @@ public final class PrMonitorRead implements AutoCloseable {
         }
     }
 
+    /**
+     * One actionable review of a pull request, as {@code gh pr view --json
+     * reviews} reports it: the author's login, the review state
+     * ({@code APPROVED}, {@code CHANGES_REQUESTED}, {@code COMMENTED}; only
+     * these are carried -- a {@code PENDING} review is invisible to others
+     * and a {@code DISMISSED} one is withdrawn), the submission timestamp
+     * (gh's raw value, empty when gh reported none) and the body, flattened
+     * by no one: the monitor's rules quote a capped one-line excerpt of it.
+     * Strings gh left null are empty.
+     */
+    public record Review(String author, String state, String submittedAt, String body) {
+        public Review {
+            Objects.requireNonNull(author, "author");
+            Objects.requireNonNull(state, "state");
+            Objects.requireNonNull(submittedAt, "submittedAt");
+            Objects.requireNonNull(body, "body");
+        }
+    }
+
     /** The outcome of one read; {@link Failed} is distinct from every answer gh gave. */
     public sealed interface PrSnapshot {
         /**
@@ -128,7 +150,7 @@ public final class PrMonitorRead implements AutoCloseable {
          */
         record Snapshot(int prNumber, PrLifecycle lifecycle, boolean draft, String baseRefName,
                         String headRefName, String headRefOid, Mergeable mergeable, String mergeStateStatus,
-                        List<Check> checks) implements PrSnapshot {
+                        List<Check> checks, List<Review> reviews) implements PrSnapshot {
             public Snapshot {
                 if (prNumber <= 0) {
                     throw new IllegalArgumentException("prNumber must be positive");
@@ -142,6 +164,7 @@ public final class PrMonitorRead implements AutoCloseable {
                     throw new IllegalArgumentException("mergeStateStatus must not be blank");
                 }
                 checks = List.copyOf(checks);
+                reviews = List.copyOf(reviews);
             }
         }
 
@@ -262,7 +285,7 @@ public final class PrMonitorRead implements AutoCloseable {
         return new PrSnapshot.Snapshot(prNumber, lifecycle, draft, base.get(), head.get(), oid.get(),
                 mergeableOf(obj.get("mergeable")),
                 nonBlank(obj.get("mergeStateStatus")).orElse(MERGE_STATE_UNKNOWN),
-                checksOf(obj.get("statusCheckRollup")));
+                checksOf(obj.get("statusCheckRollup")), reviewsOf(obj.get("reviews")));
     }
 
     private static Mergeable mergeableOf(JsonValue mergeable) {
@@ -307,6 +330,33 @@ public final class PrMonitorRead implements AutoCloseable {
             });
         }
         return checks;
+    }
+
+    /**
+     * The reviews gh reported, oldest list order kept, capped at
+     * {@link #MAX_REVIEWS} LATEST ones: a monitor diffs review sets, so the
+     * ones it may drop are the oldest. Entries that are not objects, or
+     * whose state is not actionable (anything but {@code APPROVED},
+     * {@code CHANGES_REQUESTED} and {@code COMMENTED}), are skipped.
+     */
+    private static List<Review> reviewsOf(JsonValue value) {
+        if (!(value instanceof JsonArray entries)) {
+            return List.of();
+        }
+        List<Review> reviews = new ArrayList<>();
+        for (JsonValue entry : entries.elements()) {
+            if (!(entry instanceof JsonObject review)) {
+                continue;
+            }
+            String state = string(review.get("state"));
+            if (!"APPROVED".equals(state) && !"CHANGES_REQUESTED".equals(state) && !"COMMENTED".equals(state)) {
+                continue;
+            }
+            String author = review.get("author") instanceof JsonObject who ? string(who.get("login")) : "";
+            reviews.add(new Review(author, state, string(review.get("submittedAt")), string(review.get("body"))));
+        }
+        return reviews.size() > MAX_REVIEWS ? List.copyOf(reviews.subList(reviews.size() - MAX_REVIEWS,
+                reviews.size())) : List.copyOf(reviews);
     }
 
     /** The positive run id in an Actions URL ({@code .../actions/runs/<id>/job/<id>}). */

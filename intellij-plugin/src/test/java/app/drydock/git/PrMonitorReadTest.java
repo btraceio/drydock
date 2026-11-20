@@ -76,6 +76,52 @@ class PrMonitorReadTest {
     }
 
     @Test
+    void reviewsAreParsedByAuthorStateTimeAndBodyAndNonActionableOnesAreSkipped() {
+        String stdout = view("\"reviews\":["
+                + "{\"author\":{\"login\":\"alice\"},\"state\":\"CHANGES_REQUESTED\","
+                + "\"submittedAt\":\"2026-11-18T10:00:00Z\",\"body\":\"Please fix the tests.\"},"
+                + "{\"author\":{\"login\":\"bob\"},\"state\":\"APPROVED\","
+                + "\"submittedAt\":\"2026-11-18T11:00:00Z\",\"body\":\"Nice.\"},"
+                + "{\"author\":{\"login\":\"carol\"},\"state\":\"PENDING\","
+                + "\"submittedAt\":\"2026-11-18T12:00:00Z\",\"body\":\"draft\"},"
+                + "{\"author\":{\"login\":\"dave\"},\"state\":\"DISMISSED\","
+                + "\"submittedAt\":\"2026-11-18T13:00:00Z\",\"body\":\"stale\"},"
+                + "{\"author\":null,\"state\":\"COMMENTED\",\"submittedAt\":null,\"body\":null},"
+                + "42,null]");
+
+        List<PrMonitorRead.Review> reviews = snapshot(stdout).reviews();
+
+        assertEquals(List.of(
+                new PrMonitorRead.Review("alice", "CHANGES_REQUESTED", "2026-11-18T10:00:00Z", "Please fix the tests."),
+                new PrMonitorRead.Review("bob", "APPROVED", "2026-11-18T11:00:00Z", "Nice."),
+                new PrMonitorRead.Review("", "COMMENTED", "", "")), reviews);
+    }
+
+    @Test
+    void aMissingOrMalformedReviewsArrayIsNoReviews() {
+        assertEquals(List.of(), snapshot(view("\"reviews\":null")).reviews());
+        assertEquals(List.of(), snapshot(view("\"reviews\":\"approved\"")).reviews());
+        assertEquals(List.of(), snapshot(view("")).reviews());
+    }
+
+    @Test
+    void moreReviewsThanTheCapKeepTheLatest() {
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < PrMonitorRead.MAX_REVIEWS + 5; i++) {
+            if (i > 0) {
+                entries.append(',');
+            }
+            entries.append("{\"author\":{\"login\":\"u").append(i).append("\"},\"state\":\"COMMENTED\",")
+                    .append("\"submittedAt\":\"t").append(i).append("\",\"body\":\"\"}");
+        }
+        List<PrMonitorRead.Review> reviews = snapshot(view("\"reviews\":[" + entries + "]")).reviews();
+
+        assertEquals(PrMonitorRead.MAX_REVIEWS, reviews.size());
+        assertEquals("u" + 5, reviews.get(0).author());
+        assertEquals("u" + (PrMonitorRead.MAX_REVIEWS + 4), reviews.get(reviews.size() - 1).author());
+    }
+
+    @Test
     void mergeabilityKeepsUnknownApartFromMergeable() {
         assertEquals(Mergeable.MERGEABLE, snapshot(view("\"mergeable\":\"MERGEABLE\"")).mergeable());
         assertEquals(Mergeable.CONFLICTING, snapshot(view("\"mergeable\":\"CONFLICTING\"")).mergeable());
@@ -245,7 +291,7 @@ class PrMonitorReadTest {
                 PrMonitorRead.readWith(Optional.of(gh), dir, Optional.of("o/r"), 42, Duration.ofSeconds(15)));
 
         assertEquals(List.of("args=pr view 42 --json state,isDraft,baseRefName,headRefName,headRefOid,"
-                + "mergeable,mergeStateStatus,statusCheckRollup --repo o/r"), Files.readAllLines(receipt));
+                + "mergeable,mergeStateStatus,statusCheckRollup,reviews --repo o/r"), Files.readAllLines(receipt));
         assertEquals(42, snapshot.prNumber());
         assertEquals(Mergeable.CONFLICTING, snapshot.mergeable());
         assertEquals("DIRTY", snapshot.mergeStateStatus());
