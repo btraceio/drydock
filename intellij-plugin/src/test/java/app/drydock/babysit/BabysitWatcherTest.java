@@ -109,7 +109,8 @@ class BabysitWatcherTest {
     }
 
     private static Snapshot pr(PrLifecycle lifecycle, String head, Mergeable mergeable, Check... checks) {
-        return new Snapshot(42, lifecycle, false, "main", "feat/x", head, mergeable, "CLEAN", List.of(checks));
+        return new Snapshot(42, lifecycle, false, "main", "feat/x", head, mergeable, "CLEAN", List.of(checks),
+                List.of());
     }
 
     private static Snapshot open(Mergeable mergeable, Check... checks) {

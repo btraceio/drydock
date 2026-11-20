@@ -70,14 +70,27 @@ implementation changes) back to the main session.
 ### The monitor (B1)
 
 - A plugin-owned background poller per engagement, ~60 s cadence with
-  backoff, reading via `gh`. The plugin's `BranchPullRequest` already
-  carries `conflicting` (merge conflict vs base) and `ciFailures`; the
-  monitor adds what it lacks (head SHA for push detection, per-check status
-  detail, PR lifecycle CLOSED — the shared `PrState` has no CLOSED value, so
-  lifecycle reads must not fold CLOSED into OPEN as the app's mapping
-  does). A gh failure, timeout or unavailable result is never read as "no
-  change" or "PR gone": keep a last-known-good state and back off on
-  errors.
+  backoff, reading via `gh`. The read carries the head SHA (push detection),
+  the per-check status detail, the PR lifecycle CLOSED, and the PR's
+  actionable reviews (APPROVED, CHANGES_REQUESTED, COMMENTED — a PENDING
+  review is invisible to others and a DISMISSED one is withdrawn, the
+  latest 50 are kept). A gh failure, timeout or unavailable result is never
+  read as "no change" or "PR gone": keep a last-known-good state and back
+  off on errors.
+- The engagement's first read is always delivered: a first-status delta
+  that states the PR as it stands (checks, mergeability, review counts)
+  even when nothing is wrong, so the babysitter orients itself instead of
+  waiting for a delta that clean news may never produce. An engagement the
+  monitor restored after a restart keeps its silent first baseline: what
+  the PR shows then predates the engagement's memory.
+- A review that was not at the previous read (identified by author, state
+  and submission time, so a re-submission is news again) wakes the
+  babysitter with the author, verdict and a capped body excerpt. The
+  babysitter reads the review and escalates it to the watched session; it
+  never acts on review feedback itself. A push that keeps everything green
+  and mergeable is no event: the head is recorded (the push lease's base)
+  and the babysitter waits for the conflicts or failures it may have to
+  fix.
 - On a state change the monitor wakes the babysitter: if the babysitter is
   idle, via a resume with a custom prompt (the `ResumeContext.resumePrompt`
   path needs an overload that threads the prompt; honoured only when an
@@ -100,8 +113,11 @@ implementation changes) back to the main session.
   limited to the PR's changed scope.
 - **Write guard** (both cases), as implemented: a write-granting delta is
   delivered only after (a) a POINT-IN-TIME liveness check that the watched
-  session has no running agent and no launch, resume or removal in flight
-  (`AgentExecutionRegistry`/launch claims — NOT the persisted
+  session has no agent turn in flight (its activity is not reported BUSY —
+  a live agent PROCESS alone is not busy: the interactive TUI sits at its
+  prompt for the session's whole life, and a guard that read that as busy
+  never let a single delta through) and no launch, resume or removal in
+  flight (`AgentExecutionRegistry`/launch claims — NOT the persisted
   `SessionStatus`, which can lie after a crash/restart), taken before and
   again after the fetch, and (b) a fresh one-branch fetch whose remote tip
   equals the PR head the monitor last read (the babysitter's known base);

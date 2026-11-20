@@ -38,6 +38,7 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -96,7 +97,11 @@ import java.util.function.Supplier;
  *       wakes nobody; the first snapshot of one that started later is
  *       diffed against a clean baseline ({@link Observation#clean}), so a PR
  *       already conflicting or red at the start wakes its babysitter at
- *       once. Events wait in an in-memory pending list
+ *       once, and every fresh engagement's first read is delivered as a
+ *       first-status delta ({@link BabysitEvent.Kind#FIRST_STATUS}) even
+ *       when the PR is green: the babysitter orients itself instead of
+ *       waiting for a delta that clean news may never produce. Events wait
+ *       in an in-memory pending list
  *       ({@link BabysitMonitorRules#coalesce}) until delivered.</li>
  *   <li>Pending events are delivered through the write guard
  *       ({@link DrydockSessionService#babysitterMayWrite}, known base =
@@ -115,7 +120,7 @@ import java.util.function.Supplier;
  *             tick.</li>
  *         <li>{@code WatchedBusy}: nobody is woken; the events stay pending and
  *             the guard is asked again next tick (the babysitter waits, never
- *             races the watched session).</li>
+ *             races the watched session's in-flight turn).</li>
  *         <li>{@code HeadMoved}: a READ-ONLY delta is delivered once per batch of
  *             events, and the events stay pending: the next read records the
  *             new head and the guard can then allow the write.</li>
@@ -464,15 +469,24 @@ public final class BabysitMonitorService implements Disposable {
                     snapshot.headRefOid()));
         }
         BabysitPairing current = pairing.withKnownHead(snapshot.headRefOid());
-        if (track.observation == null && track.silentBaseline) {
+        boolean firstRead = track.observation == null;
+        if (firstRead && track.silentBaseline) {
             track.observation = Observation.first(snapshot);
             return;
         }
-        Observation previous = track.observation != null ? track.observation : Observation.clean(snapshot);
+        Observation previous = !firstRead ? track.observation : Observation.clean(snapshot);
         Step step = BabysitMonitorRules.observe(previous, snapshot);
         track.observation = step.observation();
-        if (!step.events().isEmpty()) {
-            track.pending = BabysitMonitorRules.coalesce(track.pending, step.events());
+        List<BabysitEvent> events = new ArrayList<>(step.events());
+        if (firstRead) {
+            // The engagement's first delivery states the PR as it stands, even
+            // when nothing changed against the clean baseline: the babysitter
+            // must not sit waiting for a delta that red, conflicting or
+            // reviewed news may otherwise take a long time to produce.
+            events.add(BabysitEvent.of(BabysitEvent.Kind.FIRST_STATUS));
+        }
+        if (!events.isEmpty()) {
+            track.pending = BabysitMonitorRules.coalesce(track.pending, events);
             track.readOnlySent = false;
         }
         if (!track.pending.isEmpty()) {

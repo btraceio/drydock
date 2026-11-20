@@ -3,6 +3,7 @@ package app.drydock.babysit;
 import app.drydock.babysit.BabysitWriteGuard.Verdict;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.git.PrMonitorRead.Check;
+import app.drydock.git.PrMonitorRead.Review;
 import app.drydock.git.PrMonitorRead.PrSnapshot.Snapshot;
 
 import java.io.IOException;
@@ -132,13 +133,24 @@ public final class BabysitDelta {
                         .append(" no longer merges cleanly into ").append(base).append('.');
                 case CONFLICT_CLEARED -> out.append("the branch merges cleanly into ").append(base)
                         .append(" again; nothing is left to resolve.");
-                case CHECKS_FAILED -> out.append(String.join(", ", event.checks().stream()
+                case CHECKS_FAILED -> out.append(String.join(", ", event.subjects().stream()
                         .limit(MAX_LISTED_CHECKS).map(BabysitDelta::code).toList()))
-                        .append(event.checks().size() > MAX_LISTED_CHECKS
-                                ? " and " + (event.checks().size() - MAX_LISTED_CHECKS) + " more" : "")
+                        .append(event.subjects().size() > MAX_LISTED_CHECKS
+                                ? " and " + (event.subjects().size() - MAX_LISTED_CHECKS) + " more" : "")
                         .append('.');
                 case CHECKS_RECOVERED -> out.append("every check has concluded and none is failing;"
                         + " nothing is left to fix or rerun.");
+                case REVIEW_ARRIVED -> {
+                    out.append(String.join("\n\n", event.subjects().stream()
+                            .limit(MAX_LISTED_CHECKS).toList()));
+                    if (event.subjects().size() > MAX_LISTED_CHECKS) {
+                        out.append("\n\nand ").append(event.subjects().size() - MAX_LISTED_CHECKS).append(" more.");
+                    }
+                    out.append("\n\nRead the review, and escalate it to the watched session; do not act on"
+                            + " review feedback yourself.");
+                }
+                case FIRST_STATUS -> out.append("this is the first update for this engagement: the pull request"
+                        + " as it stands, and nothing has changed since babysitting began.");
             }
             out.append('\n');
         }
@@ -153,6 +165,13 @@ public final class BabysitDelta {
         long open = snapshot.checks().stream().filter(check -> !BabysitMonitorRules.concluded(check)).count();
         out.append("- Checks: ").append(snapshot.checks().size()).append(" reported, ").append(failing.size())
                 .append(" failing, ").append(open).append(" not concluded\n");
+        List<Review> reviews = snapshot.reviews();
+        long approved = reviews.stream().filter(review -> "APPROVED".equals(review.state())).count();
+        long requestingChanges = reviews.stream().filter(review -> "CHANGES_REQUESTED".equals(review.state())).count();
+        long commenting = reviews.stream().filter(review -> "COMMENTED".equals(review.state())).count();
+        out.append("- Reviews: ").append(reviews.size()).append(" actionable (").append(approved)
+                .append(" approved, ").append(requestingChanges).append(" requesting changes, ").append(commenting)
+                .append(" commenting)\n");
         for (Check check : failing.stream().limit(MAX_LISTED_CHECKS).toList()) {
             out.append("  - ").append(code(BabysitMonitorRules.checkKey(check))).append(": ")
                     .append(code(check.conclusion().isEmpty() ? check.status() : check.conclusion()));

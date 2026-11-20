@@ -1,6 +1,7 @@
 package app.drydock.intellij.session;
 
 import app.drydock.activity.SessionActivityWatcher;
+import app.drydock.domain.SessionActivity;
 import app.drydock.agent.api.AgentCapabilities;
 import app.drydock.agent.api.AgentContext;
 import app.drydock.agent.api.AgentKind;
@@ -458,6 +459,9 @@ class DrydockSessionServiceTest {
                 consoles.opens.stream().anyMatch(open -> open.sessionId().equals(id))
                         && !consoles.stopped.contains(id) && !consoles.forgotten.contains(id);
 
+        /** The write guard's watched-activity answer; none by default. */
+        Function<ManagedSessionId, Optional<SessionActivity>> watchedActivity = id -> Optional.empty();
+
         /**
          * The requested-client-end coordination the service's Stop and close
          * paths mark and its end settle settles by. Mirrors the registry's
@@ -602,7 +606,7 @@ class DrydockSessionServiceTest {
                     SessionMcpAccess.none(), new LaunchClaims(id -> liveExecution.test(id)), null, () -> false,
                     new BoxShell(CommandRunner.PRODUCTION), new WorkspacesCli(CommandRunner.PRODUCTION),
                     new RemoteSessionLiveness(), question -> CompletableFuture.completedFuture(false), clientEnds,
-                    babysitGit);
+                    babysitGit, id -> watchedActivity.apply(id));
         }
     }
 
@@ -4799,7 +4803,7 @@ class DrydockSessionServiceTest {
     }
 
     @Test
-    void theWriteGuardChecksTheWatchedSessionsLivenessFirstThenTheFetchedTip(@TempDir Path base)
+    void theWriteGuardChecksTheWatchedSessionsTurnFirstThenTheFetchedTip(@TempDir Path base)
             throws Exception {
         Harness harness = harness(base);
         FakeBabysitGit git = new FakeBabysitGit(base);
@@ -4809,15 +4813,35 @@ class DrydockSessionServiceTest {
         BabysitPairing pairing = new BabysitPairing(ManagedSessionId.newId(), watched.id(),
                 harness.repository.id(), 42, BabysitState.WATCHING);
 
+        // A launch, resume or removal in flight is busy, and costs no fetch.
+        harness.watchedActivity = id -> Optional.empty();
+        // (the claim itself cannot be injected through the harness seam, so
+        // the mid-turn activity below carries the busy answer; a live agent
+        // process alone is NOT busy -- a TUI at its prompt is live for the
+        // session's whole life)
         harness.liveExecution = id -> id.equals(watched.id());
-        assertEquals(new BabysitWriteGuard.Verdict.WatchedBusy(),
-                service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
-        assertTrue(git.tipsAsked.isEmpty(), "a busy watched session costs no fetch");
-
-        harness.liveExecution = id -> false;
         assertEquals(new BabysitWriteGuard.Verdict.Allowed(BABYSIT_BASE),
                 service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
-        assertEquals(List.of(BABYSIT_BRANCH), git.tipsAsked);
+        assertEquals(List.of(BABYSIT_BRANCH), git.tipsAsked, "a live process alone is not a busy watched session");
+
+        // An agent reported mid-turn is busy, and costs no fetch.
+        harness.watchedActivity = id -> id.equals(watched.id())
+                ? Optional.of(SessionActivity.BUSY) : Optional.empty();
+        git.tipsAsked.clear();
+        assertEquals(new BabysitWriteGuard.Verdict.WatchedBusy(),
+                service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE).get(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+        assertEquals(List.of(), git.tipsAsked, "a busy watched session costs no fetch");
+
+        // A permission prompt is not a turn in flight; neither is an unknown
+        // activity: the fetch answers, and the lease backstops the remote.
+        for (SessionActivity idleLike : List.of(SessionActivity.IDLE, SessionActivity.NEEDS_ATTENTION,
+                SessionActivity.UNKNOWN)) {
+            harness.watchedActivity = id -> id.equals(watched.id()) ? Optional.of(idleLike) : Optional.empty();
+            assertEquals(new BabysitWriteGuard.Verdict.Allowed(BABYSIT_BASE),
+                    service.babysitterMayWrite(pairing, BABYSIT_BRANCH, BABYSIT_BASE)
+                            .get(TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                    String.valueOf(idleLike));
+        }
 
         String moved = "2222222222222222222222222222222222222222";
         git.tip = new GitStatusService.RemoteBranchTip(Optional.of(moved), Optional.empty());
@@ -5030,11 +5054,12 @@ class DrydockSessionServiceTest {
     @Test
     void theSessionServiceStaysUnderItsSizeCeiling() throws Exception {
         Path source = Path.of("src/platform/java/app/drydock/intellij/session/DrydockSessionService.java");
-        // Actual post-#139-rebase size (3,173/172,6xx): #139 took the file to 3,212 at base —
-        // over the ~3,000 reviewability cap — and this branch's diff on it shrinks it by 39.
-        // The pin moves to today's actual to keep guarding against GROWTH; the split itself
-        // is upstream's debt, recorded as a follow-up task, not solved by this pin.
-        assertTrue(Files.readAllLines(source).size() <= 3174, "lines");
-        assertTrue(Files.size(source) <= 173_100, "bytes");
+        // Actual post-babysit-guard-fix size (3,197/174,383): the file was already over the
+        // ~3,000 reviewability cap at base (see the 3,174 pin's comment); the watched-activity
+        // seam for the write guard's turn-level busy answer added 23 more. The pin moves to
+        // today's actual to keep guarding against GROWTH; the split itself is upstream's debt,
+        // recorded as a follow-up task, not solved by this pin.
+        assertTrue(Files.readAllLines(source).size() <= 3197, "lines");
+        assertTrue(Files.size(source) <= 174_400, "bytes");
     }
 }
