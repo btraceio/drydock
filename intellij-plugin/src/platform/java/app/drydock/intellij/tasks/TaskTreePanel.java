@@ -39,7 +39,7 @@ import app.drydock.intellij.tasks.TaskNode.StaleWorktrees;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
-import app.drydock.intellij.workspace.WorkspaceBoxDialog;
+
 import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
@@ -1530,14 +1530,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 || node instanceof Ghost ghost && ghost.source() == GhostSource.GITHUB;
     }
 
-    /** Opens the GitHub settings for {@code root}'s project, then rebuilds. EDT. */
+    /** Opens the repository settings for {@code root}'s project, then rebuilds. EDT. */
     private void openGitHubSettings(Path root) {
-        DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered -> {
-            if (new GitHubProjectSettingsDialog(project, registered).showAndGet()) {
-                inputs.invalidateGitHub();
-                requestRebuild(false);
-            }
-        });
+        DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered ->
+                RepositorySettingsDialog.open(project, registered, () -> {
+                    inputs.invalidateGitHub();
+                    requestRebuild(false);
+                }));
     }
 
     /**
@@ -1548,7 +1547,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      */
     private void openWorkspaceBoxSettings(Path root) {
         DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered ->
-                new WorkspaceBoxDialog(project, registered).showAndGet());
+                RepositorySettingsDialog.open(project, registered, () -> { }));
     }
 
     /** Opens the pull request's review workbench in its worktree's window. EDT. */

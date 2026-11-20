@@ -16,10 +16,12 @@ import app.drydock.babysit.BabysitState;
 import app.drydock.babysit.BabysitStateFile;
 import app.drydock.babysit.BabysitWatcherProcess;
 import app.drydock.delayedtasks.DelayedTaskService;
+import app.drydock.agent.identity.AgentIdentityEnvFile;
 import app.drydock.domain.SshRemote;
 import app.drydock.intellij.agent.AgentExecution;
 import app.drydock.intellij.agent.AgentCloseConfirmation;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
+import app.drydock.intellij.identity.AgentIdentityLauncher;
 import app.drydock.intellij.agent.QuitConfirmation;
 import app.drydock.intellij.agent.SessionActivityMonitor;
 import app.drydock.domain.ApplicationState;
@@ -263,7 +265,13 @@ public final class DrydockPluginService implements Disposable {
         this.workflowJournal = ResourceManifestJournal.open(workflowJournalFile);
         this.workflowResources = new SessionWorkflowResourceOwner(workflowJournal,
                 executor, new LocalCleaner(sdlc.resolve("staging")));
-        this.initialization = CompletableFuture.runAsync(this::initialize, executor);
+        this.initialization = CompletableFuture.runAsync(this::initialize, executor)
+                // Purge abandoned agent-identity env files off the EDT. The
+                // one-minute grace period in purgeStale() preserves a fresh
+                // file that a concurrent IDE instance may still be sourcing;
+                // a cleanup failure is logged, never fatal.
+                .thenRunAsync(() -> new AgentIdentityEnvFile(baseDir).purgeStale(), executor);
+        this.agentIdentityLauncher = new AgentIdentityLauncher(baseDir);
         if (backends == PRODUCTION_BACKEND) {
             // Once initialized, one escalation scan: an unresolved escalation
             // restored (or re-attached) at startup raises its balloon even if
@@ -322,6 +330,8 @@ public final class DrydockPluginService implements Disposable {
 
     private volatile ApplicationStateStore stateStore;
     private volatile AgentRegistry registry;
+    /** The agent-identity launch consultant; stateless once built, safe to share. */
+    private final AgentIdentityLauncher agentIdentityLauncher;
     private volatile SessionActivityWatcher watcher;
     private volatile SessionActivityMonitor activityMonitor;
     private volatile ReviewBackend reviewBackend;
@@ -501,6 +511,15 @@ public final class DrydockPluginService implements Disposable {
      */
     public ExecutorService executor() {
         return executor;
+    }
+
+    /**
+     * The agent-identity launch consultant {@link AgentExecutionRegistry#start}
+     * asks whether a launching session gets identity injection. Usable at
+     * once: it touches no state and reads nothing until a launch consults it.
+     */
+    public AgentIdentityLauncher agentIdentityLauncher() {
+        return agentIdentityLauncher;
     }
 
     /** The single writer for the persisted state. Callers must await {@link #initialization()} first. */

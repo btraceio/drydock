@@ -5,6 +5,7 @@ import app.drydock.workspace.WorkspaceBoxNames;
 
 import com.intellij.ide.util.PropertiesComponent;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -161,5 +162,30 @@ public final class WorkspaceSettings {
         // A null value removes the key: clearing an override leaves the
         // properties exactly as a fresh install.
         PropertiesComponent.getInstance().setValue(key, stored);
+    }
+
+    /**
+     * Why the box-name text cannot be saved: a CLI-valid name or empty. Pure;
+     * shared by the repository settings dialog's Workspace Box section.
+     */
+    public static Optional<String> boxNameRefusal(String name) {
+        String value = name == null ? "" : name.strip();
+        if (value.isEmpty() || WorkspaceBoxNames.validate(value)) {
+            return Optional.empty();
+        }
+        return Optional.of(
+                "Use lowercase letters, digits, and dashes, starting alphanumeric, or leave it empty for the default.");
+    }
+
+    /**
+     * Why the clone-path text cannot be saved: a full path or empty. Pure;
+     * shared by the repository settings dialog's Workspace Box section.
+     */
+    public static Optional<String> clonePathRefusal(String path) {
+        String value = path == null ? "" : path.strip();
+        if (value.isEmpty() || Path.of(value).isAbsolute()) {
+            return Optional.empty();
+        }
+        return Optional.of("Enter a full path on the box, or leave it empty for auto-discovery.");
     }
 }

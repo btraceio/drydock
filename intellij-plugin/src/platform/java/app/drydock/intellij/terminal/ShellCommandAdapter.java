@@ -3,7 +3,9 @@ package app.drydock.intellij.terminal;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.providers.terminal.TerminalAgentProvider;
 
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -65,8 +67,11 @@ public final class ShellCommandAdapter {
      * not a prefix assignment, so later {@code "$PATH"} expansions in the
      * command see the shims.
      */
+    /** The directories every non-fish agent command keeps near the front of PATH. */
+    private static final String DOGBREW_DIRECTORIES = "/opt/dogbrew/shims/bin:/opt/dogbrew/bin";
+
     static final String DOGBREW_PATH_PREFIX =
-            "PATH=\"/opt/dogbrew/shims/bin:/opt/dogbrew/bin:$PATH\"; ";
+            "PATH=\"" + DOGBREW_DIRECTORIES + ":$PATH\"; ";
 
     private ShellCommandAdapter() {
     }
@@ -84,6 +89,23 @@ public final class ShellCommandAdapter {
     }
 
     static List<String> shellArgv(String command, Supplier<String> shellEnv) {
+        return shellArgv(command, shellEnv, Optional.empty());
+    }
+
+    /** As {@link #shellArgv(String)}, with the agent-identity wrapper bin first on PATH. */
+    public static List<String> shellArgv(String command, Optional<Path> identityBin) {
+        return shellArgv(command, PRODUCTION_SHELL_ENV, identityBin);
+    }
+
+    /**
+     * As {@link #shellArgv(String, Supplier)}, with {@code identityBin} — the
+     * agent-identity {@code gh} wrapper's directory — put ahead of everything
+     * else on PATH, shims included. A session whose gh must resolve to the
+     * wrapper (every gh call re-mints its token) cannot have the shims or any
+     * profile-repaired PATH entry win; the wrapper itself drops its own
+     * directory before exec'ing the next gh in line.
+     */
+    static List<String> shellArgv(String command, Supplier<String> shellEnv, Optional<Path> identityBin) {
         String shell = shellEnv.get();
         if (shell == null || shell.isEmpty()) {
             // The ":-" in ${SHELL:-/bin/zsh} covers unset AND empty.
@@ -95,9 +117,24 @@ public final class ShellCommandAdapter {
             return List.of(shell, "-l", "-i");
         }
         // fish rejects a bare PATH=...; statement (it wants `set`); keep its
-        // pre-prefix launch.
+        // pre-prefix launch. (Identity injection skips fish before reaching
+        // here, so no fish form of the PATH statement exists.)
         boolean fish = shell.substring(shell.lastIndexOf('/') + 1).equals("fish");
-        String prefix = fish ? "" : DOGBREW_PATH_PREFIX;
+        String prefix = fish ? "" : pathStatement(identityBin);
         return List.of(shell, "-l", "-i", "-c", prefix + command);
+    }
+
+    /**
+     * The PATH statement for one launch: the identity bin directory, when the
+     * launch carries agent identity, ahead of the dogbrew directories, ahead
+     * of whatever the profile files repaired. A statement (trailing {@code
+     * ;}), not a prefix assignment, so later {@code "$PATH"} expansions in
+     * the command see this order.
+     */
+    private static String pathStatement(Optional<Path> identityBin) {
+        String directories = identityBin
+                .map(bin -> bin + ":" + DOGBREW_DIRECTORIES)
+                .orElse(DOGBREW_DIRECTORIES);
+        return "PATH=\"" + directories + ":$PATH\"; ";
     }
 }

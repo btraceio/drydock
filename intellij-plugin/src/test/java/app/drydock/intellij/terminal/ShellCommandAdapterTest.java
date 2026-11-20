@@ -109,4 +109,18 @@ class ShellCommandAdapterTest {
         List<String> argv = ShellCommandAdapter.shellArgv(LaunchPlan.of("pi", false));
         assertEquals(List.of(expectedShell, "-l", "-i", "-c", expectedPrefix + "pi"), argv);
     }
+
+    @Test
+    void identityBinGoesAheadOfEverythingElseOnPath() {
+        List<String> argv = ShellCommandAdapter.shellArgv("pi", () -> "/bin/bash", Optional.of(Path.of("/base/identity/bin")));
+
+        assertEquals(List.of("/bin/bash", "-l", "-i", "-c",
+                "PATH=\"/base/identity/bin:/opt/dogbrew/shims/bin:/opt/dogbrew/bin:$PATH\"; pi"), argv);
+    }
+
+    @Test
+    void withoutIdentityBinThePathStatementIsUnchanged() {
+        assertEquals(ShellCommandAdapter.shellArgv("pi", () -> "/bin/bash"),
+                ShellCommandAdapter.shellArgv("pi", () -> "/bin/bash", Optional.empty()));
+    }
 }

@@ -13,9 +13,6 @@ import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
-import com.intellij.openapi.progress.ProgressIndicator;
-import com.intellij.openapi.progress.ProgressManager;
-import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
@@ -30,11 +27,9 @@ import java.util.function.Consumer;
  * is already the panel's own home, so these live beside it and reuse its data
  * keys and presentation seams, exactly like the GitHub settings action.
  *
- * <p>The settings action never touches the password safe on the EDT: the
- * token is read before the dialog and written after it, each inside a
- * {@link Task.Modal} so the password safe's own non-EDT assertion holds and
- * the user sees progress. The tree reacts only in {@code onFinished}, after
- * the write completed.</p>
+ * <p>The settings action opens the shared repository settings dialog, whose
+ * password-safe touches run off the EDT under modal progress; the tree reacts
+ * only after the save completed.</p>
  */
 final class JiraTreeActions {
 
@@ -97,7 +92,7 @@ final class JiraTreeActions {
 
     /**
      * {@code Jira Settings…} for the selected project: reads the stored token
-     * off the EDT, shows {@link JiraProjectSettingsDialog}, saves the
+     * off the EDT, shows the repository settings dialog, saves the
      * non-secret settings, writes the token off the EDT, and only then runs
      * {@code afterSave} with the project's root (spec AC14, AC15).
      */
@@ -126,13 +121,14 @@ final class JiraTreeActions {
     }
 
     /**
-     * Opens {@code Jira Settings…} for {@code root}'s project directly —
-     * the ghost node's click reuses the action's whole flow — and runs
-     * {@code afterSave} with the root once the save completed.
+     * Opens the repository settings for {@code root}'s project directly —
+     * the ghost node's click reuses the settings action's whole flow — and
+     * runs {@code afterSave} with the root once the save completed.
      */
     static void openSettings(Project project, Path root, Consumer<Path> afterSave) {
         DrydockPluginService.getInstance().sharedProjects().byRoot(root)
-                .ifPresent(registered -> editSettings(project, root, registered, afterSave));
+                .ifPresent(registered -> RepositorySettingsDialog.open(project, registered,
+                        () -> afterSave.accept(root)));
     }
 
     /**
@@ -284,63 +280,4 @@ final class JiraTreeActions {
         };
     }
 
-    /** Reads the stored token under a modal progress, then shows the dialog. */
-    private static void editSettings(Project project, Path root, SharedProject registered,
-                                     Consumer<Path> afterSave) {
-        JiraProjectSettings current = JiraProjectSettings.load(registered.id());
-        ProgressManager.getInstance().run(new Task.Modal(project, "Reading Jira credentials…", true) {
-            private String stored = "";
-
-            @Override
-            public void run(@NotNull ProgressIndicator indicator) {
-                // Reading a stored token with nothing configured yet would
-                // only mint a password-safe key for a base URL the user has
-                // not chosen; skip it.
-                stored = current.baseUrl().isEmpty() ? "" : JiraCredentials.read(current).orElse("");
-            }
-
-            @Override
-            public void onSuccess() {
-                showSettings(project, root, registered, current, stored, afterSave);
-            }
-
-            @Override
-            public void onThrowable(@NotNull Throwable error) {
-                // The token could not be read, but the rest is still editable.
-                showSettings(project, root, registered, current, "", afterSave);
-            }
-        });
-    }
-
-    /** Shows the dialog on the EDT, then saves settings and writes the token off it. */
-    private static void showSettings(Project project, Path root, SharedProject registered,
-                                     JiraProjectSettings current, String currentSecret,
-                                     Consumer<Path> afterSave) {
-        JiraProjectSettingsDialog dialog =
-                new JiraProjectSettingsDialog(project, registered, current, currentSecret);
-        if (!dialog.showAndGet()) {
-            return;
-        }
-        JiraProjectSettings settings = dialog.settings();
-        settings.save(registered.id());
-        ProgressManager.getInstance().run(new Task.Modal(project, "Saving Jira credentials…", false) {
-            @Override
-            public void run(@NotNull ProgressIndicator indicator) {
-                JiraCredentials.write(settings, dialog.secret());
-            }
-
-            @Override
-            public void onThrowable(@NotNull Throwable error) {
-                Messages.showErrorDialog(project,
-                        "Could not store the Jira token (" + error.getClass().getSimpleName() + ")",
-                        "Jira Settings");
-            }
-
-            @Override
-            public void onFinished() {
-                // Only after the write: the rebuild must see the new token.
-                afterSave.accept(root);
-            }
-        });
-    }
 }
