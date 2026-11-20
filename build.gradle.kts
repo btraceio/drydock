@@ -1,24 +1,17 @@
 // Drydock IntelliJ plugin build — v1 ("sessions") on the IntelliJ Platform
-// Gradle Plugin 2.x, replacing the v0 probe's plain-java build. The directory
-// layout stays exactly as the probe laid it out; the source sets are remapped
-// instead of moving files so the extraction diff against the standalone app
-// keeps staying reviewable:
+// Gradle Plugin 2.x.
 //
 //   core         = src/main/java          headless core, JBR-21 floor, ZERO
 //                                            platform classpath (proven by
 //                                            compileCoreJava, not by grep)
 //   main         = src/platform/java      plugin glue, compiles against the
 //                  src/platform/resources  platform; plugin.xml lives here
-//   test         = src/test/java          the extracted core suite (JUnit 5)
+//   test         = src/test/java          the core suite (JUnit 5)
 //                                            + the platform glue tests
 //                                            (BasePlatformTestCase via the
 //                                            Vintage engine); the plugin
 //                                            configures this task as a
 //                                            platform test
-//
-// The probe's local-IDE compile hack (platformCompileOnly fileTree +
-// drydock.intellijHome) is gone: the IDE is resolved as a real dependency,
-// which is what brings buildPlugin/verifyPlugin/runIde with it.
 
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 

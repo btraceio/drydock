@@ -16,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 python3 - "$WORK/ide.ts" <<'EXTRACT'
 import sys, pathlib, textwrap
-src = "intellij-plugin/src/main/java/app/drydock/agent/providers/pi/internal/PiIdeMcpExtensionSource.java"
+src = "src/main/java/app/drydock/agent/providers/pi/internal/PiIdeMcpExtensionSource.java"
 body = pathlib.Path(src).read_text().split('"""')[1].split("\n", 1)[1]
 pathlib.Path(sys.argv[1]).write_text(textwrap.dedent(body).replace("\\\\", "\\"))
 EXTRACT
