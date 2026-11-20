@@ -12,6 +12,7 @@ import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiActivityExtensionSource;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
+import app.drydock.agent.providers.pi.internal.PiPrScanExtensionSource;
 import app.drydock.domain.SshRemote;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -623,13 +624,16 @@ class PiAgentProviderTest {
     }
 
     /**
-     * Strips what the activity extension adds to every launch (the env var
-     * and the {@code -e} flag), so tests of the other flags stay about those
-     * flags; {@link #anActivityExtensionRidesEveryLaunch} asserts them.
+     * Strips what the activity and PR-scan extensions add to every launch
+     * (their env vars and {@code -e} flags), so tests of the other flags stay
+     * about those flags; {@link #anActivityExtensionRidesEveryLaunch} and
+     * {@link #aPrScanExtensionRidesEveryLaunch} assert them.
      */
     private static String withoutActivity(String command) {
         return command.replaceAll("DRYDOCK_ACTIVITY_DIR='[^']*' ", "")
-                .replaceAll(" -e '[^']*drydock-activity\\.ts'", "");
+                .replaceAll("DRYDOCK_PR_DIR='[^']*' ", "")
+                .replaceAll(" -e '[^']*drydock-activity\\.ts'", "")
+                .replaceAll(" -e '[^']*drydock-pr-scan\\.ts'", "");
     }
 
     /** The state words and the events that produce them, matching the Claude hook's contract. */
@@ -671,5 +675,34 @@ class PiAgentProviderTest {
                 Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())).command();
         assertTrue(resume.contains("DRYDOCK_ACTIVITY_DIR='" + state.resolve("activity") + "' "), resume);
         assertTrue(resume.contains(" -e '" + extension + "'"), resume);
+    }
+
+    /** PR association rides every launch too -- create and resume, with or without MCP. */
+    @Test
+    void aPrScanExtensionRidesEveryLaunch(@TempDir Path state) throws Exception {
+        PiAgentProvider p = bridgeProvider(state);
+        Path extension = state.resolve("pi").resolve("drydock-pr-scan.ts");
+
+        String create = p.buildCreateCommand(new CreateContext("s", "x", Path.of("/repo"),
+                Optional.empty(), Optional.empty())).command();
+        assertTrue(create.contains("DRYDOCK_PR_DIR='" + state.resolve("pr-links") + "' "), create);
+        assertTrue(create.contains(" -e '" + extension + "'"), create);
+        assertEquals(PiPrScanExtensionSource.SOURCE, Files.readString(extension));
+
+        String resume = p.buildResumeCommand(new ResumeContext(Optional.of("019f9072-abc"),
+                Optional.empty(), Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+        assertTrue(resume.contains("DRYDOCK_PR_DIR='" + state.resolve("pr-links") + "' "), resume);
+        assertTrue(resume.contains(" -e '" + extension + "'"), resume);
+    }
+
+    /** The PR-scan source follows the Claude hook's file contract, so one watcher reads both. */
+    @Test
+    void thePrScanExtensionMirrorsTheClaudeContract() {
+        String source = PiPrScanExtensionSource.SOURCE;
+        assertTrue(source.contains("delete process.env.DRYDOCK_PR_DIR"), source);
+        assertTrue(source.contains("pi.on(\"session_start\""), source);
+        assertTrue(source.contains("pi.on(\"agent_settled\""), source);
+        assertTrue(source.contains("/pull/"), source);
+        assertTrue(source.contains("Write-then-rename"), source);
     }
 }

@@ -76,7 +76,110 @@ class ClaudeHookInstallerTest {
 
         assertTrue(Files.isRegularFile(installer.settingsFile()));
         assertTrue(Files.isRegularFile(base.resolve("hooks").resolve("drydock-activity.sh")));
+        assertTrue(Files.isRegularFile(base.resolve("hooks").resolve("drydock-pr-scan.sh")));
         assertTrue(Files.isDirectory(installer.activityDirectory()));
+        assertTrue(Files.isDirectory(installer.prDirectory()));
+    }
+
+    /** Runs the installed PR-scan hook script with the given stdin payload (it takes no state argument). */
+    private static int runPrScanHook(Path base, String stdin)
+            throws IOException, InterruptedException {
+        Path script = base.resolve("hooks").resolve("drydock-pr-scan.sh");
+        Process process = new ProcessBuilder(List.of("sh", script.toString()))
+                .redirectErrorStream(true)
+                .start();
+        try {
+            process.getOutputStream().write(stdin.getBytes(StandardCharsets.UTF_8));
+            process.getOutputStream().close();
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "hook script did not finish");
+            return process.exitValue();
+        } finally {
+            process.destroy();
+        }
+    }
+
+    /**
+     * The scan must catch every phrasing a transcript carries -- an agent's
+     * "opened PR #1034 (draft)" report, a raw gh tool result, a URL with a
+     * trailing path -- deduplicate them, and write one owner/repo#n line each.
+     */
+    @Test
+    void prScanHookWritesReferencesFromTheTranscript(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        Path transcript = Files.writeString(base.resolve("t.jsonl"), """
+                {"type":"assistant","message":{"content":[{"type":"text","text":\
+                "Opened PR #1034 (draft) - https://github.com/DataDog/java-profiler/pull/1034"}]}}
+                {"type":"user","message":{"content":[{"type":"tool_result","content":\
+                "https://github.com/DataDog/java-profiler/pull/1034/files created"}]}}
+                {"type":"assistant","message":{"content":[{"type":"text","text":\
+                "see also https://github.com/other/repo/pull/7"}]}}
+                """);
+
+        assertEquals(0, runPrScanHook(base, payload("Stop",
+                ",\"stop_hook_active\":false").replace("/tmp/x.jsonl", transcript.toString())));
+
+        List<String> lines = Files.readAllLines(installer.prDirectory().resolve(SESSION_ID));
+        assertEquals(List.of("DataDog/java-profiler#1034", "other/repo#7"), lines);
+    }
+
+    /**
+     * The session id becomes a file name in the shared pr-links directory: a
+     * crafted id carrying a path separator or a dot-prefixed/empty form must
+     * be refused before it can reach mkdir/mv/rm (same guard as the pi
+     * PR-scan extension's session-id validation).
+     */
+    @Test
+    void prScanHookRefusesAPathUnsafeSessionId(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        Path transcript = Files.writeString(base.resolve("t.jsonl"),
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"https://github.com/DataDog/java-profiler/pull/1034\"}]}}");
+
+        for (String unsafe : List.of("../../etc/passwd", "a/b", ".hidden", "")) {
+            assertEquals(0, runPrScanHook(base, payload("Stop", "")
+                    .replace("/tmp/x.jsonl", transcript.toString())
+                    .replace(SESSION_ID, unsafe)),
+                    "an unsafe id must exit 0 without writing: '" + unsafe + "'");
+        }
+
+        try (var entries = Files.list(installer.prDirectory())) {
+            assertEquals(List.of(), entries.toList(),
+                    "no file may appear outside the directory for any unsafe id");
+        }
+        // The planted escape target is intact: the hook must not have written
+        // through ../ to the parent directory.
+        assertTrue(Files.notExists(base.resolve("passwd")));
+    }
+
+    /** No transcript, or no PR URLs in it: the hook writes nothing and exits 0. */
+    @Test
+    void prScanHookWithoutReferencesWritesNothing(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        Path transcript = Files.writeString(base.resolve("t.jsonl"),
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"no PRs here\"}]}}");
+
+        assertEquals(0, runPrScanHook(base, payload("Stop", "")
+                .replace("/tmp/x.jsonl", transcript.toString())));
+
+        try (var entries = Files.list(installer.prDirectory())) {
+            assertEquals(List.of(), entries.toList());
+        }
+    }
+
+    /** Same rule as the activity purge: no process survives an app restart. */
+    @Test
+    void installPurgesPrReferencesLeftBehindByAPreviousRun(@TempDir Path base) throws Exception {
+        ClaudeHookInstaller installer = new ClaudeHookInstaller(base);
+        installer.install();
+        Files.writeString(installer.prDirectory().resolve(SESSION_ID), "DataDog/java-profiler#1034");
+
+        installer.install();
+
+        try (var entries = Files.list(installer.prDirectory())) {
+            assertEquals(List.of(), entries.toList());
+        }
     }
 
     /**

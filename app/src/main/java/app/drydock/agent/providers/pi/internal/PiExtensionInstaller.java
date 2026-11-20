@@ -53,6 +53,11 @@ public final class PiExtensionInstaller {
         return new PiExtensionInstaller(stateDirectory, "drydock-activity.ts", PiActivityExtensionSource.SOURCE);
     }
 
+    /** PR-reference scanning, {@code drydock-pr-scan.ts}. */
+    public static PiExtensionInstaller prScan(Path stateDirectory) {
+        return new PiExtensionInstaller(stateDirectory, "drydock-pr-scan.ts", PiPrScanExtensionSource.SOURCE);
+    }
+
     /** Where the extension lives, whether or not it has been written yet. */
     private Path extensionFile() {
         return stateDirectory.resolve("pi").resolve(fileName);

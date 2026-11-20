@@ -104,6 +104,54 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
             exit 0
             """;
 
+    /**
+     * The Stop-hook script that scans the session transcript for GitHub PR
+     * references ({@code https://github.com/<owner>/<repo>/pull/<n>} -- which
+     * covers everything from an agent's "opened PR #1034 (draft)" report to a
+     * raw {@code gh pr create} tool result) and writes the distinct slugs to
+     * one {@code owner/repo#<n>} line each. Same POSIX-sh discipline as the
+     * activity script: every path exits 0, write-then-rename, no bashisms.
+     *
+     * <p>Repo-blind on purpose: the hook cannot know which repository the
+     * session belongs to, so it reports every PR URL it saw and the app-side
+     * fold keeps only the session's own repository. A stale file can never
+     * resurface: {@link #purgeStalePrReferences} wipes the directory on every
+     * startup, so a reference only ever reaches the fold while the session
+     * that produced it is live.</p>
+     */
+    private static final String PR_SCAN_SCRIPT = """
+            #!/bin/sh
+            # Managed by Drydock -- regenerated on launch; do not edit.
+            # Stop hook: scan the transcript for GitHub PR references.
+            set -u
+            dir="$(dirname "$0")/../pr-links"
+            payload=$(cat 2>/dev/null || true)
+
+            id=$(printf '%s' "$payload" \\
+                 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+            # The id becomes a file name below: only a plain basename may pass.
+            # A crafted id with '/' or '..' would otherwise escape the directory
+            # (write, or delete via rm) -- the same guard the pi PR-scan
+            # extension applies to its session id.
+            case "$id" in
+              *[!A-Za-z0-9._-]*|.*|'') exit 0 ;;
+            esac
+            tr=$(printf '%s' "$payload" \\
+                 | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+            [ -n "$tr" ] || exit 0
+
+            refs=$(grep -o 'https://github\\.com/[^"/ ]*/[^"/ ]*/pull/[0-9][0-9]*' "$tr" 2>/dev/null \\
+                   | sed 's!https://github\\.com/!!; s!/pull/!#!' \\
+                   | sort -u | head -64)
+            [ -n "$refs" ] || exit 0
+
+            mkdir -p "$dir" 2>/dev/null || exit 0
+            tmp="$dir/.$id.tmp.$$"
+            printf '%s\\n' "$refs" > "$tmp" 2>/dev/null && mv "$tmp" "$dir/$id" 2>/dev/null
+            rm -f "$tmp" 2>/dev/null
+            exit 0
+            """;
+
     private final Path baseDirectory;
 
     public ClaudeHookInstaller(Path baseDirectory) {
@@ -113,6 +161,11 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
     /** Directory the hook script writes state words into, one file per claude session id. */
     public Path activityDirectory() {
         return baseDirectory.resolve("activity");
+    }
+
+    /** Directory the PR-scan hook writes {@code owner/repo#<n>} references into, one file per session id. */
+    public Path prDirectory() {
+        return baseDirectory.resolve("pr-links");
     }
 
     /** The file to pass to {@code claude --settings}; only valid after {@link #install()}. */
@@ -128,6 +181,10 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
         return hooksDirectory().resolve("drydock-activity.sh");
     }
 
+    private Path prScanScriptFile() {
+        return hooksDirectory().resolve("drydock-pr-scan.sh");
+    }
+
     /**
      * Writes the hook script and its settings file, creating the activity
      * directory. Idempotent, and cheap enough to run on every startup.
@@ -137,8 +194,11 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
     public void install() throws IOException {
         Files.createDirectories(hooksDirectory());
         Files.createDirectories(activityDirectory());
+        Files.createDirectories(prDirectory());
         purgeStaleActivity();
+        purgeStalePrReferences();
         writeAtomically(scriptFile(), HOOK_SCRIPT);
+        writeAtomically(prScanScriptFile(), PR_SCAN_SCRIPT);
         writeAtomically(settingsFile(), settingsJson());
     }
 
@@ -176,6 +236,17 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
         }
     }
 
+    /** Same rule as {@link #purgeStaleActivity}, for the PR-reference files. */
+    private void purgeStalePrReferences() {
+        try (Stream<Path> stale = Files.list(prDirectory())) {
+            for (Path file : stale.toList()) {
+                Files.deleteIfExists(file);
+            }
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "Could not purge stale PR references: " + e.getMessage());
+        }
+    }
+
     /**
      * Hook registrations covering the full busy/waiting/idle cycle, plus two
      * Pre/PostToolUse pairs for the two shapes of a blocked-on-human tool call:
@@ -191,6 +262,7 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
      */
     private String settingsJson() {
         String script = jsonQuote(scriptFile().toString());
+        String prScan = jsonQuote(prScanScriptFile().toString());
         return """
                 {
                   "_comment": "Generated by Drydock (v%s). Injected per launch via --settings; merges with your own hooks.",
@@ -201,11 +273,12 @@ elicitation_dialog|elicitation_url_dialog) state=attention ;;
                                          { "matcher": "AskUserQuestion",  "hooks": [{ "type": "command", "command": "sh %s attention" }] }],
                     "PostToolUse":      [{ "matcher": "TaskOutput|BashOutput", "hooks": [{ "type": "command", "command": "sh %s busy" }] },
                                          { "matcher": "AskUserQuestion",  "hooks": [{ "type": "command", "command": "sh %s busy" }] }],
-                    "Stop":             [{ "hooks": [{ "type": "command", "command": "sh %s idle" }] }],
+                    "Stop":             [{ "hooks": [{ "type": "command", "command": "sh %s idle" }] },
+                                         { "hooks": [{ "type": "command", "command": "sh %s" }] }],
                     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "sh %s end" }] }]
                   }
                 }
-                """.formatted(INSTALL_VERSION, script, script, script, script, script, script, script, script, script);
+                """.formatted(INSTALL_VERSION, script, script, script, script, script, script, script, prScan, script);
     }
 
     /**
