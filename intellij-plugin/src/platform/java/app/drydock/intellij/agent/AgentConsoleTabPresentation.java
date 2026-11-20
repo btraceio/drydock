@@ -2,6 +2,7 @@ package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
 import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SshRemote;
@@ -16,6 +17,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 
 import javax.swing.Icon;
 
+import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -77,23 +79,50 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
     }
 
     /**
-     * The tab's own text for a session: its display name, the RO suffix a
-     * read-only session needs beside the writing one, and — for a remote
-     * (workspace-box) row — {@code " · on <box>"}: the tab is one line the
-     * user scans to tell sessions apart, and a row whose agent runs on a
-     * box must not pass as a local one (T21). A local row's title is the
-     * pre-remote text, unchanged.
+     * The tab's own text for a session: its repository display name before
+     * the task's display name — the one line the user scans across windows,
+     * where bare task names collide — the RO suffix a read-only session
+     * needs beside the writing one, and — for a remote (workspace-box) row
+     * — {@code " · on <box>"}: a row whose agent runs on a box must not
+     * pass as a local one (T21).
      */
     static String tabTitle(ManagedAgentSession session) {
         // The RO suffix rather than a separate chip: a tab has one line of
         // text, and a read-only session must be distinguishable from the
         // writing one next to it in the same window.
-        String title = session.readOnly() ? session.displayName() + " · RO" : session.displayName();
+        String taskName = session.readOnly() ? session.displayName() + " · RO" : session.displayName();
+        Optional<Repository> repository = repositoryOf(session);
+        String title = HostedTab.title(repository.map(Repository::displayName)
+                .orElseGet(() -> directoryNameOf(session)), taskName);
         return session.workspaceBox()
                 .map(box -> title + " · on " + box.boxName())
-                .orElseGet(() -> sshRemoteHostOf(session)
-                        .map(host -> title + " · on " + host)
+                .orElseGet(() -> repository
+                        .flatMap(candidate -> Optional.ofNullable(candidate.remote()))
+                        .map(remote -> title + " · on " + remote)
                         .orElse(title));
+    }
+
+    /** One repository-catalog scan supplies both repository-derived title
+     * fields; the fallback is the working directory when the catalog no
+     * longer lists the session's repository. Memory read only, safe from a
+     * paint. */
+    private static Optional<Repository> repositoryOf(ManagedAgentSession session) {
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        if (plugin == null) {
+            return Optional.empty();
+        }
+        return plugin.stateStore().state().repositories().stream()
+                .filter(repository -> repository.id().equals(session.repositoryId()))
+                .findFirst();
+    }
+
+    private static String directoryNameOf(ManagedAgentSession session) {
+        Path workingDirectory = session.workingDirectory();
+        if (workingDirectory == null) {
+            return "";
+        }
+        Path fileName = workingDirectory.getFileName();
+        return fileName == null ? workingDirectory.toString() : fileName.toString();
     }
 
     /** The SSH remote of {@code session}'s repository — the same derivation
