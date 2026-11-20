@@ -248,21 +248,23 @@ class GhCliPullRequestListingTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void theOneBatchedQueryAsksForRollupAlongsideTheExistingFields(@TempDir Path dir) throws Exception {
+    void theListingQueryIsLightOnHeavyFields(@TempDir Path dir) throws Exception {
         Path receipt = dir.resolve("receipt.txt");
         Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
-                + "printf '%s' '[{\"number\":5,\"title\":\"t\",\"headRefName\":\"h\",\"baseRefName\":\"main\","
-                + "\"statusCheckRollup\":[{\"__typename\":\"StatusContext\",\"state\":\"ERROR\"}]}]'\n");
+                + "printf '%s' '[{\"number\":5,\"title\":\"t\",\"headRefName\":\"h\","
+                + "\"baseRefName\":\"main\"}]'\n");
 
         GhCliService.PullRequestListing listing = GhCliService.openPullRequestsWith(Optional.of(gh), dir,
                 Optional.of("o/r"), Duration.ofSeconds(15));
 
         List<String> calls = Files.readAllLines(receipt);
         assertEquals(List.of("args=pr list --state open --limit 100 --json "
-                + "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup --repo o/r"), calls,
-                "one listing call, no per-PR checks fan-out");
-        assertEquals(Set.of(CiFailure.ERROR), assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
-                .pullRequests().get(0).ciFailures());
+                + "number,title,headRefName,baseRefName,isDraft,author,url --repo o/r"), calls,
+                "one light listing call: the heavy badge fields ride the slower badge listing alone");
+        GhCliService.OpenPullRequest pr = assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
+                .pullRequests().get(0);
+        assertEquals(Set.of(), pr.ciFailures());
+        assertTrue(!pr.conflicting(), "a light listing row carries no signal, not a healthy one");
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
@@ -278,7 +280,7 @@ class GhCliPullRequestListingTest {
         // The query rides --search and the limit stays behind it: the server
         // bounds the matches, not the repository.
         assertEquals(List.of("args=pr list --state open --search login token --limit 100 --json "
-                + "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup --repo o/r"),
+                + "number,title,headRefName,baseRefName,isDraft,author,url --repo o/r"),
                 Files.readAllLines(receipt));
         assertEquals(9, assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
                 .pullRequests().get(0).number());
@@ -293,7 +295,7 @@ class GhCliPullRequestListingTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void theDetailLookupAsksForEveryListingField(@TempDir Path dir) throws Exception {
+    void theDetailLookupIsLightLikeTheListings(@TempDir Path dir) throws Exception {
         Path receipt = dir.resolve("receipt.txt");
         Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
                 + "printf '%s' '{\"number\":500,\"title\":\"old\",\"headRefName\":\"h\",\"baseRefName\":\"main\"}'\n");
@@ -302,7 +304,7 @@ class GhCliPullRequestListingTest {
                 GhCliService.pullRequestDetailWith(gh, dir, Optional.of("o/r"), 500);
 
         assertEquals(List.of("args=pr view 500 --json "
-                + "number,title,headRefName,baseRefName,isDraft,author,url,mergeable,statusCheckRollup --repo o/r"),
+                + "number,title,headRefName,baseRefName,isDraft,author,url --repo o/r"),
                 Files.readAllLines(receipt));
         assertEquals(500, answer.orElseThrow().number());
         assertEquals("old", answer.orElseThrow().title());
@@ -349,30 +351,21 @@ class GhCliPullRequestListingTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void aServerSideErrorRetriesWithoutBadgesAndKeepsThePrRow(@TempDir Path dir) throws Exception {
+    void aServerSideErrorIsAFailedListingNotARetry(@TempDir Path dir) throws Exception {
+        // The listing no longer carries the fields a reduced retry drops;
+        // its one bounded run fails, and the failed-listing backoff in the
+        // task tree governs the refetch.
         Path receipt = dir.resolve("receipt.txt");
         Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
-                + "case \"$*\" in\n"
-                + "  *statusCheckRollup*) echo 'HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)' >&2\n"
-                + "    exit 1 ;;\n"
-                + "  *) printf '%s' '[{\"number\":7,\"title\":\"kept\",\"headRefName\":\"topic\","
-                + "\"baseRefName\":\"main\"}]' ;;\n"
-                + "esac\n");
+                + "echo 'HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)' >&2\nexit 1\n");
         List<LogRecord> warnings = new ArrayList<>();
 
         GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
                 Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
 
-        List<String> calls = Files.readAllLines(receipt);
-        assertEquals(2, calls.size(), "a server-side error gets exactly one reduced-field retry");
-        assertTrue(calls.get(0).contains("mergeable,statusCheckRollup"), calls::toString);
-        assertTrue(!calls.get(1).contains("mergeable") && !calls.get(1).contains("statusCheckRollup"),
-                calls::toString);
-        List<GhCliService.OpenPullRequest> prs = assertInstanceOf(GhCliService.PullRequestListing.Listed.class,
-                listing).pullRequests();
-        assertEquals(1, prs.size());
-        assertEquals("kept", prs.get(0).title());
-        assertTrue(warnings.stream().anyMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
+        assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing);
+        assertEquals(1, Files.readAllLines(receipt).size(), "no reduced-field retry: nothing to drop");
+        assertTrue(warnings.stream().noneMatch(r -> r.getMessage().contains("retrying")), warnings::toString);
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
@@ -393,66 +386,34 @@ class GhCliPullRequestListingTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void aTimeoutRetriesWithoutBadges(@TempDir Path dir) throws Exception {
+    void aTimeoutFailsTheListingWithoutARetry(@TempDir Path dir) throws Exception {
         Path receipt = dir.resolve("receipt.txt");
-        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
-                + "case \"$*\" in\n"
-                + "  *statusCheckRollup*) exec sleep 30 ;;\n"
-                + "  *) printf '%s' '[{\"number\":3,\"title\":\"late\",\"headRefName\":\"h\","
-                + "\"baseRefName\":\"main\"}]' ;;\n"
-                + "esac\n");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\nexec sleep 30\n");
+        List<LogRecord> warnings = new ArrayList<>();
 
-        GhCliService.PullRequestListing listing = GhCliService.openPullRequestsWith(
-                Optional.of(gh), dir, Optional.empty(), Duration.ofMillis(300));
+        GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
+                Optional.of(gh), dir, Optional.empty(), Duration.ofMillis(300)));
 
-        List<String> calls = Files.readAllLines(receipt);
-        assertEquals(2, calls.size(), "a stall gets exactly one reduced-field retry");
-        assertTrue(!calls.get(1).contains("statusCheckRollup"), calls::toString);
-        assertEquals("late", assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing)
-                .pullRequests().get(0).title());
+        assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing);
+        assertEquals(1, Files.readAllLines(receipt).size(), "no reduced-field retry: nothing to drop");
+        assertTrue(warnings.stream().anyMatch(r -> r.getMessage().contains("timed out")), warnings::toString);
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
-    void aReducedListingThatStillFailsIsTheFailureItRetried(@TempDir Path dir) throws Exception {
-        Path gh = scriptedGh(dir, "echo 'HTTP 502: 502 Bad Gateway' >&2\nexit 1\n");
+    void outputOverflowFailsTheLightListingWithoutARetry(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "head -c " + (GhCliService.PR_LIST_MAX_OUTPUT_BYTES + 1024) + " /dev/zero\n");
         List<LogRecord> warnings = new ArrayList<>();
 
         GhCliService.PullRequestListing listing = warningsDuring(warnings, () -> GhCliService.openPullRequestsWith(
                 Optional.of(gh), dir, Optional.empty(), Duration.ofSeconds(15)));
 
-        assertEquals("HTTP 502: 502 Bad Gateway",
-                assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing).message());
-        assertTrue(warnings.stream().filter(r -> r.getMessage().contains("exited 1")).count() == 2,
-                warnings::toString);
-    }
-
-    @EnabledOnOs({OS.MAC, OS.LINUX})
-    @Test
-    void outputOverflowRetriesWithoutBadgesAndKeepsThePrRow(@TempDir Path dir) throws Exception {
-        Path receipt = dir.resolve("receipt.txt");
-        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
-                + "case \"$*\" in\n"
-                + "  *statusCheckRollup*) head -c " + (GhCliService.PR_LIST_MAX_OUTPUT_BYTES + 1024)
-                + " /dev/zero ;;\n"
-                + "  *) printf '%s' '[{\"number\":5,\"title\":\"kept\","
-                + "\"headRefName\":\"topic\",\"baseRefName\":\"main\"}]' ;;\n"
-                + "esac\n");
-
-        GhCliService.PullRequestListing listing = GhCliService.openPullRequestsWith(Optional.of(gh), dir,
-                Optional.empty(), Duration.ofSeconds(15));
-
-        List<String> calls = Files.readAllLines(receipt);
-        assertEquals(2, calls.size(), "overflow gets exactly one reduced-field retry");
-        assertTrue(calls.get(0).contains("mergeable,statusCheckRollup"), calls::toString);
-        assertTrue(calls.get(1).contains("--json number,title,headRefName,baseRefName,isDraft,author,url"), calls::toString);
-        assertTrue(!calls.get(1).contains("mergeable") && !calls.get(1).contains("statusCheckRollup"), calls::toString);
-        List<GhCliService.OpenPullRequest> prs = assertInstanceOf(GhCliService.PullRequestListing.Listed.class,
-                listing).pullRequests();
-        assertEquals(1, prs.size());
-        assertEquals("kept", prs.get(0).title());
-        assertEquals(Set.of(), prs.get(0).ciFailures());
-        assertTrue(!prs.get(0).conflicting());
+        assertInstanceOf(GhCliService.PullRequestListing.Failed.class, listing);
+        assertEquals(1, Files.readAllLines(receipt).size(),
+                "no reduced-field retry: the light listing has no fields to drop");
+        assertTrue(warnings.stream().anyMatch(r -> r.getMessage().contains("did not run to completion")));
     }
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
