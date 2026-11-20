@@ -82,7 +82,7 @@ public final class DelayedTaskActions {
      * T40): one entry per action. CANCEL keys on the task's PLAN, not its
      * presentation, so it never appears in {@link #applicable} -- the Cancel
      * action resolves the CURRENT published plan record (P4.12). */
-    public enum Item { START, CLAIM, CANCEL, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
+    public enum Item { START, CLAIM, CANCEL, EDIT_DIALOG, EDIT, DROP, CONFIRM, REOPEN, GOTO_BLOCKER_SESSION, MIRROR_TO_GITHUB,
         MIRROR_TO_JIRA, OPEN_MIRRORS, REFRESH }
 
     /** The selected delayed-task row, for the task-node actions (T20a). */
@@ -101,11 +101,12 @@ public final class DelayedTaskActions {
     private DelayedTaskActions() { }
 
     /** The task node's menu entries, in menu order (T20a; Start first, T31; Cancel after
-     * it, T40; the view gesture last). */
+     * it, T40; the dialog edit before the source edit; the view gesture last). */
     public static Entry[] menu() {
         return new Entry[] { new Entry(Start.ID, new Start()), new Entry(Claim.ID, new Claim()),
                 new Entry(Cancel.ID, new Cancel()),
-                new Entry(Edit.ID, new Edit()), new Entry(Drop.ID, new Drop()),
+                new Entry(EditDialog.ID, new EditDialog()), new Entry(Edit.ID, new Edit()),
+                new Entry(Drop.ID, new Drop()),
                 new Entry(Confirm.ID, new Confirm()), new Entry(Reopen.ID, new Reopen()),
                 new Entry(GotoBlockerSession.ID, new GotoBlockerSession()),
                 new Entry(MirrorToGitHub.ID, new MirrorToGitHub()), new Entry(MirrorToJira.ID, new MirrorToJira()),
@@ -113,7 +114,7 @@ public final class DelayedTaskActions {
     }
 
     /** Pure: which menu items apply, read off the presentation {@link TaskState}
-     * CARRIED onto the row (never recomputed): Edit always; Drop for anything
+     * CARRIED onto the row (never recomputed): Edit… and Edit Source always; Drop for anything
      * not terminal; Confirm only while an agent's done awaits the human (REVIEW,
      * D16); Reopen for the closed ones; Go to blocker session while blocked;
      * Refresh whatever the presentation -- a view gesture, never task work:
@@ -121,18 +122,18 @@ public final class DelayedTaskActions {
      * can omit it. */
     public static Set<Item> applicable(TaskState.Presentation presentation) {
         Set<Item> items = switch (presentation) {
-            case REVIEW -> EnumSet.of(Item.EDIT, Item.DROP, Item.CONFIRM, Item.REOPEN);
-            case TERMINAL -> EnumSet.of(Item.EDIT, Item.REOPEN);
+            case REVIEW -> EnumSet.of(Item.EDIT_DIALOG, Item.EDIT, Item.DROP, Item.CONFIRM, Item.REOPEN);
+            case TERMINAL -> EnumSet.of(Item.EDIT_DIALOG, Item.EDIT, Item.REOPEN);
             // CLAIM (S4 of docs/StackedPrExecution.md) on the blocked and
             // ready rows alike: a blocked follow-up whose prerequisite's
             // branch exists is claimable even while the prerequisite runs
             // (S2 -- the review gate holds statuses, not stacking); the
             // click validates the claim and refuses visibly when the branch
             // does not exist yet.
-            case BLOCKED -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT, Item.DROP,
+            case BLOCKED -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT_DIALOG, Item.EDIT, Item.DROP,
                     Item.GOTO_BLOCKER_SESSION);
-            case READY -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT, Item.DROP);
-            default -> EnumSet.of(Item.EDIT, Item.DROP);
+            case READY -> EnumSet.of(Item.START, Item.CLAIM, Item.EDIT_DIALOG, Item.EDIT, Item.DROP);
+            default -> EnumSet.of(Item.EDIT_DIALOG, Item.EDIT, Item.DROP);
         };
         items.add(Item.REFRESH);
         return items;
@@ -519,10 +520,24 @@ public final class DelayedTaskActions {
         @Override void dispatch(Project project, DelayedTaskRow row) { cancel(project, row); }
     }
 
-    /** Edit: the task's own file in the editor (P5). Registered in plugin.xml. */
+    /** Edit…: the same form the Tasks node's New Task… shows, prefilled from the task's
+      * stored document (P5's dialog edit). Registered in plugin.xml. */
+    public static final class EditDialog extends TaskNodeAction {
+        public static final String ID = "Drydock.DelayedTask.EditDialog";
+        public EditDialog() { super(Item.EDIT_DIALOG, "Edit…",
+                "Edit the task's title, body, prerequisites, project and done_by in the dialog",
+                AllIcons.Actions.Edit); }
+        @Override void dispatch(Project project, DelayedTaskRow row) {
+            TaskDialogFlows.editTask(project, row.id());
+        }
+    }
+
+    /** Edit Source: the task's own file in the editor (P5's double-click). Registered in
+      * plugin.xml; the Edit… dialog is the human-facing form, this is the raw file. */
     public static final class Edit extends TaskNodeAction {
         public static final String ID = "Drydock.DelayedTask.Edit";
-        public Edit() { super(Item.EDIT, "Edit", "Open the task's file in the editor", AllIcons.Actions.Edit); }
+        public Edit() { super(Item.EDIT, "Edit Source", "Open the task's file in the editor",
+                AllIcons.Actions.EditSource); }
         @Override void dispatch(Project project, DelayedTaskRow row) { edit(project, row); }
     }
 
