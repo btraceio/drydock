@@ -12,6 +12,7 @@ import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.terminal.TerminalExecutionConsole;
 
 import javax.swing.Timer;
 
@@ -133,6 +134,8 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     private SessionFactsLoader loader;
     private final Map<ManagedSessionId, SessionPane> panes = new LinkedHashMap<>();
     private final Map<ManagedSessionId, SessionFactsLoader.Result> latest = new HashMap<>();
+    /** Focus intents waiting for the pane to mount the console; one per id, fired once. */
+    private final Map<ManagedSessionId, Runnable> consoleFocusAwaiting = new HashMap<>();
     private FileEditor lease;
     private static final int AGE_TICK_MILLIS = 10_000;
     /** Sessions marked by any thread, drained by the next flush. */
@@ -355,6 +358,39 @@ public final class SessionHostController implements Disposable, SessionPane.Host
                 && (id.equals(layout.primary().orElse(null)) || id.equals(layout.held().orElse(null)))) {
             focus(id);
         }
+    }
+
+    /**
+     * Arms {@code fire} to run once, on the caller's thread (the EDT), when
+     * the pane of {@code id} next mounts a console; re-arming replaces. The
+     * runnable itself decides whether the focus permission still holds, so
+     * a stale arm is naturally silent. Never fires after disposal.
+     */
+    void awaitConsoleMounted(ManagedSessionId id, Runnable fire) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(fire, "fire");
+        if (!closed()) {
+            consoleFocusAwaiting.put(id, fire);
+        }
+    }
+
+    /**
+     * {@link SessionPane.Host}: the pane of {@code id} mounted a console.
+     * One pending focus fires and leaves; a stale one still runs but is
+     * fenced by its own permission check.
+     */
+    @Override
+    public void consoleMounted(ManagedSessionId id) {
+        Runnable fire = consoleFocusAwaiting.remove(id);
+        if (fire != null) {
+            fire.run();
+        }
+    }
+
+    /** Whether the pane of {@code id} currently displays {@code console}. */
+    boolean isConsoleMounted(ManagedSessionId id, TerminalExecutionConsole console) {
+        SessionPane pane = panes.get(id);
+        return pane != null && pane.displays(console);
     }
 
     /** Whether {@code owner} now holds the lease: free, or already its own. Never grants focus. */
@@ -586,6 +622,7 @@ public final class SessionHostController implements Disposable, SessionPane.Host
         panes.values().forEach(SessionPane::dispose);
         panes.clear();
         latest.clear();
+        consoleFocusAwaiting.clear();
         lease = null;
         ageTicker.stop();
     }

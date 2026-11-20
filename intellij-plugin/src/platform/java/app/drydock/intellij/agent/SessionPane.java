@@ -19,6 +19,7 @@ import com.intellij.util.ui.UIUtil;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 
 import java.awt.BorderLayout;
 import java.awt.Container;
@@ -58,6 +59,14 @@ final class SessionPane {
 
         /** The pane of {@code id} took focus. */
         void paneFocused(ManagedSessionId id);
+
+        /**
+         * The pane of {@code id} mounted a console (live, or a stopped view's).
+         * A pending console focus fires on this; a default no-op keeps test
+         * hosts that need none compiling.
+         */
+        default void consoleMounted(ManagedSessionId id) {
+        }
 
         /** What the host knows of {@code id}, if it knows anything yet. */
         Optional<SessionPaneFacts> facts(ManagedSessionId id);
@@ -135,6 +144,17 @@ final class SessionPane {
         return strip;
     }
 
+    /**
+     * Whether {@code console}'s component is inside what the body currently
+     * shows — the live body mounts it directly, the stopped view wraps it.
+     * The one honest answer to "can a focus request for this console land
+     * now"; a placeholder or a detached pane displays nothing.
+     */
+    boolean displays(TerminalExecutionConsole console) {
+        return console != null && mounted != null
+                && SwingUtilities.isDescendingFrom(console.getComponent(), mounted);
+    }
+
     Body shown() {
         return shown;
     }
@@ -177,6 +197,7 @@ final class SessionPane {
                 JComponent component = console.orElseThrow().getComponent();
                 if (shown != Body.LIVE || mounted != component) {
                     mount(component, null);
+                    host.consoleMounted(sessionId);
                 }
             }
             case STOPPED -> {
@@ -184,6 +205,7 @@ final class SessionPane {
                     releaseStopped();
                     stoppedView = new SessionStoppedView(console.orElseThrow(), "Not running");
                     mount(stoppedView.component(), console.get());
+                    host.consoleMounted(sessionId);
                 }
             }
             default -> {
