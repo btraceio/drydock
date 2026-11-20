@@ -153,6 +153,17 @@ public final class GhCliService implements AutoCloseable {
     }
 
     /**
+     * The same lookup for a PR number learned outside a checkout name -- the
+     * PR-reference watcher folds agent-reported numbers through here to
+     * confirm the PR exists and learn its true lifecycle state (a text
+     * mention cannot distinguish OPEN from MERGED). Digits cannot start with
+     * a dash, so the option-like guard in {@code viewPrWith} never trips.
+     */
+    public CompletableFuture<Optional<PrInfo>> viewPrByNumber(Path root, int number) {
+        return CompletableFuture.supplyAsync(() -> viewPrBlocking(root, String.valueOf(number)), executor);
+    }
+
+    /**
      * The selector {@code gh pr view} is given for a checkout's
      * {@code branch}: the PR number when the branch has drydock's
      * {@code pr-<n>} checkout name (see {@link #viewPr}), the branch name

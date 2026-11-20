@@ -10,6 +10,7 @@ import app.drydock.app.SessionOpenResult;
 import app.drydock.agent.api.ConversationSource;
 import app.drydock.agent.api.ConversationSource.Conversation;
 import app.drydock.agent.api.ResumeCostEstimate;
+import app.drydock.activity.PrLinkWatcher;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.app.SessionHandoffService;
@@ -42,6 +43,7 @@ import app.drydock.git.GitStatus;
 import app.drydock.git.GitStatusService;
 import app.drydock.git.GitTarget;
 import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubLinkService;
 import app.drydock.github.GitHubReviewRequest.Event;
 import app.drydock.github.GitHubReviewService;
 import app.drydock.lsp.JdtServerManager;
@@ -140,6 +142,7 @@ import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
@@ -517,15 +520,17 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
      * the 250ms cadence exists purely to hold that status flip inside the
      * 250ms responsiveness budget instead of the former 1s tick's worst
      * case. Every fourth tick (1s) it also refreshes session activity badges
-     * ({@link #pollSessionActivity}, filesystem reads on the watcher's own
-     * executor, guarded against overlap -- kept at 1s rather than paying per
-     * tick) and every fortieth (10s) the resume-cost estimates.
+     * ({@link #pollSessionActivity}) and folds harness-reported PR references
+     * ({@link #pollSessionPrLinks}) -- filesystem reads on the watchers' own
+     * executors, guarded against overlap -- kept at 1s rather than paying per
+     * tick; and every fortieth (10s) the resume-cost estimates.
      */
     private final Timeline exitWatcher = new Timeline(
             new KeyFrame(Duration.millis(250), e -> {
                 pollForExitedProcesses();
                 if (++resumeCostTick % 4 == 0) {
                     pollSessionActivity();
+                    pollSessionPrLinks();
                 }
                 if (resumeCostTick % 40 == 0) {
                     refreshResumeCostEstimates();
@@ -541,6 +546,36 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
 
     /** Guards against overlapping activity polls completing out of order (FX thread only). */
     private boolean activityPollInFlight;
+
+    /**
+     * Reads the PR references the harnesses write; wired by {@code
+     * DrydockApplication} once hook installation succeeds, and left null when
+     * it did not (no watcher simply means no automatic PR association).
+     */
+    private PrLinkWatcher prLinkWatcher;
+
+    /** Guards against overlapping PR-reference polls completing out of order (FX thread only). */
+    private boolean prLinkPollInFlight;
+
+    /**
+     * PR numbers already folded into a session this app run, so one poll
+     * reconciles a reference once instead of rewriting the store and firing
+     * gh on every tick. Entries are never removed: a bounded run artifact,
+     * and a re-opened session legitimately re-learns its PRs.
+     */
+    private final Map<ManagedSessionId, Set<Integer>> appliedPrLinks = new HashMap<>();
+
+    /** GitHub owner/repo of a repository, memoised per app run (an origin remote does not move mid-run). */
+    private final Map<UUID, CompletableFuture<Optional<GitHubLinkService.Remote>>> repoSlugs = new ConcurrentHashMap<>();
+
+    /**
+     * The most recent poll result, so the fold reads one stable snapshot even
+     * when a later poll has already replaced the watcher's map.
+     */
+    private Map<String, List<PrLinkWatcher.PrReference>> latestPrReferences = Map.of();
+
+    /** Stateless deep-link helper, reused here for the same git-remote parse it already does per click. */
+    private final GitHubLinkService githubLinks = new GitHubLinkService();
 
     /**
      * Last-seen claude session id per managed session, so activity state can
@@ -4314,6 +4349,12 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                     if (watcher != null) {
                         watcher.forget(oldAgentSessionId);
                     }
+                    // Same rule for PR references: the old conversation's refs
+                    // must not re-associate with the rebound session.
+                    PrLinkWatcher prWatcher = prLinkWatcher;
+                    if (prWatcher != null) {
+                        prWatcher.forget(oldAgentSessionId);
+                    }
                     knownClaudeIds.remove(id);
                 }
                 reclaimed.complete(null);
@@ -5879,9 +5920,14 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
         probe.start();
     }
 
-    /** Wired by {@code DrydockApplication} after the activity hooks are installed. */
+    /** Wired by {@code DrydockApplication} after the harness reporters are installed. */
     public void useActivityWatcher(SessionActivityWatcher watcher) {
         this.activityWatcher = watcher;
+    }
+
+    /** Wired by {@code DrydockApplication} after the harness reporters are installed. */
+    public void usePrLinkWatcher(PrLinkWatcher watcher) {
+        this.prLinkWatcher = watcher;
     }
 
     /**
@@ -5933,6 +5979,149 @@ public final class MainWorkspace extends BorderPane implements WorkspaceNavigato
                 .findFirst()
                 .flatMap(ManagedAgentSession::agentSessionId)
                 .ifPresent(watcher::acknowledge);
+    }
+
+    /**
+     * Folds harness-reported PR references into the sessions that reported
+     * them: the primary automatic PR-association path. A Claude Stop hook or
+     * pi extension scans the agent's own output for GitHub PR URLs (an opened
+     * PR's report, a {@code gh pr create} result) and writes {@code
+     * owner/repo#<n>} lines; this reads them each tick, keeps only the
+     * references whose repository is the session's own, and folds the rest
+     * into the session's PR links via {@code SessionManager#reconcileObservedPr}
+     * -- which appends a secondary link when a primary is already known, so a
+     * mention can never overwrite a PR the Finish flow established.
+     *
+     * <p>A reference is recorded as OPEN immediately (a mentioned PR is at
+     * least open), then one {@code gh pr view <n>} reconciles the true state;
+     * without gh the optimistic record stands, exactly like the handoff's
+     * no-gh fallback. Failures are swallowed: association is a convenience
+     * and must never surface an error dialog from a poll.</p>
+     */
+    private void pollSessionPrLinks() {
+        PrLinkWatcher watcher = prLinkWatcher;
+        if (watcher == null || prLinkPollInFlight) {
+            return;
+        }
+        prLinkPollInFlight = true;
+        watcher.poll().thenAccept(byAgentId -> Platform.runLater(() -> {
+            // The guard clears before the fold: references are folded once per
+            // run (appliedPrLinks), so overlapping polls cannot double-apply.
+            prLinkPollInFlight = false;
+            latestPrReferences = byAgentId;
+            List<ManagedAgentSession> candidates = new ArrayList<>();
+            for (ManagedAgentSession session : sessionManager.sessions()) {
+                List<PrLinkWatcher.PrReference> refs =
+                        session.agentSessionId().map(byAgentId::get).orElse(null);
+                if (refs != null && !refs.isEmpty()) {
+                    candidates.add(session);
+                }
+            }
+            if (candidates.isEmpty()) {
+                return;
+            }
+            // Resolve each candidate's GitHub slug off the FX thread (the
+            // parse runs git), then fold on the FX thread.
+            List<CompletableFuture<Void>> slugs = new ArrayList<>();
+            for (ManagedAgentSession session : candidates) {
+                repositoryFor(session).ifPresent(repository ->
+                        slugs.add(slugOf(repository).thenAccept(r -> { })));
+            }
+            List<ManagedAgentSession> toFold = List.copyOf(candidates);
+            CompletableFuture.allOf(slugs.toArray(CompletableFuture[]::new))
+                    .whenComplete((v, ex) -> Platform.runLater(() -> {
+                        for (ManagedAgentSession session : toFold) {
+                            foldPrReferences(session);
+                        }
+                    }));
+        })).exceptionally(ex -> {
+            Platform.runLater(() -> prLinkPollInFlight = false);
+            LOG.log(Level.DEBUG, "PR reference poll failed: " + ex.getMessage());
+            return null;
+        });
+    }
+
+    /** The GitHub slug of a repository's origin, memoised per app run; empty when origin is not GitHub. */
+    private CompletableFuture<Optional<GitHubLinkService.Remote>> slugOf(Repository repository) {
+        return repoSlugs.computeIfAbsent(repository.id().value(),
+                id -> githubLinks.remoteOf(repository.root()));
+    }
+
+    /** FX-thread fold of one session's references: same-repo filter, dedupe, reconcile, gh validation. */
+    private void foldPrReferences(ManagedAgentSession snapshot) {
+        Optional<Repository> owner = repositoryFor(snapshot);
+        if (owner.isEmpty()) {
+            return;
+        }
+        CompletableFuture<Optional<GitHubLinkService.Remote>> slugFuture =
+                repoSlugs.get(owner.get().id().value());
+        Optional<GitHubLinkService.Remote> slug = slugFuture == null ? Optional.empty() : slugFuture.getNow(null);
+        if (slug.isEmpty()) {
+            // Not a GitHub checkout: nothing to match against, ever.
+            return;
+        }
+        Map<String, List<PrLinkWatcher.PrReference>> latest = latestPrReferences;
+        List<PrLinkWatcher.PrReference> refs = snapshot.agentSessionId().map(latest::get).orElse(List.of());
+        Set<Integer> applied = appliedPrLinks.computeIfAbsent(snapshot.id(), id -> new java.util.HashSet<>());
+        for (PrLinkWatcher.PrReference ref : refs) {
+            if (!ref.slug().equals(slug.get().owner().toLowerCase(Locale.ROOT) + "/"
+                    + slug.get().repo().toLowerCase(Locale.ROOT))
+                    || !applied.add(ref.number())) {
+                continue;
+            }
+            applyObservedPr(snapshot.id(), ref.number());
+        }
+    }
+
+
+    /** Records an observed PR as OPEN and asks gh for the authoritative state, asynchronously. */
+    private void applyObservedPr(ManagedSessionId sessionId, int number) {
+        ManagedAgentSession live;
+        try {
+            live = sessionManager.reconcileObservedPr(sessionId, PrState.OPEN, number);
+        } catch (RuntimeException e) {
+            // UnknownSessionException and friends: the session may have been
+            // removed after the snapshot lookup; nothing left to associate.
+            return;
+        }
+        OpenSessionTab tab = openTabs.get(sessionId);
+        if (tab != null) {
+            tab.updatePrChip(live.prState(), live.prNumber());
+        }
+        publishSessions();
+        validateObservedPr(sessionId, live, number);
+    }
+
+    /**
+     * Reconciles a text-derived OPEN with what gh says the PR's state is. A
+     * MERGED answer updates the link; any other outcome (OPEN, gh absent,
+     * gh failure) leaves the optimistic record standing.
+     */
+    private void validateObservedPr(ManagedSessionId sessionId, ManagedAgentSession live, int number) {
+        Optional<Repository> owner = repositoryFor(live);
+        if (owner.isEmpty() || owner.get().isRemote()) {
+            return;
+        }
+        ghCliService.viewPrByNumber(owner.get().root(), number).thenAccept(pr -> pr.ifPresent(info -> {
+            if (info.state() != GhCliService.PrInfo.PrLifecycle.MERGED) {
+                return;
+            }
+            Platform.runLater(() -> {
+                try {
+                    ManagedAgentSession merged = sessionManager.reconcileObservedPr(sessionId, PrState.MERGED, number);
+                    OpenSessionTab tab = openTabs.get(sessionId);
+                    if (tab != null) {
+                        tab.updatePrChip(merged.prState(), merged.prNumber());
+                    }
+                    publishSessions();
+                } catch (RuntimeException e) {
+                    LOG.log(Level.DEBUG, "Could not reconcile PR #" + number + " state: " + e.getMessage());
+                }
+            });
+        })).exceptionally(ex -> {
+            LOG.log(Level.DEBUG, "PR state validation for #" + number + " failed: " + ex.getMessage());
+            return null;
+        });
     }
 
     // ---- Helpers ------------------------------------------------------------

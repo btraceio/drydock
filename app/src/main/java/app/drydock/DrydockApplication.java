@@ -6,6 +6,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.app.DiagnosticLogFile;
 import app.drydock.app.RepositoryManager;
 import app.drydock.app.SessionManager;
+import app.drydock.activity.PrLinkWatcher;
 import app.drydock.activity.SessionActivityWatcher;
 import app.drydock.config.UserConfig;
 import app.drydock.domain.ManagedSessionId;
@@ -164,6 +165,7 @@ public final class DrydockApplication extends Application {
     private AgentRegistry agentRegistry;
     private ExecutorService agentContextExecutor;
     private SessionActivityWatcher activityWatcher;
+    private PrLinkWatcher prLinkWatcher;
     private CompletableFuture<Void> hookInstall;
     private RepositoryManager repositoryManager;
     private SessionManager sessionManager;
@@ -1450,6 +1452,9 @@ public final class DrydockApplication extends Application {
         if (activityWatcher != null) {
             closeQuietly("SessionActivityWatcher", activityWatcher::close);
         }
+        if (prLinkWatcher != null) {
+            closeQuietly("PrLinkWatcher", prLinkWatcher::close);
+        }
         if (gitStatusService != null) {
             closeQuietly("GitStatusService", gitStatusService::close);
         }
@@ -1540,6 +1545,7 @@ public final class DrydockApplication extends Application {
         // A virtual thread, not the no-arg runAsync's ForkJoinPool.commonPool()
         // (AGENTS.md: "a background executor ... or a virtual thread"). Kept in a
         // field so stop() can await this file-writing work instead of racing it.
+        Path prDirectory = activityDirectory.resolveSibling("pr-links");
         hookInstall = CompletableFuture.runAsync(() -> {
             for (Agent agent : agentRegistry.agents()) {
                 if (!agent.isAvailable()) {
@@ -1557,6 +1563,8 @@ public final class DrydockApplication extends Application {
                 .thenRun(() -> Platform.runLater(() -> {
                     activityWatcher = new SessionActivityWatcher(activityDirectory);
                     mainWorkspace.useActivityWatcher(activityWatcher);
+                    prLinkWatcher = new PrLinkWatcher(prDirectory);
+                    mainWorkspace.usePrLinkWatcher(prLinkWatcher);
                 }))
                 .exceptionally(ex -> {
                     LOG.log(Level.WARNING, "Session activity hooks unavailable; sessions will run without them", ex);
