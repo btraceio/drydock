@@ -126,6 +126,53 @@ class TaskTreeInputsTest {
                 "a failed base listing is the error row, not a candidate pool");
     }
 
+    @Test
+    void aFailedPullRequestListingIsServedUnderABackoffNotRefetchedEveryPass() throws Exception {
+        TaskTreeInputs inputs = new TaskTreeInputs(onChange -> () -> { });
+        CompletableFuture<GhCliService.PullRequestListing> failed = CompletableFuture.completedFuture(
+                new GhCliService.PullRequestListing.Failed("HTTP 504: 504 Gateway Timeout"));
+        long freshExpiry = System.nanoTime() + TimeUnit.MINUTES.toNanos(5);
+        Object key = record("PullRequestKey", ROOT, Optional.empty());
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "pullRequestCache");
+        cache.put(key, record("CachedPullRequests", freshExpiry, failed));
+
+        Method pullRequestsOf = TaskTreeInputs.class.getDeclaredMethod("pullRequestsOf", Path.class,
+                Optional.class);
+        pullRequestsOf.setAccessible(true);
+        assertSame(failed, pullRequestsOf.invoke(inputs, ROOT, Optional.empty()),
+                "the failed listing is served, not refetched on this pass");
+        long firstBackoffExpiry = (Long) recordComponent(cache.get(key), "expiresAt");
+        assertSame(failed, pullRequestsOf.invoke(inputs, ROOT, Optional.empty()),
+                "and again on the next pass inside the backoff window");
+
+        Object entry = cache.get(key);
+        long expiresAt = (Long) recordComponent(entry, "expiresAt");
+        assertTrue(expiresAt <= firstBackoffExpiry, "a rebuild pass cannot extend the original backoff deadline");
+        assertTrue(expiresAt < freshExpiry, "the backoff caps how long the failure is served");
+        assertTrue(expiresAt > System.nanoTime(), "the backoff window is still open");
+    }
+
+    @Test
+    void aSucceededPullRequestListingKeepsItsFullCacheWindow() throws Exception {
+        TaskTreeInputs inputs = new TaskTreeInputs(onChange -> () -> { });
+        CompletableFuture<GhCliService.PullRequestListing> listed = CompletableFuture.completedFuture(
+                new GhCliService.PullRequestListing.Listed(List.of(pr(9, "fine", "h"))));
+        long freshExpiry = System.nanoTime() + TimeUnit.MINUTES.toNanos(5);
+        Object key = record("PullRequestKey", ROOT, Optional.empty());
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "pullRequestCache");
+        cache.put(key, record("CachedPullRequests", freshExpiry, listed));
+
+        Method pullRequestsOf = TaskTreeInputs.class.getDeclaredMethod("pullRequestsOf", Path.class,
+                Optional.class);
+        pullRequestsOf.setAccessible(true);
+        assertSame(listed, pullRequestsOf.invoke(inputs, ROOT, Optional.empty()));
+
+        long expiresAt = (Long) recordComponent(cache.get(key), "expiresAt");
+        assertEquals(freshExpiry, expiresAt, "a success is not shortened by the failure backoff");
+    }
+
     private static GhCliService.OpenPullRequest pr(int number, String title, String head) {
         return new GhCliService.OpenPullRequest(number, title, head, "main", false,
                 Optional.empty(), Optional.empty(), false);
@@ -659,6 +706,13 @@ class TaskTreeInputsTest {
         Field field = TaskTreeInputs.class.getDeclaredField(name);
         field.setAccessible(true);
         return field.get(target);
+    }
+
+    /** One record component by name, via its accessor. */
+    private static Object recordComponent(Object record, String component) throws ReflectiveOperationException {
+        Method accessor = record.getClass().getMethod(component);
+        accessor.setAccessible(true);
+        return accessor.invoke(record);
     }
 
     private static Object record(String simpleName, Object... components) throws ReflectiveOperationException {
