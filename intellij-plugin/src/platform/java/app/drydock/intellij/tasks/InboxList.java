@@ -355,7 +355,7 @@ final class InboxList extends JBList<InboxList.Entry> {
      * branch's pull request, the issues its tasks are mirrored into, and the
      * started tasks it carries. A task: its id, state, age, staleness,
      * blockers and sessions, its plan's progress, its mirrors and its pull
-     * request.
+     * request, then its full description (with session notes).
      */
     static String tooltip(Item item, Instant now) {
         StringBuilder text = new StringBuilder();
@@ -398,6 +398,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                     TaskTreeRenderer.healthTooltip(pr.number(), Optional.of(pr.baseRefName()), pr.conflicting(),
                             pr.ciFailures()).ifPresent(health -> text.append(" · ").append(health));
                 });
+                text.append(TaskTreeRenderer.descriptionHover(row.body()));
             }
         }
         return text.toString();

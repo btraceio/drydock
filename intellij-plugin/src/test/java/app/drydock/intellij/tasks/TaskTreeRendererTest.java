@@ -353,6 +353,28 @@ class TaskTreeRendererTest {
                 TaskTreeRenderer.pullRequestLinkTooltip(openPr(40, "Speed up the flaky suite", "pr-40")));
     }
 
+    @Test
+    void aTaskRowsDescriptionHoverCarriesTheBodyAfterABlankLine() {
+        assertEquals("", TaskTreeRenderer.descriptionHover(""), "no body, no hover block");
+        assertEquals("", TaskTreeRenderer.descriptionHover("   \n "), "a blank body shows nothing");
+        assertEquals("\n\nFix the parser.", TaskTreeRenderer.descriptionHover("\n Fix the parser. \n"),
+                "the body rides trimmed, after the one-line summary");
+    }
+
+    @Test
+    void aLongDescriptionHoverIsCutOnALineBoundaryAndSaysWhereTheRestLives() {
+        String cut = "x".repeat(TaskTreeRenderer.DESCRIPTION_HOVER_LIMIT - 1);
+        String rest = "y".repeat(2_000);
+        assertEquals("\n\n" + cut + "\n… (Edit opens the task's file with the rest)",
+                TaskTreeRenderer.descriptionHover(cut + "\n" + rest),
+                "the cut stops before the line that crosses the cap");
+        String lineless = "a".repeat(3_000);
+        assertEquals("\n\n" + lineless.substring(0, TaskTreeRenderer.DESCRIPTION_HOVER_LIMIT)
+                        + "\n… (Edit opens the task's file with the rest)",
+                TaskTreeRenderer.descriptionHover(lineless),
+                "no line boundary to cut at: the cap itself ends the hover");
+    }
+
     private static GhCliService.OpenPullRequest healthPr(boolean conflicting, Set<CiFailure> ci) {
         return new GhCliService.OpenPullRequest(7, "Fix it", "feature/x", "main", false,
                 Optional.of("someone"), Optional.empty(), conflicting, ci);

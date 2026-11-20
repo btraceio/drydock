@@ -134,6 +134,23 @@ class DelayedTaskRowsTest {
         assertNull(byTitle(unknown, "Free the harbour").project());
     }
 
+    /**
+     * A row carries the document's raw body verbatim (the description with
+     * its session notes), so the hover hint can show it without a file read;
+     * a bodyless document carries a blank body, and the hover shows nothing.
+     */
+    @Test
+    void rowsCarryTheDocumentsBodyForTheHoverHint() {
+        TaskId described = TaskId.of("described-task");
+        TaskSnapshot snapshot = snapshot(List.of(new TaskDocument(described, ALPHA, "Described task",
+                TaskStatus.OPEN, null, Optional.of(YOUNG), List.of(), List.of(), "",
+                "Fix the parser.\n\n## Session notes\nThe first pass cached too eagerly.")));
+        DelayedTaskRow row = DelayedTaskRows.rows(snapshot, LIVE, SLUGS, NOW).getFirst();
+        assertEquals("Fix the parser.\n\n## Session notes\nThe first pass cached too eagerly.", row.body());
+        assertEquals("", byTitle(ROWS, "Free the harbour").body(),
+                "the shared fixtures' bodyless documents stay blank");
+    }
+
     @Test
     void linkingAPullRequestPreservesTheProjectSlug() {
         DelayedTaskRow row = byTitle(ROWS, "Free the harbour");

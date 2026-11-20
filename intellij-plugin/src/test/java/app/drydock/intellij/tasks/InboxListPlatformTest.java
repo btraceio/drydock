@@ -144,7 +144,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         OpenPullRequest pr = new OpenPullRequest(943, "PR", "dd/ready-one", "main", false, Optional.empty(),
                 Optional.of("https://github.com/o/r/pull/943"), conflicting, ciFailures);
         DelayedTaskRow ready = new DelayedTaskRow(new TaskView(readyId, Presentation.READY, List.of(), List.of()),
-                "Ready one", TASKS, Optional.empty(), false, List.of(), List.of(), "alpha", Optional.empty())
+                "Ready one", TASKS, Optional.empty(), false, List.of(), List.of(), "alpha", Optional.empty(), "")
                 .withPullRequest(pr);
         DelayedTaskRow done = new DelayedTaskRow(new TaskView(doneId, Presentation.TERMINAL, List.of(), List.of()),
                 "Done one", TASKS, List.of());
@@ -235,12 +235,25 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertEquals(List.of("Ready one", "#943", "alpha"), renderedLabels(indexOf("Ready one")));
         DelayedTaskRow unnamed = new DelayedTaskRow(new TaskView(TaskId.of("unknown-project"), Presentation.READY,
                 List.of(), List.of()), "Unknown project", TASKS, Optional.empty(), false, List.of(), List.of(),
-                " ", Optional.empty());
+                " ", Optional.empty(), "");
         TaskItem item = new TaskItem(unnamed, Optional.empty());
         list.show(new Inbox(List.of(new Group(GroupKind.READY, "Ready to start", List.of(item))), List.of(), 0),
                 false);
         assertEquals(List.of("Unknown project"), renderedLabels(indexOf("Unknown project")));
         assertEquals("Task unknown-project (ready)", InboxList.tooltip(item, NOW));
+    }
+
+    public void testATaskRowsHoverCarriesItsFullDescriptionAfterTheSummary() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        DelayedTaskRow described = new DelayedTaskRow(
+                new TaskView(TaskId.of("described-one"), Presentation.READY, List.of(), List.of()),
+                "Described one", TASKS, Optional.empty(), false, List.of(), List.of(), "alpha", Optional.empty(),
+                "\nFix the parser.\n\n## Session notes\nThe first pass cached too eagerly.");
+        TaskItem item = new TaskItem(described, Optional.empty());
+        String tooltip = InboxList.tooltip(item, NOW);
+        assertTrue("tooltip: " + tooltip, tooltip.startsWith("Task described-one (ready)"));
+        assertTrue("tooltip: " + tooltip,
+                tooltip.endsWith("\n\nFix the parser.\n\n## Session notes\nThe first pass cached too eagerly."));
     }
 
     public void testARunningSessionInAnotherWindowWearsTheWindowChip() throws Exception {
