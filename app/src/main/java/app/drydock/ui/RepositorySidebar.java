@@ -80,6 +80,7 @@ import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -955,6 +956,37 @@ public final class RepositorySidebar extends VBox {
             return name;
         }
         return name + " — remote host: " + repository.remote().host();
+    }
+
+    /**
+     * The session row's tooltip: one labeled field per line, long values
+     * word-wrapped under their label, so no line runs wider than the popup.
+     * The activity line is omitted when the activity is unknown (not shown
+     * as "unknown"); {@code evalLine} is null outside eval mode; embedded
+     * newlines are preserved while long eval lines are wrapped. {@code filterNote} is null unless the row
+     * is a filter exemption. The timestamp is relative ("2h ago") — the raw
+     * {@code Instant} toString it replaced was unreadable in a tooltip.
+     */
+    static String sessionRowTooltipText(String displayName, String status, String agent,
+            String evalLine, String activityLabel, Instant lastOpenedAt,
+            String workingDirectoryText, String filterNote) {
+        StringBuilder text = new StringBuilder(UiFormats.wrap(displayName, UiFormats.TOOLTIP_LINE_WIDTH));
+        text.append('\n').append(UiFormats.labeledLine("Status", status, UiFormats.TOOLTIP_LINE_WIDTH));
+        text.append('\n').append(UiFormats.labeledLine("Agent", agent, UiFormats.TOOLTIP_LINE_WIDTH));
+        if (evalLine != null && !evalLine.isBlank()) {
+            text.append('\n').append(UiFormats.wrap(evalLine, UiFormats.TOOLTIP_LINE_WIDTH));
+        }
+        if (activityLabel != null) {
+            text.append('\n').append(UiFormats.labeledLine("Activity", activityLabel, UiFormats.TOOLTIP_LINE_WIDTH));
+        }
+        text.append('\n').append(UiFormats.labeledLine(
+                "Last opened", UiFormats.relativeTime(lastOpenedAt), UiFormats.TOOLTIP_LINE_WIDTH));
+        text.append('\n').append(UiFormats.labeledLine(
+                "Working directory", workingDirectoryText, UiFormats.TOOLTIP_LINE_WIDTH));
+        if (filterNote != null) {
+            text.append('\n').append(filterNote);
+        }
+        return text.toString();
     }
 
     /**
@@ -3185,20 +3217,18 @@ public final class RepositorySidebar extends VBox {
             Tooltip rowTip = sessionTooltips.computeIfAbsent(session.id(), key -> new Tooltip());
             String workingDirectoryText = session.worktreeRoot().isEmpty() && repository.isRemote()
                     ? repository.remote().host() + ":" + repository.remote().remotePath()
-                    : session.workingDirectory().toString();
-            rowTip.setText(session.displayName()
-                    + "\nStatus: " + session.status()
-                    + "\nAgent: " + AgentLabels.displayName(agentRegistry, session)
-                    + (session.evalMode() ? "\n" + evalTooltipLine(session) : "")
-                    + (activity == SessionActivity.UNKNOWN ? ""
-                            : "\nActivity: "
-                                    + activityLabel(activity))
-                    + "\nLast opened: " + session.lastOpenedAt()
-                    + "\nWorking directory: " + workingDirectoryText);
-            if (filter.isActive() && !filter.matches(session) && isExempt(session.id())) {
-                rowTip.setText(rowTip.getText()
-                        + "\nShown because it is open — it does not match the current filter.");
-            }
+                    : UiFormats.abbreviateHome(session.workingDirectory().toString());
+            rowTip.setText(sessionRowTooltipText(
+                    session.displayName(),
+                    String.valueOf(session.status()),
+                    AgentLabels.displayName(agentRegistry, session),
+                    session.evalMode() ? evalTooltipLine(session) : null,
+                    activity == SessionActivity.UNKNOWN ? null : activityLabel(activity),
+                    session.lastOpenedAt(),
+                    workingDirectoryText,
+                    filter.isActive() && !filter.matches(session) && isExempt(session.id())
+                            ? "Shown because it is open — it does not match the current filter."
+                            : null));
             Tooltip.install(row, rowTip);
             row.setOnMouseClicked(event -> {
                 if (event.getButton() == MouseButton.PRIMARY) {

@@ -1663,12 +1663,14 @@ final class OpenSessionTab {
         tabTitleLabel.setText(displayName);
         headerTitle.setText(displayName);
         // The title is clamped (maxWidth 160 / ELLIPSIS), so a hover tooltip
-        // carries the full name a truncated tab strip cannot show.
+        // carries the full name a truncated tab strip cannot show — wrapped,
+        // not one long line, however long the agent-generated title is.
+        String wrappedName = UiFormats.wrap(displayName, UiFormats.TOOLTIP_LINE_WIDTH);
         if (tabTitleLabel.getTooltip() != null) {
-            tabTitleLabel.getTooltip().setText(displayName);
+            tabTitleLabel.getTooltip().setText(wrappedName);
         }
         if (headerTitle.getTooltip() != null) {
-            headerTitle.getTooltip().setText(displayName);
+            headerTitle.getTooltip().setText(wrappedName);
         }
     }
 
