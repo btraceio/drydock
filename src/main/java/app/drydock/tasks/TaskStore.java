@@ -187,6 +187,87 @@ public final class TaskStore implements AutoCloseable {
     }
 
     /**
+     * Moves one task to another registered repository's directory and
+     * returns its committed document (the file layout is the project
+     * attachment, D2): the task keeps its id and every stored byte --
+     * {@code ~/<root>/<repository-id>/<task-id>.md} becomes
+     * {@code <root>/<target>/<task-id>.md} by one atomic move under the
+     * single writer. The move is a no-op returning the located document
+     * when the task already lives under {@code target}. Both the source
+     * and the target paths are consulted against the unsaved-content
+     * guard -- a file with unsaved editor changes must not be moved away
+     * from under its editor, and a move must not land on an editor's
+     * unsaved buffer -- then the file is moved without
+     * {@code REPLACE_EXISTING}: a file already at the target is a broken
+     * or foreign store entry the scan refuses visibly, never a silent
+     * overwrite. A successful move re-scans under the same lock and
+     * publishes the committed snapshot exactly as create and update do;
+     * a failed move publishes nothing and leaves both files untouched.
+     *
+     * <p>The id needs no collision check across repositories (D4: ids
+     * are unique across ALL of them, and {@link #locate} has just
+     * settled that on the fresh scan), so the whole operation is one
+     * rename, not a copy-then-delete: an interrupted move never leaves
+     * two copies or none.</p>
+     */
+    public TaskDocument move(TaskId id, RepositoryId target) throws TaskStoreException {
+        Objects.requireNonNull(target, "target");
+        Committed committed = write(() -> {
+            TaskDocument current = locate(id, TaskFiles.scan(root));
+            if (current.repository().equals(target)) {
+                return new Committed(current, null);
+            }
+            Path source = root.resolve(current.repository().toString()).resolve(id.text() + ".md");
+            Path destination = root.resolve(target.toString()).resolve(id.text() + ".md");
+            for (Path path : List.of(source, destination)) {
+                if (guard.hasUnsavedContent(path)) {
+                    throw new TaskStoreException(path + " has unsaved changes in the editor; "
+                            + "save or close it before moving the task");
+                }
+            }
+            try {
+                Files.createDirectories(destination.getParent());
+                if (Files.exists(destination)) {
+                    throw new TaskStoreException("A file already exists at the move target " + destination
+                            + "; remove it before moving the task there");
+                }
+                Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                try {
+                    Files.move(source, destination);
+                } catch (IOException failure) {
+                    throw new TaskStoreException("The task '" + id.text()
+                            + "' could not be moved to " + destination.getParent() + ": "
+                            + failure.getMessage(), failure);
+                }
+            } catch (IOException e) {
+                throw new TaskStoreException("The task '" + id.text()
+                        + "' could not be moved to " + destination.getParent() + ": "
+                        + e.getMessage(), e);
+            }
+            TaskDocument moved;
+            try {
+                moved = TaskFileReader.parse(id, target, Files.readString(destination,
+                        StandardCharsets.UTF_8), current.created().orElse(null)).document();
+            } catch (IOException | TaskFormatException e) {
+                throw new TaskStoreException("The task '" + id.text() + "' was moved to " + destination
+                        + " but cannot be read back: " + e.getMessage(), e);
+            }
+            try {
+                return new Committed(moved, TaskFiles.scan(root));
+            } catch (IOException e) {
+                LOG.log(Level.WARNING,
+                        () -> "A task file was moved but " + root + " could not be re-scanned: " + e);
+                return new Committed(moved, null);
+            }
+        });
+        if (committed.snapshot() != null) {
+            publish(committed.snapshot());
+        }
+        return committed.document();
+    }
+
+    /**
      * {@code updates}, with {@code done_at} set to {@code now} when they move
      * {@code current} to {@link TaskStatus#DONE} and name no {@code doneAt}
      * of their own. Pure.

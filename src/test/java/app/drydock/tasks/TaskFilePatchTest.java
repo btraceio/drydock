@@ -387,4 +387,20 @@ class TaskFilePatchTest {
                 List.of(), List.of(), List.of(), Optional.of(first), "", "");
         assertEquals(Optional.of(first), parse(TaskFilePatch.newFile(done)).document().doneAt());
     }
+
+    /** The note extraction is exactly the inverse of what appendNote inserts. */
+    @Test
+    void noteParagraphsReadBackWhatAppendNoteWrote() throws Exception {
+        String bare = "---\ntitle: T\n---\n";
+        assertEquals(List.of(), TaskFilePatch.noteParagraphs(bare), "no heading, no notes");
+        String withNotes = TaskFilePatch.appendNote(
+                TaskFilePatch.appendNote(bare, "first note"), "second note");
+        assertEquals(List.of("first note", "second note"), TaskFilePatch.noteParagraphs(withNotes));
+        // Prose above the heading and later headings are not notes.
+        String mixed = "Free prose.\n\n## Session notes\nstored note\n\n## Other section\nnot a note\n";
+        assertEquals(List.of("stored note"), TaskFilePatch.noteParagraphs(mixed));
+        // Indented (ends stripped) and trailing-space lines are stripped like the writer's own output.
+        assertEquals(List.of("kept"), TaskFilePatch.noteParagraphs("  ## Session notes  \n   kept  \n"));
+        assertEquals(List.of(), TaskFilePatch.noteParagraphs(""));
+    }
 }

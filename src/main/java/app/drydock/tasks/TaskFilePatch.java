@@ -265,6 +265,41 @@ public final class TaskFilePatch {
     }
 
     /**
+     * The session-note paragraphs of a body (P7): the non-blank lines
+     * between the {@code ## Session notes} heading and the next heading
+     * line, each stripped of its indentation and trailing spaces. Prose
+     * above the heading, later headings and their sections are not notes
+     * and never come back. The inverse of what {@link #appendNote}
+     * inserts, so an editor can prefill from a stored task and append
+     * only what is new. Pure.
+     */
+    public static List<String> noteParagraphs(String body) {
+        Objects.requireNonNull(body, "body");
+        int heading = findHeading(body);
+        if (heading < 0) {
+            return List.of();
+        }
+        int headingEnd = body.indexOf('\n', heading);
+        int sectionStart = headingEnd < 0 ? body.length() : headingEnd + 1;
+        int sectionEnd = sectionEnd(body, sectionStart);
+        List<String> notes = new ArrayList<>();
+        int lineStart = sectionStart;
+        while (lineStart < sectionEnd) {
+            int eol = body.indexOf('\n', lineStart);
+            int end = eol < 0 || eol > sectionEnd ? sectionEnd : eol;
+            String line = body.substring(lineStart, end).strip();
+            if (!line.isEmpty()) {
+                notes.add(line);
+            }
+            if (eol < 0) {
+                break;
+            }
+            lineStart = eol + 1;
+        }
+        return List.copyOf(notes);
+    }
+
+    /**
      * Offset of the {@code ## Session notes} heading line, or {@code -1}.
      * {@code strip()} drops the indentation, a trailing CR and trailing
      * spaces, so an indented heading line still matches; anything else
