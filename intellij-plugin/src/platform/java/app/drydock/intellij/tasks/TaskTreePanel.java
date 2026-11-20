@@ -466,25 +466,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         cards.add(treeCard, "projects");
         setContent(cards);
 
-        AnAction switchToTask = new DumbAwareAction("Switch to Task", "Raise the task's window and select its agent",
-                AllIcons.Actions.Forward) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, e.getData(SELECTED_NODE) instanceof TaskRow);
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.BGT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                if (e.getData(SELECTED_NODE) instanceof TaskRow task) {
-                    TaskNavigator.switchTo(task.session());
-                }
-            }
-        };
         AnAction newTask = new DumbAwareAction("New Task…",
                 "Start a task for this project or worktree", AllIcons.General.Add) {
             @Override
@@ -925,7 +906,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         Map<TaskMenu.Item, AnAction> menuActions = new EnumMap<>(TaskMenu.Item.class);
         menuActions.putAll(taskActions);
         menuActions.put(TaskMenu.Item.CLEANUP_DONE_SESSIONS, new CleanupDoneSessionsAction());
-        menuActions.put(TaskMenu.Item.SWITCH_TO_TASK, switchToTask);
         menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
         menuActions.put(TaskMenu.Item.OPEN_MAIN_CHECKOUT, openMainCheckout);
@@ -985,7 +965,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         if (newTaskAction != null) {
             toolbarActions.add(new NewSessionSplitAction(newTaskAction));
         }
-        toolbarActions.add(switchToTask);
         toolbarActions.add(addOpenProject);
         toolbarActions.addSeparator();
         // One button per action instance, in the enum's values() order —
@@ -1122,7 +1101,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * behind it.
      */
     static Set<TaskMenu.Item> panelMenuItems() {
-        return EnumSet.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
+        return EnumSet.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_MAIN_CHECKOUT,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
                 TaskMenu.Item.OPEN_PULL_REQUEST, TaskMenu.Item.OPEN_GITHUB_TICKETS, TaskMenu.Item.OPEN_JIRA_TICKETS,

@@ -23,10 +23,15 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
- * "Switch to this task", from the Drydock tool window: its window to the
- * front, its agent tab selected, the keyboard in its terminal. A task
- * whose window is closed gets its window opened, with the tab showing and
- * <b>no agent started</b> — starting again stays an explicit Resume.
+ * Where "Switch to Task" lands a task. The default ({@link #switchTo}) is
+ * the window the ask came from: a running console moves here from whichever
+ * window hosted it ({@link AgentConsoles#showHere}, so the previous host's
+ * tab closes and no "Show agent" detour remains), and an idle session's tab
+ * shows here with <b>no agent started</b> — starting again stays an explicit
+ * Resume. The explicit own-window jump is the menu's second entry
+ * ({@code AgentConsoles#jumpToOwnWindow}); {@link #openOwnWindow} serves
+ * Resume in Its Own Window, which must run its resume inside the window it
+ * just raised or opened.
  */
 public final class TaskNavigator {
 
@@ -48,13 +53,12 @@ public final class TaskNavigator {
     }
 
     /**
-     * What to tell the user instead of opening a window, when the task has
-     * no open window and its folder is gone (a worktree removed outside
-     * Drydock). Pure.
+     * What to tell the user instead of showing anything, when the task's
+     * folder is gone (a worktree removed outside Drydock). Pure.
      */
-    static Optional<String> missingFolderMessage(boolean windowOpen, boolean folderExists, String taskName,
+    static Optional<String> missingFolderMessage(boolean folderExists, String taskName,
                                                  Path directory) {
-        if (windowOpen || folderExists) {
+        if (folderExists) {
             return Optional.empty();
         }
         return Optional.of("The folder of \"" + taskName + "\" is gone: " + directory
@@ -62,34 +66,69 @@ public final class TaskNavigator {
     }
 
     /**
-     * Switches to {@code session}. Resolving the window touches the disk
-     * (canonical paths), so it runs on the plugin's executor; the switch
-     * itself happens on the EDT.
-     */
-    public static void switchTo(ManagedAgentSession session) {
-        switchTo(session, target -> { });
-    }
-
-    /**
      * EDT. Switches to the session {@code id} names, as the catalog has it
-     * now -- the babysitting jumps' target, which is the other side of a
+     * now — the babysitting jumps' target, which is the other side of a
      * pairing rather than the row the user is on. A session no longer in the
      * catalog says so instead. Memory-only read of the state snapshot.
      */
-    public static void switchTo(ManagedSessionId id) {
+    public static void switchTo(Project current, ManagedSessionId id) {
         Optional<ManagedAgentSession> session = DrydockPluginService.getInstance().stateStore().state().sessions()
                 .stream()
                 .filter(candidate -> candidate.id().equals(id))
                 .findFirst();
         if (session.isEmpty()) {
-            Messages.showInfoMessage("That session is no longer in Drydock.", "Drydock");
+            Messages.showInfoMessage(current, "That session is no longer in Drydock.", "Drydock");
             return;
         }
-        switchTo(session.get());
+        switchTo(current, session.get());
     }
 
-    /** As {@link #switchTo(ManagedAgentSession)}, then {@code then} with the task's window, on the EDT. */
-    public static void switchTo(ManagedAgentSession session, Consumer<Project> then) {
+    /**
+     * Shows {@code session} in {@code current}, the window the ask came
+     * from. Resolving the folder touches the disk (canonical paths), so it
+     * runs on the plugin's executor; the show happens on the EDT. A null or
+     * disposed {@code current} (a balloon with no focused window) falls back
+     * to {@link #openOwnWindow}.
+     */
+    public static void switchTo(Project current, ManagedAgentSession session) {
+        if (current == null || current.isDisposed()) {
+            openOwnWindow(session, target -> { });
+            return;
+        }
+        DrydockPluginService plugin = DrydockPluginService.getInstance();
+        plugin.executor().execute(() -> {
+            Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
+            boolean folderExists = Files.isDirectory(directory);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (current.isDisposed()) {
+                    return;
+                }
+                missingFolderMessage(folderExists, session.displayName(), directory)
+                        .ifPresent(message -> Messages.showInfoMessage(current, message, "Drydock"));
+                if (!folderExists) {
+                    return;
+                }
+                // One agent per session across the IDE: a running console
+                // moves here (the previous host's tab closes); an idle
+                // session's tab shows here and nothing starts.
+                if (AgentExecutionRegistry.getInstance().isRunning(session.id())) {
+                    AgentConsoles.showHere(current, session.id());
+                } else {
+                    AgentConsoles.show(current, session.id());
+                }
+            }, ModalityState.nonModal());
+        });
+    }
+
+    /**
+     * Opens or raises the task's own window — the window showing its agent,
+     * else the one on its working directory — shows the tab there with no
+     * agent started, then runs {@code then} with that window, on the EDT.
+     * Resume in Its Own Window's path: the resume must land in the window
+     * this opened. Resolving the window touches the disk (canonical paths),
+     * so it runs on the plugin's executor.
+     */
+    public static void openOwnWindow(ManagedAgentSession session, Consumer<Project> then) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         plugin.executor().execute(() -> {
             Path directory = RepositoryCatalog.canonicalize(session.workingDirectory());
@@ -100,7 +139,7 @@ public final class TaskNavigator {
                     project -> Optional.ofNullable(project.getBasePath())
                             .map(base -> RepositoryCatalog.canonicalize(Path.of(base))),
                     directory);
-            Optional<String> gone = missingFolderMessage(window.isPresent(), Files.isDirectory(directory),
+            Optional<String> gone = missingFolderMessage(Files.isDirectory(directory),
                     session.displayName(), directory);
             ApplicationManager.getApplication().invokeLater(() -> {
                 if (gone.isPresent()) {

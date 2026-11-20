@@ -365,7 +365,7 @@ public final class DelayedTaskActions {
                     + "' is no longer in Drydock's session catalog.");
             return;
         }
-        TaskNavigator.switchTo(session);
+        TaskNavigator.switchTo(from, session);
     }
 
     /** The catalog session an id names, or null when it is foreign, historical or removed (D10). */

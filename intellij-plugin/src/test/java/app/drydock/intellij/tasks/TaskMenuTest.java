@@ -132,7 +132,7 @@ class TaskMenuTest {
         // hides itself when the gate fails), each link entry following its
         // own list.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_GITHUB_TICKETS,
@@ -142,7 +142,7 @@ class TaskMenuTest {
         // Every list empty: only the project window remains, never an empty
         // section, and the combined Open in GitHub/Jira entries stay out.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -155,7 +155,7 @@ class TaskMenuTest {
         TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, false, false, false,
                 List.of("https://github.com/o/r/pull/9"), List.of(), List.of());
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_PULL_REQUEST),
@@ -166,7 +166,7 @@ class TaskMenuTest {
     @Test
     void aRunningTaskRowWithAttachedLinksOffersThemBeforeCleanup() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_JIRA_TICKETS),
@@ -227,7 +227,7 @@ class TaskMenuTest {
     @Test
     void runningTaskShownElsewhereGetsEveryConditionalItem() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES, TaskMenu.Item.TRANSFER_TO),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -238,7 +238,7 @@ class TaskMenuTest {
     @Test
     void runningTaskInAnotherProjectWindowGetsShowHereButNotItsOwnClose() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SHOW_HERE),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -251,7 +251,7 @@ class TaskMenuTest {
         // The console is already here, and this window is another project's —
         // closing it would close what the user is working in.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -262,7 +262,7 @@ class TaskMenuTest {
     @Test
     void runningTaskInThisWindowsWorktreeOffersItsOwnClose() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -273,7 +273,7 @@ class TaskMenuTest {
     @Test
     void runningTaskWithNoWindowGetsNeitherShowHereNorItsOwnClose() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -293,7 +293,7 @@ class TaskMenuTest {
     @Test
     void idleTaskOfAnotherWorktreeOffersItsOwnWindow() {
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -302,10 +302,10 @@ class TaskMenuTest {
     }
 
     @Test
-    void idleTaskOfThisWindowsWorktreeHasNoOwnWindowVariant() {
-        // Its own window would be this one; plain Resume already goes there.
+    void idleTaskOfThisWindowsWorktreeAlsoOffersItsOwnWindow() {
+        // Keep the explicit own-window action available even when it targets this window.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -321,7 +321,7 @@ class TaskMenuTest {
         // remote Deactivate the strip and the tab use, so the live agent is
         // never stranded behind a Resume-only menu.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -330,7 +330,7 @@ class TaskMenuTest {
         // This window's own worktree keeps its plain Resume line; the Stop
         // joins the same section.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -344,7 +344,7 @@ class TaskMenuTest {
         // running task, whose menu already has it — keeps its byte-identical
         // list under the same facts.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -374,7 +374,7 @@ class TaskMenuTest {
         // is computed from the row's own box binding and liveness, never
         // defaulted on.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME, TaskMenu.Item.RESUME_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -642,7 +642,7 @@ class TaskMenuTest {
                 .get(0).equals(List.of(TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_TASK)));
         // No resolved target, no jump section: today's menu shape, unchanged.
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.DEACTIVATE, TaskMenu.Item.REVIEW_CHANGES),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
@@ -748,7 +748,7 @@ class TaskMenuTest {
         TaskRow open = withBranchPr(task(false, new TaskPlacement.Idle(true)),
                 GhCliService.PrInfo.PrLifecycle.OPEN, "fix-allocation-profile");
         assertEquals(List.of(
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.BABYSIT_PR),
@@ -791,7 +791,7 @@ class TaskMenuTest {
 
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SHOW_BABYSITTER),
-                List.of(TaskMenu.Item.SWITCH_TO_TASK),
+                List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 List.of(TaskMenu.Item.RESUME),
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.STOP_BABYSITTING),

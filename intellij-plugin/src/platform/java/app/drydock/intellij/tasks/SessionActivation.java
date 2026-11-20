@@ -70,7 +70,7 @@ public final class SessionActivation {
     public record Seams(Executor background, Executor edt,
                         Supplier<List<ManagedAgentSession>> catalog, Predicate<ManagedSessionId> running,
                         Predicate<ManagedAgentSession> hasConversation,
-                        Consumer<ManagedAgentSession> show, BiConsumer<Project, ManagedAgentSession> start,
+                        BiConsumer<Project, ManagedAgentSession> show, BiConsumer<Project, ManagedAgentSession> start,
                         BiConsumer<Project, String> inform) {
     }
 
@@ -115,7 +115,7 @@ public final class SessionActivation {
             return Outcome.DELETED;
         }
         if (seams.running().test(id)) {
-            seams.show().accept(session.get());
+            seams.show().accept(project, session.get());
             return Outcome.SHOWN;
         }
         if (captured == Intent.SHOW) {
