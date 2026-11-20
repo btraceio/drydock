@@ -34,6 +34,7 @@ import app.drydock.domain.ModelTiers;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
+import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
@@ -184,6 +185,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
     private final Supplier<ApplicationStateStore> stateStore;
     private final Supplier<AgentRegistry> registry;
     private final Supplier<SessionActivityWatcher> watcher;
+
+    /** The watched session's last reported activity (empty: none reported), for the write guard's busy answer. */
+    private final Function<ManagedSessionId, Optional<SessionActivity>> watchedActivity;
     private final Function<Path, CompletableFuture<RepositoryId>> repositoryIdFor;
     private final AgentConsoleHost consoles;
     private final ExecutorService executor;
@@ -248,7 +252,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin),
                 WorkspaceSettings::enabled, new BoxShell(CommandRunner.PRODUCTION),
                 new WorkspacesCli(CommandRunner.PRODUCTION), plugin.remoteSessionLiveness(),
-                DrydockSessionService::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds());
+                DrydockSessionService::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds(),
+                BabysitGit.PRODUCTION, plugin.activityMonitor()::current);
     }
 
     /**
@@ -320,13 +325,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
             AgentExecutionRegistry.RemoteClientEnds clientEnds) {
         this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor, stdioMcpServers,
                 mcpAccess, claims, taskLaunchResources, workspaceSessionsEnabled, boxShell, workspacesCli,
-                remoteLiveness, remoteConfirm, clientEnds, BabysitGit.PRODUCTION);
+                remoteLiveness, remoteConfirm, clientEnds, BabysitGit.PRODUCTION, id -> Optional.empty());
     }
 
     /**
      * As the full seam above, with the babysitting git seam: tests answer the
      * worktree placement, the detached checkout and the remote-tip fetch
      * without a network; every other construction site gets the real git.
+     * {@code watchedActivity} is the write guard's turn-liveness answer for
+     * the watched session (empty when none is reported).
      */
     DrydockSessionService(CompletableFuture<Void> initialization, Supplier<ApplicationStateStore> stateStore,
             Supplier<AgentRegistry> registry, Supplier<SessionActivityWatcher> watcher,
@@ -337,7 +344,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
             BooleanSupplier workspaceSessionsEnabled, BoxShell boxShell, WorkspacesCli workspacesCli,
             RemoteSessionLiveness remoteLiveness,
             Function<String, CompletableFuture<Boolean>> remoteConfirm,
-            AgentExecutionRegistry.RemoteClientEnds clientEnds, BabysitGit babysitGit) {
+            AgentExecutionRegistry.RemoteClientEnds clientEnds, BabysitGit babysitGit,
+            Function<ManagedSessionId, Optional<SessionActivity>> watchedActivity) {
         this.initialization = Objects.requireNonNull(initialization, "initialization");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -354,6 +362,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this.remoteConfirm = Objects.requireNonNull(remoteConfirm, "remoteConfirm");
         this.clientEnds = Objects.requireNonNull(clientEnds, "clientEnds");
         this.babysitGit = Objects.requireNonNull(babysitGit, "babysitGit");
+        this.watchedActivity = Objects.requireNonNull(watchedActivity, "watchedActivity");
         this.ends = new SessionEnds(stateStore, registry, executor, mcpAccess, claims, boxShell,
                 () -> remoteLiveness, clientEnds);
     }
@@ -2946,12 +2955,15 @@ public final class DrydockSessionService implements AgentExecutionListener {
     /**
      * Whether {@code pairing}'s babysitter may write the PR branch {@code
      * prBranch} now (see {@link BabysitWriteGuard}): the watched session
-     * must have neither a live agent in this IDE nor a launch, resume or
-     * removal in flight -- the in-memory truth, never the persisted status,
+     * must have no agent turn in flight and no launch, resume or removal of
+     * it in flight -- the in-memory truth, never the persisted status,
      * which survives a crash as whatever it last was -- and, after a fresh
      * one-branch fetch in the main checkout, the remote tip must equal
      * {@code knownBase}, the commit the babysitter's worktree was checked out
-     * at or last synced to. Liveness is checked before the fetch (no network
+     * at or last synced to. A live agent process alone is not busy: its
+     * interactive TUI sits at its prompt for the session's whole life, and a
+     * guard that read that as busy never let a single delta through. Liveness
+     * is checked before the fetch (no network
      * round trip for a busy watched session) and again after it (the fetch
      * can take minutes). On the executor; never fails: git problems are a
      * {@link BabysitWriteGuard.Verdict.GitFailed}.
@@ -2962,7 +2974,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Objects.requireNonNull(prBranch, "prBranch");
         Objects.requireNonNull(knownBase, "knownBase");
         return initialization.thenApplyAsync(unused -> {
-            if (claims.isClaimedOrLive(pairing.watchedId())) {
+            if (watchedTurnInFlight(pairing.watchedId())) {
                 return new BabysitWriteGuard.Verdict.WatchedBusy();
             }
             Optional<Path> root = stateStore.get().state().repositories().stream()
@@ -2978,11 +2990,23 @@ public final class DrydockSessionService implements AgentExecutionListener {
             } catch (GitException | IllegalArgumentException e) {
                 return new BabysitWriteGuard.Verdict.GitFailed(e.getMessage() == null ? e.toString() : e.getMessage());
             }
-            if (claims.isClaimedOrLive(pairing.watchedId())) {
+            if (watchedTurnInFlight(pairing.watchedId())) {
                 return new BabysitWriteGuard.Verdict.WatchedBusy();
             }
             return BabysitWriteGuard.verdictFor(tip, knownBase);
         }, executor);
+    }
+
+    /**
+     * A launch, resume or removal of the watched session in flight, or its
+     * agent reported mid-turn ({@link SessionActivity#BUSY}): the only two
+     * things a babysitter's write could race. See {@link #babysitterMayWrite}.
+     */
+    private boolean watchedTurnInFlight(ManagedSessionId watchedId) {
+        if (claims.isClaimed(watchedId)) {
+            return true;
+        }
+        return watchedActivity.apply(watchedId).filter(a -> a == SessionActivity.BUSY).isPresent();
     }
 
     // ---- persistence helpers (all through the single writer, C4) -------------
