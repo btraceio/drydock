@@ -82,8 +82,9 @@ public class AllSessionsActionPlatformTest extends HeavyPlatformTestCase {
                     Optional.empty(), false));
         }
         SessionActivation fake = new SessionActivation(new SessionActivation.Seams(Runnable::run, Runnable::run,
-                () -> AllSessionsAction.catalog.get(), id -> false, s -> false, s -> { },
-                (project, session) -> activated.add(session.id()), (project, message) -> { }));
+                () -> AllSessionsAction.catalog.get(), id -> false, s -> false,
+                (project, session) -> { }, (project, session) -> activated.add(session.id()),
+                (project, message) -> { }));
         AllSessionsAction.activation = () -> fake;
         AllSessionsAction.presenter = (project, rows) -> shown.add(rows);
     }

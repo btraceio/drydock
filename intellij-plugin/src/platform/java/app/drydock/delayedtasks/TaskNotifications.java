@@ -261,7 +261,7 @@ public final class TaskNotifications implements AutoCloseable {
                 refuse("'" + title(latest, task) + "' has no session left in Drydock's session catalog.");
                 return;
             }
-            TaskNavigator.switchTo(session);
+            TaskNavigator.switchTo(focusedProject(), session);
         }
 
         /** The latest CACHED watched snapshot (T21a's discipline), or null before the first. */

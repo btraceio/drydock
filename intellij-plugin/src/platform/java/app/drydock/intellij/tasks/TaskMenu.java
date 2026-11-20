@@ -64,10 +64,10 @@ final class TaskMenu {
 
     /** One menu entry; the action behind it lives in the panel or {@link TaskActions}. */
     enum Item {
-        /** Raise the task's window and select its agent console; "Switch" when the task is idle. */
+        /** Show the task's agent console in this window; an idle agent is never started. */
         SWITCH_TO_TASK,
-        /** Move an agent another window shows into this one; absent when it is shown here already. */
-        SHOW_HERE,
+        /** Raise the task's own worktree window — opening it when closed — and show its agent there. */
+        SWITCH_TO_TASK_IN_OWN_WINDOW,
         DEACTIVATE,
         /** Ask the task's agent to review its changes, not the user viewing them. */
         REVIEW_CHANGES,
@@ -323,11 +323,11 @@ final class TaskMenu {
                 facts.showTask() != null ? Item.SHOW_TASK : null, jumps[0], jumps[1]);
     }
 
-    /** A running task: its tree links, then switch or pull it here, work on it, manage it, clean up last. */
+    /** A running task: its tree links, then switch — here or to its own window — work on it, manage it, clean up last. */
     private static List<List<Item>> running(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 links(row, facts),
-                section(Item.SWITCH_TO_TASK, shownElsewhere(row) ? Item.SHOW_HERE : null),
+                section(Item.SWITCH_TO_TASK, Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 section(Item.DEACTIVATE,
                         TaskActions.reviewsChanges(row) ? Item.REVIEW_CHANGES : null,
                         facts.transferAvailable() ? Item.TRANSFER_TO : null),
@@ -348,7 +348,7 @@ final class TaskMenu {
     private static List<List<Item>> idle(TaskRow row, MenuFacts facts) {
         return nonEmpty(List.of(
                 links(row, facts),
-                List.of(Item.SWITCH_TO_TASK),
+                List.of(Item.SWITCH_TO_TASK, Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
                 section(facts.remoteStop() ? Item.DEACTIVATE : null,
                         Item.RESUME, TaskActions.resumesElsewhere(row) ? Item.RESUME_IN_OWN_WINDOW : null),
                 List.of(Item.RENAME, Item.ASSOCIATE_PR, Item.FLAG, Item.NEW_TASK),
@@ -384,17 +384,6 @@ final class TaskMenu {
             }
         }
         return List.copyOf(present);
-    }
-
-    /**
-     * Pure: whether another window shows the agent — its own worktree's, or
-     * a hosting project's — so Show Here moves it here instead of re-showing
-     * the console this window already has. The same rule as the toolbar's
-     * Show Here.
-     */
-    private static boolean shownElsewhere(TaskRow row) {
-        return row.placement() instanceof TaskPlacement.OwnWindow
-                || row.placement() instanceof TaskPlacement.OtherWindow;
     }
 
     /** The GitHub URL of an issue or pull request row, when it has one. Pure. */

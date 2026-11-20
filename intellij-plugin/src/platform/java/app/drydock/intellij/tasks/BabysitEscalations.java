@@ -184,7 +184,7 @@ public final class BabysitEscalations implements DrydockSessionsListener {
         Notification balloon = NotificationGroupManager.getInstance().getNotificationGroup(GROUP)
                 .createNotification(title(due), content(due), NotificationType.WARNING);
         balloon.addAction(NotificationAction.createSimpleExpiring("Show Session",
-                () -> TaskNavigator.switchTo(watched)));
+                () -> TaskNavigator.switchTo(project, watched)));
         balloon.notify(project);
     }
 }

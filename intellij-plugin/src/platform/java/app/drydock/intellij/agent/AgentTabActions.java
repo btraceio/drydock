@@ -434,7 +434,7 @@ public final class AgentTabActions {
 
         @Override
         void perform(AgentTabCommands.Target target, @Nullable SessionCommands.State presented) {
-            AgentTabCommands.babysitOf(target).ifPresent(part -> TaskNavigator.switchTo(part.counterpart()));
+            AgentTabCommands.babysitOf(target).ifPresent(part -> TaskNavigator.switchTo(target.project(), part.counterpart()));
         }
     }
 

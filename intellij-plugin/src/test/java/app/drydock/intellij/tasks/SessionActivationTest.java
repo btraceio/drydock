@@ -50,7 +50,7 @@ class SessionActivationTest {
         SessionActivation activation() {
             return new SessionActivation(new SessionActivation.Seams(task -> background.execute(task), Runnable::run,
                     () -> List.copyOf(catalog), running::contains, s -> probe.test(s),
-                    s -> log.add("show " + s.displayName()),
+                    (project, s) -> log.add("show " + s.displayName()),
                     (project, s) -> log.add("start " + s.displayName()),
                     (project, message) -> log.add("inform " + message)));
         }

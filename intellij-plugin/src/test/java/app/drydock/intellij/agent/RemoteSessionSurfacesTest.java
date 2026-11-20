@@ -194,12 +194,14 @@ public class RemoteSessionSurfacesTest extends BasePlatformTestCase {
     // ---- the tab title (AgentConsoleTabPresentation) ----------------------------
 
     public void testTabTitleNamesTheBoxForRemoteRowsOnly() {
-        // The tab is the one line the user scans to tell sessions apart: a
-        // box row names its box so it cannot pass for a local one. A local
-        // row's title is the pre-remote text, unchanged.
+        // The tab is the one line the user scans to tell sessions apart: the
+        // repository name before the task name (this test seeds no catalog
+        // repository, so the working directory's last segment stands in —
+        // the box clone for a remote row), and a box row names its box so
+        // it cannot pass for a local one.
         ManagedAgentSession local = session(SessionMode.WRITES);
-        assertEquals("Fix the parser", AgentConsoleTabPresentation.tabTitle(local));
-        assertEquals("Fix the parser · RO",
+        assertEquals("repo · Fix the parser", AgentConsoleTabPresentation.tabTitle(local));
+        assertEquals("repo · Fix the parser · RO",
                 AgentConsoleTabPresentation.tabTitle(session(SessionMode.READ_ONLY)));
 
         ManagedAgentSession remote = new ManagedAgentSession.Builder(
@@ -210,7 +212,7 @@ public class RemoteSessionSurfacesTest extends BasePlatformTestCase {
                 .status(SessionStatus.IDLE)
                 .workspaceBox(Optional.of(new WorkspaceBoxBinding(BOX, "/Users/dev/clone")))
                 .build();
-        assertEquals("Fix the parser · on " + BOX, AgentConsoleTabPresentation.tabTitle(remote));
+        assertEquals("clone · Fix the parser · on " + BOX, AgentConsoleTabPresentation.tabTitle(remote));
 
         ManagedAgentSession remoteReadOnly = new ManagedAgentSession.Builder(
                 local.id(), local.repositoryId(), "Fix the parser",
@@ -220,8 +222,20 @@ public class RemoteSessionSurfacesTest extends BasePlatformTestCase {
                 .status(SessionStatus.IDLE)
                 .workspaceBox(Optional.of(new WorkspaceBoxBinding(BOX, "/Users/dev/clone")))
                 .build();
-        assertEquals("Fix the parser · RO · on " + BOX,
+        assertEquals("clone · Fix the parser · RO · on " + BOX,
                 AgentConsoleTabPresentation.tabTitle(remoteReadOnly));
+    }
+
+    public void testTabTitleFallsBackToFullRootWorkingDirectory() {
+        ManagedAgentSession root = new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), RepositoryId.newId(), "Root task",
+                AgentBinding.unlaunched(AgentKind.CLAUDE, SessionMode.WRITES),
+                SessionWorkspace.inRepository(Path.of("/")),
+                Instant.EPOCH)
+                .status(SessionStatus.IDLE)
+                .build();
+
+        assertEquals("/ · Root task", AgentConsoleTabPresentation.tabTitle(root));
     }
 
     // ---- the command state (SessionCommands) ------------------------------------

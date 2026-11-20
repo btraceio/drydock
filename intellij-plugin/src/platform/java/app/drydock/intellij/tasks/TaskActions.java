@@ -171,15 +171,13 @@ final class TaskActions {
                 (project, row) -> SessionCommandHandlers.deactivate(project, row.session(), false, () -> {}));
         AnAction askReview = task("Ask Agent to Review Changes", "Ask this task's agent to review its changes",
                 AllIcons.Actions.Diff, TaskActions::reviewsChanges, TaskActions::reviewChanges);
+        // The switch: this window by default — a running console moves here,
+        // an idle tab shows here and nothing starts — with the task's own
+        // worktree window the explicit alternative.
         AnAction deactivateAndClose = task("Deactivate && Close Window",
                 "Deactivate the agent and close its window", AllIcons.Actions.Close,
                 TaskActions::closesOwnWindow, TaskActions::notBusy,
                 (project, row) -> SessionCommandHandlers.deactivate(project, row.session(), true, () -> {}));
-        // F5: moves an agent another window shows into this one.
-        AnAction showHere = task("Show Here", "Move this agent's console into this window", AllIcons.Actions.Show,
-                row -> row.placement() instanceof TaskPlacement.OwnWindow
-                        || row.placement() instanceof TaskPlacement.OtherWindow,
-                (project, row) -> AgentConsoles.showHere(project, row.session().id()));
         // Resume in this window, hosted when the task is another
         // worktree's — as New task does; its own window is the
         // explicit alternative.
@@ -190,7 +188,7 @@ final class TaskActions {
                 "Open the task's own window and resume its conversation there",
                 AllIcons.Actions.MoveTo2, TaskActions::resumesElsewhere, TaskActions::launchable,
                 TaskActions::resumesInOwnWindow,
-                (project, row) -> TaskNavigator.switchTo(row.session(),
+                (project, row) -> TaskNavigator.openOwnWindow(row.session(),
                         target -> AgentConsoles.resumeOrStart(target, row.session())));
         AnAction transfer = task("Transfer to…", "Continue this live task with another installed agent",
                 AllIcons.Actions.Refresh, row -> SessionTransfer.available(row.session(), row.activity()),
@@ -213,9 +211,16 @@ final class TaskActions {
                 row -> true, row -> notBusy(row) && AssociatePullRequest.available(row.session().id()),
                 (project, row) -> AssociatePullRequest.show(project, row.session())));
         actions.put(TaskMenu.Item.DEACTIVATE, deactivate);
+        actions.put(TaskMenu.Item.SWITCH_TO_TASK, task("Switch to Task",
+                "Show the task's agent console in this window; an idle agent is never started",
+                AllIcons.Actions.Forward, row -> true,
+                (project, row) -> TaskNavigator.switchTo(project, row.session())));
+        actions.put(TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW, task("Switch to Task in Its Own Window",
+                "Raise the task's own worktree window — opening it when closed — and show its agent there",
+                AllIcons.Actions.MoveTo2, row -> true,
+                (project, row) -> AgentConsoles.jumpToOwnWindow(project, row.session().id(), false)));
         actions.put(TaskMenu.Item.REVIEW_CHANGES, askReview);
         actions.put(TaskMenu.Item.DEACTIVATE_AND_CLOSE, deactivateAndClose);
-        actions.put(TaskMenu.Item.SHOW_HERE, showHere);
         actions.put(TaskMenu.Item.RESUME, resume);
         actions.put(TaskMenu.Item.RESUME_IN_OWN_WINDOW, resumeInOwnWindow);
         actions.put(TaskMenu.Item.TRANSFER_TO, transfer);
@@ -240,11 +245,11 @@ final class TaskActions {
         actions.put(TaskMenu.Item.SHOW_BABYSITTER, task("Go to Babysitter",
                 "Switch to the babysitter watching this session's pull request", AllIcons.Actions.Forward,
                 BabysitActions::showsBabysitter,
-                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(part.counterpart()))));
+                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(project, part.counterpart()))));
         actions.put(TaskMenu.Item.SHOW_WATCHED, task("Go to Watched Session",
                 "Switch to the session whose pull request this babysitter watches", AllIcons.Actions.Back,
                 BabysitActions::showsWatched,
-                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(part.counterpart()))));
+                (project, row) -> row.babysit().ifPresent(part -> TaskNavigator.switchTo(project, part.counterpart()))));
         return actions;
     }
 

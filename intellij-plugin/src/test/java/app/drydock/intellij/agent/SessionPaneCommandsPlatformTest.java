@@ -130,7 +130,7 @@ public class SessionPaneCommandsPlatformTest extends BasePlatformTestCase {
         assertEquals("the older answer did not repaint", SessionPane.Body.FAILED, pane.shown());
         assertTrue("a newer generation replaces it", pane.applyFacts(result(id, 6, known())));
         assertEquals(SessionPane.Body.EMPTY, pane.shown());
-        assertEquals("the title is the shared presentation's", "Pane commands", pane.title());
+        assertEquals("the title is the shared presentation's", "pane-commands · Pane commands", pane.title());
         assertEquals("applying facts reaches only the host's cached read", 0, host.otherCalls);
         pane.dispose();
         assertFalse("a result captured before disposal is not applied", pane.applyFacts(result(id, 7, SessionPaneFacts.failed("late"))));
@@ -164,7 +164,7 @@ public class SessionPaneCommandsPlatformTest extends BasePlatformTestCase {
         SessionPane pane = pane();
         host.cached = known();
         pane.refresh();
-        assertEquals("Pane commands · on box-one", pane.title());
+        assertEquals("clone · Pane commands · on box-one", pane.title());
         String text = UIUtil.findComponentsOfType(pane.strip(), JBLabel.class).stream()
                 .map(JBLabel::getText).collect(Collectors.joining("|"));
         assertTrue("the strip names the box: " + text, text.contains("box-one"));

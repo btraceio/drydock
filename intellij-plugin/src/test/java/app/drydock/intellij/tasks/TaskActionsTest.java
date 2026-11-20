@@ -227,8 +227,6 @@ class TaskActionsTest {
         assertEquals(actions.size() - 3 - TaskActions.MENU_ONLY.size(), toolbar.size(),
                 "four removal keys share one instance");
         // values() is the toolbar's order: the enum's declaration order.
-        assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.SHOW_HERE))
-                < toolbar.indexOf(actions.get(TaskMenu.Item.DEACTIVATE)));
         assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.DONE_WITH_TASK))
                 < toolbar.indexOf(actions.get(TaskMenu.Item.RESUME)));
         assertTrue(toolbar.indexOf(actions.get(TaskMenu.Item.RESUME))
