@@ -78,6 +78,9 @@ public final class PiAgentProvider implements AgentProvider {
     /** Read once and removed by {@code PiActivityExtensionSource}; where state words are written. */
     private static final String ACTIVITY_ENV_VAR = "DRYDOCK_ACTIVITY_DIR";
 
+    /** Read once and removed by {@code PiPrScanExtensionSource}; where PR references are written. */
+    private static final String PR_SCAN_ENV_VAR = "DRYDOCK_PR_DIR";
+
     /** Bounds a hung filesystem: a stuck write costs a tab its tools, never its launch. */
     private static final Duration INSTALL_JOIN = Duration.ofSeconds(5);
 
@@ -93,7 +96,9 @@ public final class PiAgentProvider implements AgentProvider {
     private SessionIdDiscovery idDiscovery;
     private PiExtensionInstaller installer;
     private PiExtensionInstaller activityInstaller;
+    private PiExtensionInstaller prScanInstaller;
     private PiActivityReporter activityReporter;
+    private Path prDirectory;
     private ExecutorService background;
     /** Snapshotted by the settings read at {@link #init}; read by {@link #sphinxReview()} on the FX thread. */
     private volatile Optional<SphinxReviewSupport> sphinxReview = Optional.empty();
@@ -109,6 +114,7 @@ public final class PiAgentProvider implements AgentProvider {
     private final AtomicReference<CompletableFuture<PiCapabilities>> capabilities = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> extensionFile = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Path>> activityExtensionFile = new AtomicReference<>();
+    private final AtomicReference<CompletableFuture<Path>> prScanExtensionFile = new AtomicReference<>();
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
     public PiAgentProvider() {
@@ -149,7 +155,10 @@ public final class PiAgentProvider implements AgentProvider {
         this.idDiscovery = new SnapshotClaimDiscovery(store);
         this.installer = new PiExtensionInstaller(ctx.stateDirectory());
         this.activityInstaller = PiExtensionInstaller.activity(ctx.stateDirectory());
-        this.activityReporter = new PiActivityReporter(activityInstaller, ctx.activityDirectory());
+        this.prScanInstaller = PiExtensionInstaller.prScan(ctx.stateDirectory());
+        this.prDirectory = ctx.stateDirectory().resolve("pr-links");
+        this.activityReporter = new PiActivityReporter(activityInstaller,
+                prScanInstaller, ctx.activityDirectory(), prDirectory);
         this.background = ctx.backgroundExecutor();
         // A settings read (a few ms), so it runs here rather than on the
         // background executor: the registry snapshots sphinxReview() right
@@ -376,15 +385,22 @@ public final class PiAgentProvider implements AgentProvider {
         String piSessionId = "PI_SESSION_ID=" + AgentCommands.shellQuote(java.util.UUID.randomUUID().toString()) + " ";
         // Attention reporting is independent of MCP and eval: it rides every launch.
         Path activityExtension = installedActivityExtension();
+        Path prScanExtension = installedPrScanExtension();
 
         Map<String, Path> literals = new LinkedHashMap<>();
         if (activityExtension != null) {
             literals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
         }
+        if (prScanExtension != null) {
+            literals.put(PR_SCAN_ENV_VAR, activityReporter.prDirectory());
+        }
         String envPrefix = AgentCommands.envPrefix(ENV_SCRUB, literals, Map.of());
         String extensionFlags = "";
         if (activityExtension != null) {
             extensionFlags += " -e " + AgentCommands.shellQuote(activityExtension.toString());
+        }
+        if (prScanExtension != null) {
+            extensionFlags += " -e " + AgentCommands.shellQuote(prScanExtension.toString());
         }
 
         if (configFile.isEmpty()) {
@@ -424,6 +440,9 @@ public final class PiAgentProvider implements AgentProvider {
         bridgeLiterals.put(CONFIG_ENV_VAR, configFile.orElseThrow());
         if (activityExtension != null) {
             bridgeLiterals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
+        }
+        if (prScanExtension != null) {
+            bridgeLiterals.put(PR_SCAN_ENV_VAR, activityReporter.prDirectory());
         }
         return AgentCommands.envPrefix(ENV_SCRUB, bridgeLiterals, Map.of())
                 + evalEnvSuffix(eval) + piSessionId + piBinary()
@@ -504,6 +523,28 @@ public final class PiAgentProvider implements AgentProvider {
         if (extension != null && !Files.isReadable(extension)) {
             activityExtensionFile.compareAndSet(activity, null);
             LOG.log(Level.WARNING, "Pi activity extension could not be installed; launching without attention reporting");
+            return null;
+        }
+        return extension;
+    }
+
+    /**
+     * The installed PR-scan extension's path, or null on any failure. Same
+     * degrade-not-fail contract as the activity extension: association is a
+     * convenience, and {@code pi -e <missing>} would take the tab down.
+     */
+    private Path installedPrScanExtension() {
+        CompletableFuture<Path> prScan = memoised(prScanExtensionFile, () -> {
+            try {
+                return prScanInstaller.install();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }, written -> true);
+        Path extension = join(prScan, INSTALL_JOIN, null);
+        if (extension != null && !Files.isReadable(extension)) {
+            prScanExtensionFile.compareAndSet(prScan, null);
+            LOG.log(Level.WARNING, "Pi PR-scan extension could not be installed; launching without PR association");
             return null;
         }
         return extension;
