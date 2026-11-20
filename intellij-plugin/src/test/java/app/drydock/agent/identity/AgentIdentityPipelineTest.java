@@ -60,6 +60,26 @@ class AgentIdentityPipelineTest {
     }
 
     @Test
+    void aFailedOriginLookupRejectsAConfiguredCredentialHelper(@TempDir Path base) {
+        AgentIdentityPipeline pipeline = pipeline(base, "GIT_CREDENTIAL_HELPER_SPEC=!/opt/glue/helper\\n");
+
+        AgentIdentityException thrown = assertThrows(AgentIdentityException.class,
+                () -> pipeline.prepare(session, "glue", base, Optional.empty(), true));
+
+        assertTrue(thrown.getMessage().contains("repository origin could not be resolved"), thrown.getMessage());
+        assertTrue(!Files.exists(base.resolve("identity").resolve("env").resolve(session + ".env")));
+    }
+
+    @Test
+    void aFailedOriginLookupDoesNotRejectIdentityWithoutAHelper(@TempDir Path base) throws Exception {
+        AgentIdentityPipeline pipeline = pipeline(base, "GH_TOKEN=tok\\n");
+
+        AgentIdentityPipeline.Session prepared = pipeline.prepare(session, "glue", base, Optional.empty(), true);
+
+        assertEquals("0", rendered(prepared.envFile()).get("GIT_CONFIG_COUNT"));
+    }
+
+    @Test
     void withoutAHelperSpecThereIsNoGitConfigPlumbing(@TempDir Path base) throws Exception {
         AgentIdentityPipeline pipeline = pipeline(base, "GH_TOKEN=tok\n");
 

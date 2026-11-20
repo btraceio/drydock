@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -36,6 +37,51 @@ class GhWrapperScriptTest {
         assertEquals(0, run.exitCode());
         assertTrue(run.stdout().contains("token [fresh-1]"), run.stdout());
         assertTrue(run.stdout().contains("args [pr list --limit 1]"), run.stdout());
+    }
+
+    @Test
+    void removesItsDirectoryByValueWhenItIsNotFirstInPath(@TempDir Path base) throws Exception {
+        Path wrapperBin = AgentIdentityWrapper.install(base);
+        Path fake = fakeGh(base, "#!/bin/sh\necho token=$GH_TOKEN\n");
+        Map<String, String> environment = environment(wrapperBin, fake, "echo GH_TOKEN=fresh");
+        environment.put("PATH", fake.getParent() + ":" + wrapperBin + ":" + System.getenv("PATH"));
+
+        Run run = runWrapper(wrapperBin, base, environment, "api", "status");
+
+        assertEquals(0, run.exitCode());
+        assertTrue(run.stdout().contains("token=fresh"), run.stdout());
+    }
+
+    @Test
+    void credentialCommandReceivesEofOnStdin(@TempDir Path base) throws Exception {
+        Path bin = AgentIdentityWrapper.install(base);
+        Path fake = fakeGh(base, "#!/bin/sh\necho token=$GH_TOKEN\n");
+        Map<String, String> environment = environment(bin, fake,
+                "if read value; then echo GH_TOKEN=stdin-open; else echo GH_TOKEN=stdin-closed; fi");
+
+        Run run = run("gh api", base, environment);
+
+        assertEquals(0, run.exitCode());
+        assertTrue(run.stdout().contains("token=stdin-closed"), run.stdout());
+    }
+
+    @Test
+    void aTimeoutIsALoudDistinctFailure(@TempDir Path base) throws Exception {
+        Path bin = AgentIdentityWrapper.install(base);
+        Path fake = fakeGh(base, "#!/bin/sh\necho SHOULD-NOT-RUN\n");
+        Path fakeSleep = fake.getParent().resolve("sleep");
+        Files.writeString(fakeSleep, "#!/bin/sh\ncase \"$1\" in 30|1) exit 0 ;; *) exec /bin/sleep \"$@\" ;; esac\n");
+        Files.setPosixFilePermissions(fakeSleep, java.util.Set.of(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE));
+        Map<String, String> environment = environment(bin, fake, "exec /bin/sleep 60");
+
+        Run run = run("gh api", base, environment);
+
+        assertEquals(97, run.exitCode());
+        assertTrue(run.stderr().contains("did not finish within 30s"), run.stderr());
+        assertTrue(!run.stdout().contains("SHOULD-NOT-RUN"), run.stdout());
     }
 
     @Test
@@ -111,7 +157,7 @@ class GhWrapperScriptTest {
         Run run = run("gh api", base, environment);
 
         assertEquals(97, run.exitCode());
-        assertTrue(run.stderr().contains("refusing to recurse"), run.stderr());
+        assertTrue(run.stderr().contains("no gh found on PATH beyond the wrapper itself"), run.stderr());
     }
 
     private static Path fakeGh(Path base, String script) throws IOException {
@@ -134,7 +180,20 @@ class GhWrapperScriptTest {
 
     private static Run run(String ghArguments, Path workingDirectory, Map<String, String> environment)
             throws IOException, InterruptedException {
-        ProcessBuilder builder = new ProcessBuilder("/bin/sh", "-c", "gh " + ghArguments);
+        return runCommand(List.of("/bin/sh", "-c", "gh " + ghArguments), workingDirectory, environment);
+    }
+
+    private static Run runWrapper(Path wrapperBin, Path workingDirectory, Map<String, String> environment,
+                                  String... arguments) throws IOException, InterruptedException {
+        List<String> command = new java.util.ArrayList<>();
+        command.add(wrapperBin.resolve("gh").toString());
+        command.addAll(List.of(arguments));
+        return runCommand(command, workingDirectory, environment);
+    }
+
+    private static Run runCommand(List<String> command, Path workingDirectory, Map<String, String> environment)
+            throws IOException, InterruptedException {
+        ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(workingDirectory.toFile());
         builder.environment().putAll(environment);
         Process process = builder.start();

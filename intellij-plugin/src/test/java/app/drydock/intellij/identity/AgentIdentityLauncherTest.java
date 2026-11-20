@@ -75,6 +75,21 @@ class AgentIdentityLauncherTest {
     }
 
     @Test
+    void aCredentialHelperFailsLoudlyWhenOriginLookupFails(@TempDir Path base) {
+        enable();
+        AgentIdentityLauncher launcher = new AgentIdentityLauncher(
+                new AgentIdentityPipeline((command, directory) -> AgentIdentitySpec.parse(
+                        "GIT_CREDENTIAL_HELPER_SPEC=!/opt/glue/helper\n"), new AgentIdentityEnvFile(base), base),
+                id -> Optional.of(REPO),
+                this::settings);
+
+        AgentIdentityException thrown = assertThrows(AgentIdentityException.class,
+                () -> launcher.prepare(SESSION, base, "claude --do"));
+
+        assertTrue(thrown.getMessage().contains("repository origin could not be resolved"), thrown.getMessage());
+    }
+
+    @Test
     void aFailedMintFailsThePreparationLoudly(@TempDir Path base) {
         enable();
         AgentIdentityLauncher launcher = new AgentIdentityLauncher(

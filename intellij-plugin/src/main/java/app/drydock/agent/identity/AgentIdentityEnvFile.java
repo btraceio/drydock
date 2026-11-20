@@ -11,8 +11,11 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -36,7 +39,8 @@ import java.lang.System.Logger.Level;
  * ever reads this file after the sourcing moment. No session-end delete path
  * exists because there is nothing left to delete; the only leftovers are from a
  * process killed between the write and the sourcing, and {@link #purgeStale()}
- * removes those at startup, when no shell of this IDE can be mid-sourcing.</p>
+ * removes only files older than one minute, so a concurrent launch's fresh
+ * file cannot be swept mid-sourcing.</p>
  *
  * <p>Every value is written single-quoted ({@link AgentCommands#shellQuote}),
  * since the file is sourced by a POSIX shell: a value's special characters must
@@ -58,6 +62,8 @@ public final class AgentIdentityEnvFile {
      */
     private static final Set<PosixFilePermission> OWNER_ONLY_DIRECTORY =
             PosixFilePermissions.fromString("rwx------");
+
+    private static final Duration STALE_FILE_AGE = Duration.ofMinutes(1);
 
     private final Path baseDirectory;
 
@@ -86,16 +92,25 @@ public final class AgentIdentityEnvFile {
     }
 
     /**
-     * Deletes every leftover under {@code identity/env/} — files from a launch
-     * killed between the write and the sourcing. Only ever called at startup:
-     * a fresh IDE run has no shell that could be mid-sourcing. Tolerates a
-     * missing directory (first run). Performs filesystem I/O; callers run off
-     * the EDT.
+     * Deletes env-file leftovers older than one minute, preserving fresh files
+     * that a concurrent IDE may still be sourcing. Tolerates a missing
+     * directory (first run). Performs filesystem I/O; callers run off the EDT.
      */
     public void purgeStale() {
+        Instant cutoff = Instant.now().minus(STALE_FILE_AGE);
         try (Stream<Path> stale = Files.list(envDirectory())) {
             for (Path file : stale.toList()) {
-                Files.deleteIfExists(file);
+                try {
+                    FileTime modified = Files.getLastModifiedTime(file);
+                    if (modified.toInstant().isBefore(cutoff)) {
+                        Files.deleteIfExists(file);
+                    }
+                } catch (IOException e) {
+                    // Preserve entries whose age cannot be established; they
+                    // may belong to a concurrently launching session.
+                    LOG.log(Level.WARNING, "Could not check or purge stale agent-identity env file " + file
+                            + ": " + e.getMessage());
+                }
             }
         } catch (NoSuchFileException e) {
             // Expected, common case: on a first run identity/env/ has never
@@ -142,7 +157,14 @@ public final class AgentIdentityEnvFile {
 
     private void createEnvDirectory() throws IOException {
         Path directory = envDirectory();
-        Files.createDirectories(directory.getParent());
+        Path identityDirectory = directory.getParent();
+        Files.createDirectories(identityDirectory.getParent());
+        try {
+            Files.createDirectory(identityDirectory,
+                    PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
+        } catch (FileAlreadyExistsException existing) {
+            Files.setPosixFilePermissions(identityDirectory, OWNER_ONLY_DIRECTORY);
+        }
         try {
             Files.createDirectory(directory,
                     PosixFilePermissions.asFileAttribute(OWNER_ONLY_DIRECTORY));
@@ -161,7 +183,17 @@ public final class AgentIdentityEnvFile {
         Files.deleteIfExists(temp);
         Files.createFile(temp, OWNER_ONLY);
         Files.writeString(temp, content, StandardCharsets.UTF_8);
-        Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE);
+        try {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException moveFailure) {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException cleanupFailure) {
+                LOG.log(Level.WARNING, "Could not delete failed agent-identity env temp file " + temp
+                        + ": " + cleanupFailure.getMessage());
+            }
+            throw moveFailure;
+        }
     }
 }

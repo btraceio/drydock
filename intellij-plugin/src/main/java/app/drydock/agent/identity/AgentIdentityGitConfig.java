@@ -141,9 +141,14 @@ public record AgentIdentityGitConfig(List<Entry> entries) {
      * {@link OriginKind#REWRITABLE_SSH}) to its HTTPS form.
      */
     static Entry rewriteEntry(String originUrl) {
-        String path = originUrl.startsWith("git@github.com:")
-                ? originUrl.substring("git@github.com:".length())
-                : originUrl.substring(originUrl.indexOf('/', "ssh://git@github.com".length()) + 1);
+        String path;
+        if (originUrl.startsWith("git@github.com:")) {
+            path = originUrl.substring("git@github.com:".length());
+        } else {
+            String hostPath = originUrl.substring("ssh://".length());
+            int slash = hostPath.indexOf('/');
+            path = hostPath.substring(slash + 1);
+        }
         if (!path.endsWith(".git")) {
             path = path + ".git";
         }

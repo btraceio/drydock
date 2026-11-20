@@ -70,6 +70,9 @@ public final class AgentIdentityLauncher {
         }
     }
 
+    private record OriginLookup(Optional<String> url, boolean failed) {
+    }
+
     private final AgentIdentityPipeline pipeline;
     private final Function<ManagedSessionId, Optional<RepositoryId>> repositoryOf;
     private final Function<RepositoryId, AgentIdentitySettings> settingsFor;
@@ -124,10 +127,10 @@ public final class AgentIdentityLauncher {
             notifySkip(skip);
             return Optional.empty();
         }
-        Optional<String> origin = originUrl(workingDirectory);
+        OriginLookup origin = lookupOrigin(workingDirectory);
         try {
-            AgentIdentityPipeline.Session session =
-                    pipeline.prepare(sessionId, settings.credentialCommand(), workingDirectory, origin);
+            AgentIdentityPipeline.Session session = pipeline.prepare(
+                    sessionId, settings.credentialCommand(), workingDirectory, origin.url(), origin.failed());
             return Optional.of(new Prepared(
                     AgentIdentityPipeline.prefix(session.envFile(), planCommand), session.wrapperBin(),
                     () -> pipeline.deleteEnvFile(sessionId)));
@@ -183,27 +186,48 @@ public final class AgentIdentityLauncher {
     }
 
     /**
-     * The working directory's origin URL, or empty when git cannot say (no
-     * origin, no git). Best-effort by design: an origin the pipeline cannot
-     * see cannot be rewritten, and {@link AgentIdentityGitConfig} turns a
-     * credential helper paired with an unrewritable origin into a loud
-     * failure at the pipeline, not here.
+     * Resolves the working directory's origin and distinguishes a successful
+     * no-origin result from a failed git lookup. The pipeline rejects the
+     * failed case only after it knows whether the credential output configures
+     * a git helper; this keeps ordinary token injection independent of git.
      */
-    private static Optional<String> originUrl(Path workingDirectory) {
-        return new GitExecutableLocator().locate().flatMap(git -> {
-            try {
-                ProcessResult result = ProcessRunner.run(
-                        List.of(git.toString(), "remote", "get-url", "origin"),
-                        new ProcessRunner.Options(workingDirectory, ORIGIN_TIMEOUT, true, Map.of()));
-                String url = result.stdout().strip();
-                return result.exitCode() == 0 && !url.isEmpty() ? Optional.of(url) : Optional.empty();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return Optional.empty();
-            } catch (RuntimeException | IOException e) {
-                LOG.log(Level.DEBUG, () -> "No origin URL for " + workingDirectory + ": " + e);
-                return Optional.empty();
+    private static OriginLookup lookupOrigin(Path workingDirectory) {
+        Optional<Path> locatedGit = new GitExecutableLocator().locate();
+        if (locatedGit.isEmpty()) {
+            return originLookupFailure(workingDirectory, "git executable was not found");
+        }
+        Path git = locatedGit.orElseThrow();
+        try {
+            ProcessResult remotes = ProcessRunner.run(
+                    List.of(git.toString(), "remote"),
+                    new ProcessRunner.Options(workingDirectory, ORIGIN_TIMEOUT, true, Map.of()));
+            if (remotes.exitCode() != 0) {
+                return originLookupFailure(workingDirectory,
+                        "git remote failed with exit code " + remotes.exitCode());
             }
-        });
+            boolean hasOrigin = remotes.stdout().lines().map(String::strip).anyMatch("origin"::equals);
+            if (!hasOrigin) {
+                return new OriginLookup(Optional.empty(), false);
+            }
+            ProcessResult result = ProcessRunner.run(
+                    List.of(git.toString(), "remote", "get-url", "origin"),
+                    new ProcessRunner.Options(workingDirectory, ORIGIN_TIMEOUT, true, Map.of()));
+            String url = result.stdout().strip();
+            if (result.exitCode() != 0 || url.isEmpty()) {
+                return originLookupFailure(workingDirectory,
+                        "git remote get-url origin failed with exit code " + result.exitCode());
+            }
+            return new OriginLookup(Optional.of(url), false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return originLookupFailure(workingDirectory, "git origin lookup was interrupted");
+        } catch (RuntimeException | IOException e) {
+            return originLookupFailure(workingDirectory, "git origin lookup failed: " + e.getMessage());
+        }
+    }
+
+    private static OriginLookup originLookupFailure(Path workingDirectory, String reason) {
+        LOG.log(Level.WARNING, () -> "Could not resolve git origin for " + workingDirectory + ": " + reason);
+        return new OriginLookup(Optional.empty(), true);
     }
 }

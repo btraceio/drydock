@@ -69,7 +69,22 @@ public final class AgentIdentityPipeline {
      */
     public Session prepare(ManagedSessionId sessionId, String credentialCommand, Path workingDirectory,
                            Optional<String> originUrl) throws AgentIdentityException, IOException {
+        return prepare(sessionId, credentialCommand, workingDirectory, originUrl, false);
+    }
+
+    /**
+     * Runs preparation with the origin lookup outcome preserved separately
+     * from a repository that has no origin remote.
+     */
+    public Session prepare(ManagedSessionId sessionId, String credentialCommand, Path workingDirectory,
+                           Optional<String> originUrl, boolean originLookupFailed)
+            throws AgentIdentityException, IOException {
         AgentIdentitySpec spec = command.run(credentialCommand, workingDirectory);
+        if (originLookupFailed && spec.value(AgentIdentitySpec.GIT_CREDENTIAL_HELPER_SPEC).isPresent()) {
+            throw new AgentIdentityException(
+                    "The credential command mints a git credential helper, but the repository origin could not be "
+                            + "resolved; refusing to launch with a helper that may authenticate an SSH remote.");
+        }
         List<AgentIdentityGitConfig.Entry> gitConfig = AgentIdentityGitConfig.forSession(spec, originUrl);
         Path wrapperBin = AgentIdentityWrapper.install(baseDirectory);
         Map<String, String> variables = new LinkedHashMap<>(spec.variables());

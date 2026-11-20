@@ -143,6 +143,7 @@ echo "password=<the minted token>"
 | --- | --- |
 | Command fails, times out, prints malformed output, or prints nothing | The launch fails with the stderr excerpt; nothing opens. |
 | Helper spec + an origin that cannot be rewritten to HTTPS | The launch fails with the offending origin in the message. |
+| Helper spec + an origin lookup that fails (no git, or `git remote` errors) | The launch fails: a helper may otherwise authenticate an SSH remote the pipeline could not see. |
 | The env file cannot be written | The launch fails. |
 | Launch fails after preparation | The env file is deleted; the next launch mints fresh. |
 | Launch shell is fish, or Windows | No injection; the session launches under your own identity behind a **warning balloon**. |

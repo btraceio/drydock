@@ -266,12 +266,10 @@ public final class DrydockPluginService implements Disposable {
         this.workflowResources = new SessionWorkflowResourceOwner(workflowJournal,
                 executor, new LocalCleaner(sdlc.resolve("staging")));
         this.initialization = CompletableFuture.runAsync(this::initialize, executor)
-                // The agent-identity env files of launches killed between the
-                // write and the sourcing are the only ones that can still
-                // exist here (a live shell always deletes its own right after
-                // sourcing), and no shell of this fresh IDE run can be
-                // mid-sourcing. File I/O, hence the executor; a failure is
-                // logged, never fatal.
+                // Purge abandoned agent-identity env files off the EDT. The
+                // one-minute grace period in purgeStale() preserves a fresh
+                // file that a concurrent IDE instance may still be sourcing;
+                // a cleanup failure is logged, never fatal.
                 .thenRunAsync(() -> new AgentIdentityEnvFile(baseDir).purgeStale(), executor);
         this.agentIdentityLauncher = new AgentIdentityLauncher(baseDir);
         if (backends == PRODUCTION_BACKEND) {

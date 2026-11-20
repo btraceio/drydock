@@ -55,6 +55,17 @@ class AgentIdentityGitConfigTest {
                 AgentIdentityGitConfig.originKind("ssh://git@github.com/OWNER/REPO.git"));
         assertEquals(AgentIdentityGitConfig.OriginKind.REWRITABLE_SSH,
                 AgentIdentityGitConfig.originKind("ssh://git@github.com:22/OWNER/REPO"));
+        assertEquals(AgentIdentityGitConfig.OriginKind.REWRITABLE_SSH,
+                AgentIdentityGitConfig.originKind("ssh://github.com/OWNER/REPO.git"));
+
+        AgentIdentitySpec spec = AgentIdentitySpec.parse(
+                "GIT_CREDENTIAL_HELPER_SPEC=!/opt/glue/helper.sh\\n");
+        for (String origin : List.of("ssh://git@github.com/OWNER/REPO.git",
+                "ssh://github.com/OWNER/REPO.git")) {
+            List<AgentIdentityGitConfig.Entry> entries = AgentIdentityGitConfig.forSession(spec, Optional.of(origin));
+            assertEquals(new AgentIdentityGitConfig.Entry("url.https://github.com/OWNER/REPO.git.insteadOf", origin),
+                    entries.get(2));
+        }
     }
 
     @Test
