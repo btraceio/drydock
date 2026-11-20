@@ -39,7 +39,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * The cross-project prerequisite picker of the new-task dialog (T18a). All
@@ -94,10 +94,16 @@ public final class TaskPrerequisitePicker {
         private final TaskSnapshot snapshot;
         private final Map<RepositoryId, String> slugs;
         private final Map<String, Long> slugCounts;
+        /** The task an edit dialog is re-referencing, or null in creation mode: its own
+         * document is excluded from the hits and REPLACED -- not duplicated -- by the
+         * synthetic pending document the refusals compose, so a removed ref is gone from
+         * the probe and a genuinely cycle-closing edit is caught. */
+        private final TaskId edited;
 
-        private Index(TaskSnapshot snapshot, Map<RepositoryId, String> slugs) {
+        private Index(TaskSnapshot snapshot, Map<RepositoryId, String> slugs, TaskId edited) {
             this.snapshot = snapshot;
             this.slugs = slugs;
+            this.edited = edited;
             Map<String, Long> counts = new LinkedHashMap<>();
             for (String slug : slugs.values()) {
                 if (slug != null) {
@@ -109,6 +115,14 @@ public final class TaskPrerequisitePicker {
 
         /** Builds the index for one scan; the slug mapping is applied once per repository. */
         public static Index of(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs) {
+            return editing(snapshot, projectSlugs, null);
+        }
+
+        /** The edit-mode index: {@code edited} is the task whose own references the
+         * dialog replaces. Its document never comes back as a search hit (a task cannot
+         * be its own prerequisite) and the refusals compose over the task AS EDITED. */
+        public static Index editing(TaskSnapshot snapshot, Function<RepositoryId, String> projectSlugs,
+                TaskId edited) {
             Objects.requireNonNull(snapshot, "snapshot");
             Objects.requireNonNull(projectSlugs, "projectSlugs");
             Map<RepositoryId, String> resolved = new LinkedHashMap<>();
@@ -116,7 +130,7 @@ public final class TaskPrerequisitePicker {
                 String slug = projectSlugs.apply(repository);
                 resolved.put(repository, slug == null || slug.isBlank() ? null : slug);
             }
-            return new Index(snapshot, resolved);
+            return new Index(snapshot, resolved, edited);
         }
 
         /** The snapshot this index was built from; the picker never rescans the store for it. */
@@ -136,6 +150,9 @@ public final class TaskPrerequisitePicker {
             }
             List<Match> matches = new ArrayList<>();
             for (TaskDocument document : snapshot.documents()) {
+                if (document.id().equals(edited)) {
+                    continue; // a task cannot be its own prerequisite
+                }
                 if (matches.size() >= limit) {
                     break;
                 }
@@ -166,32 +183,68 @@ public final class TaskPrerequisitePicker {
 
         /**
          * Every refusal for one proposed prerequisite list, composed over the
-         * production resolution (never re-implemented): a synthetic pending
-         * document carrying the refs is planted into a copy of the snapshot,
-         * {@link TaskGraph} resolves it exactly as the store will, and this
-         * returns its broken-reference reasons verbatim - unknown project
-         * slugs, missing ids, ambiguous collision stems, wrong-scope ids.
+         * production resolution (never re-implemented). Creation mode plants a
+         * synthetic pending document carrying the refs into a copy of the snapshot
+         * and reads {@link TaskGraph}'s broken-reference reasons back -- unknown
+         * project slugs, missing ids, ambiguous collision stems, wrong-scope ids.
+         * Edit mode instead REPLACES the edited task's own document with one
+         * carrying the proposed refs (its real id and repository), so a removed
+         * reference is really gone from the probe and the broken-reference reasons
+         * AND the cycle paths of the task as edited both come back -- editing can
+         * close a cycle between two stored tasks, which no create-mode probe sees.
          * Valid refs and an empty list answer no refusals.
          */
         public List<String> refusals(List<String> after) {
             List<String> refs = after == null ? List.of() : List.copyOf(after);
-            if (refs.isEmpty()) {
+            if (refs.isEmpty() && edited == null) {
                 return List.of();
             }
-            TaskId probeId = freshProbeId(refs);
-            TaskDocument pending = new TaskDocument(probeId, probeRepository(),
-                    "The task being created", null, null, null, refs, null, "", "");
+            TaskDocument pending;
+            if (edited != null) {
+                TaskDocument original = snapshot.byId().get(edited);
+                if (original == null) {
+                    return List.of(); // the task vanished between index build and validate; nothing to probe
+                }
+                pending = new TaskDocument(original.id(), original.repository(), original.title(),
+                        original.status(), original.doneBy(), original.created(), refs,
+                        original.sessions(), original.mirrors(), "", "");
+            } else {
+                pending = new TaskDocument(freshProbeId(refs), probeRepository(),
+                        "The task being created", null, null, null, refs, null, "", "");
+            }
+            TaskSnapshot extended = extend(snapshot, pending, edited != null);
+            TaskGraph graph = TaskGraph.of(extended, slugs::get);
+            List<String> refusals = new ArrayList<>();
+            graph.diagnosticsOf(pending.id()).map(diagnostics -> diagnostics.broken().stream()
+                    .map(broken -> "'" + broken.reference() + "': " + broken.reason()))
+                    .orElse(Stream.empty()).forEach(refusals::add);
+            if (edited != null) {
+                graph.diagnosticsOf(pending.id()).map(diagnostics -> diagnostics.cycles().stream()
+                        .map(cycle -> "this edit closes a prerequisite cycle: " + graph.titledPath(cycle)))
+                        .orElse(Stream.empty()).forEach(refusals::add);
+            }
+            return List.copyOf(refusals);
+        }
+
+        /** The snapshot with one pending document planted in: added in creation mode,
+         * replacing the edited task's own document in edit mode. Pure. */
+        private TaskSnapshot extend(TaskSnapshot snapshot, TaskDocument pending, boolean replace) {
             Map<TaskId, TaskDocument> byId = new LinkedHashMap<>(snapshot.byId());
-            byId.put(probeId, pending);
             List<TaskDocument> documents = new ArrayList<>(snapshot.documents());
-            documents.add(pending);
-            TaskSnapshot extended = new TaskSnapshot(documents, snapshot.repositories(), byId,
+            if (replace) {
+                byId.put(pending.id(), pending);
+                for (int i = 0; i < documents.size(); i++) {
+                    if (documents.get(i).id().equals(pending.id())) {
+                        documents.set(i, pending);
+                        break;
+                    }
+                }
+            } else {
+                byId.put(pending.id(), pending);
+                documents.add(pending);
+            }
+            return new TaskSnapshot(documents, snapshot.repositories(), byId,
                     snapshot.bySessionReference(), snapshot.failures(), snapshot.idCollisions());
-            return TaskGraph.of(extended, slugs::get).diagnosticsOf(probeId)
-                    .map(diagnostics -> diagnostics.broken().stream()
-                            .map(broken -> "'" + broken.reference() + "': " + broken.reason())
-                            .collect(Collectors.toList()))
-                    .orElse(List.of());
         }
 
         /** A repository to park the synthetic pending document under (its own identity
