@@ -202,7 +202,9 @@ public final class TaskStore implements AutoCloseable {
      * or foreign store entry the scan refuses visibly, never a silent
      * overwrite. A successful move re-scans under the same lock and
      * publishes the committed snapshot exactly as create and update do;
-     * a failed move publishes nothing and leaves both files untouched.
+     * a failed move publishes nothing and leaves both files untouched. A
+     * failed move may leave an empty target repository directory if it had
+     * to be created before the atomic rename.
      *
      * <p>The id needs no collision check across repositories (D4: ids
      * are unique across ALL of them, and {@link #locate} has just
@@ -226,20 +228,12 @@ public final class TaskStore implements AutoCloseable {
                 }
             }
             try {
-                Files.createDirectories(destination.getParent());
                 if (Files.exists(destination)) {
                     throw new TaskStoreException("A file already exists at the move target " + destination
                             + "; remove it before moving the task there");
                 }
+                Files.createDirectories(destination.getParent());
                 Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                try {
-                    Files.move(source, destination);
-                } catch (IOException failure) {
-                    throw new TaskStoreException("The task '" + id.text()
-                            + "' could not be moved to " + destination.getParent() + ": "
-                            + failure.getMessage(), failure);
-                }
             } catch (IOException e) {
                 throw new TaskStoreException("The task '" + id.text()
                         + "' could not be moved to " + destination.getParent() + ": "
