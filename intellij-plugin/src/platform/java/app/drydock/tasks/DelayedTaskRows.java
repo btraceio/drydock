@@ -241,7 +241,8 @@ public final class DelayedTaskRows {
             // the renderer stays silent instead of inventing a name.
             String project = projectSlugs.apply(document.repository());
             out.add(new TaskNode.DelayedTaskRow(view, document.title(), document.repository(),
-                    document.created(), stale, document.sessions(), document.mirrors(), project, Optional.empty()));
+                    document.created(), stale, document.sessions(), document.mirrors(), project, Optional.empty(),
+                    document.rawBody()));
         }
         return out;
     }

@@ -41,10 +41,13 @@ public sealed interface TaskNode {
      * mapping, so a task's tooltip can name its project across the inbox's
      * state groups. Null when the mapping supplies none: an unregistered
      * repository must not render a made-up name.
+     * {@code body} is the document's raw body (the description with its
+     * session notes), carried verbatim for the row's hover hint; blank when
+     * the task has none.
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
             Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
-            String project, Optional<OpenPullRequest> pullRequest)
+            String project, Optional<OpenPullRequest> pullRequest, String body)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -56,6 +59,7 @@ public sealed interface TaskNode {
             mirrors = List.copyOf(mirrors);
             project = project != null && !project.isBlank() ? project : null;
             pullRequest = Objects.requireNonNullElse(pullRequest, Optional.empty());
+            body = Objects.requireNonNull(body, "body");
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
@@ -78,13 +82,13 @@ public sealed interface TaskNode {
         public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
                 Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
                 Optional<OpenPullRequest> pullRequest) {
-            this(view, title, repository, created, stale, storedSessions, mirrors, null, pullRequest);
+            this(view, title, repository, created, stale, storedSessions, mirrors, null, pullRequest, "");
         }
 
         /** This row with {@code pullRequest} carried; everything else unchanged. Pure. */
         public DelayedTaskRow withPullRequest(OpenPullRequest pullRequest) {
             return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors, project,
-                    Optional.of(pullRequest));
+                    Optional.of(pullRequest), body);
         }
 
         /**

@@ -622,6 +622,40 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     }
 
     /**
+     * Pure. The cap on a task row's description hover: a longer body is cut
+     * at a line boundary below this, or the tooltip can outgrow the screen.
+     */
+    static final int DESCRIPTION_HOVER_LIMIT = 1500;
+
+    /**
+     * Pure. A task row's full description for the hover hint: the document's
+     * body (the description with its session notes) after a blank line below
+     * the one-line summary, capped at {@link #DESCRIPTION_HOVER_LIMIT} on the
+     * last full line, the cut saying where the rest lives (the task's file,
+     * which the row's Edit action opens). "" when the body is blank.
+     */
+    static String descriptionHover(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        String trimmed = body.strip();
+        if (trimmed.length() <= DESCRIPTION_HOVER_LIMIT) {
+            return "\n\n" + trimmed;
+        }
+        int cutEnd = DESCRIPTION_HOVER_LIMIT;
+        if (Character.isHighSurrogate(trimmed.charAt(cutEnd - 1))
+                && Character.isLowSurrogate(trimmed.charAt(cutEnd))) {
+            cutEnd--;
+        }
+        String cut = trimmed.substring(0, cutEnd);
+        int lastLine = cut.lastIndexOf('\n');
+        if (lastLine > 0) {
+            cut = cut.substring(0, lastLine);
+        }
+        return "\n\n" + cut + "\n… (Edit opens the task's file with the rest)";
+    }
+
+    /**
      * Pure. The row's accessible one-line summary (the tooltip of a Jira
      * row's shape): id, hint word, project when known, age and stale flag,
      * the carried blocker texts (D9/D11), and the session hint - live
