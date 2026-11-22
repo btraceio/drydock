@@ -45,7 +45,8 @@ carry `Optional<RemotePersistence>` (the `ManagedSessionId` plus the agent
 env — see component 1), and the session row carries an optional
 `WorkspaceBoxBinding` persisted as a `workspaceBox` state member (component 2).
 The plugin's dead `TmuxPersistence` copy was deleted in this series; the
-desktop app's spike remains the local arm.
+local arm went with the standalone app (see
+`docs/unattended-sessions-tmux-spike.md` for the spike it came from).
 
 ## Architecture
 

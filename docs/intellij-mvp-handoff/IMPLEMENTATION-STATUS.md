@@ -3,6 +3,10 @@
 What is built against the design handoff in this directory, what is not, and
 where the design was deviated from on purpose.
 
+> **Note (2026-11-20):** the standalone desktop app this snapshot sometimes
+> refers to was later removed; Drydock is the IntelliJ plugin only. Statements
+> about the app below describe the state on their last-updated date.
+
 `README.md` beside this file is the handoff **verbatim**, as received; the
 `.dc.html` files are its design references (open `Drydock MVP.dc.html` in a
 browser, keeping `support.js` next to it). Neither is edited — this file is
@@ -40,7 +44,7 @@ Numbered as in the handoff's "Screens / views".
 |---|---|---|
 | 1 | Agents ▾ widget + popup | **superseded** by the Drydock tool window (task-centric redesign) |
 | 2 | Agent editor tab | **partial** — tab (pinned, first, dot, `· RO`), strip (state word, RO chip, secondary line with a live age, Stop/Resume/Start, Changes, ⋯), the 50 %-dimmed stopped transcript with its footer, the status-bar breadcrumb named by the session title. Changes opens IntelliJ's native multi-file diff for the task's branch and working tree from their merge base (the main checkout shows its working tree). Missing: file paths as hyperlinks, `<n> files changed`, and the `<repo> · <branch>` window title |
-| 3 | New Agent Session dialog | **replaced** by **New task**: a task name (a label, never sent), optional instructions (the agent's first message only when given), agent, mode, and one generated summary line (`New branch <slug> from origin/main in <folder>`) with `Change…` for branch, start point (Git's own picker via Git4Idea), folder (base from Settings › Tools › Drydock, shared with the app), and new/this window |
+| 3 | New Agent Session dialog | **replaced** by **New task**: a task name (a label, never sent), optional instructions (the agent's first message only when given), agent, mode, and one generated summary line (`New branch <slug> from origin/main in <folder>`) with `Change…` for branch, start point (Git's own picker via Git4Idea), folder (base from Settings › Tools › Drydock), and new/this window |
 | 4 | Attention ("needs you") | **built, except the widget** — one balloon in the focused window (`Claude needs you` / `n agents need you`, `Raise window` · `Snooze`), an OS notification when the IDE is not active, and the needs-you state clears once the user is looking at the session. The amber Agents widget is surface 1. No prompt summary (the hook records only a state word) |
 | 5 | Resume and idle state | **built** — resume is by id, never `--continue`/`--last`; nothing auto-starts; `Resume · ~Nk tokens` from `ResumeCostEstimate` |
 | 6 | Close / quit confirmation | **built** — `Stop n working agent(s)?` on a window close, one dialog for all windows on quit (`Stop & Quit`), `Don't ask again` |

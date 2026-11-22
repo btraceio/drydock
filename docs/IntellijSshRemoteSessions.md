@@ -3,8 +3,9 @@
 **Status:** implemented. A repository that lives on another machine — reached over the
 user's ambient SSH (`~/.ssh/config`, agent, keys; nothing stored or managed) — can be
 registered from the Drydock tool window and run Claude or Terminal sessions on that host.
-This is the plugin's counterpart of the desktop app's SSH remote repositories
-(`docs/superpowers/specs/2026-07-21-ssh-remote-repos-design.md`); it is a separate arm
+This is the plugin's SSH remote repositories feature
+(originating in `docs/superpowers/specs/2026-07-21-ssh-remote-repos-design.md`);
+it is a separate arm
 from the workspace-box arm (`docs/WorkspacePersistentSessions.md`), which is tmux-backed
 and survives the IDE. An ssh-remote session's agent dies with its ssh client.
 
