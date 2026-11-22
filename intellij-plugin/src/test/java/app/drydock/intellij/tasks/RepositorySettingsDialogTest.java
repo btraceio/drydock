@@ -20,8 +20,9 @@ import java.util.Optional;
  * The sectioned per-repository settings dialog as stored in the IDE's
  * application properties: each section pre-fills from its settings record, a
  * save writes every section back under its exact keys, blank workspace text
- * clears an override, and the pure refusals reject an invalid box name, a
- * relative clone path, and an agent identity enabled without a command.
+ * clears an override, the pure refusals reject an invalid box name and a
+ * relative clone path, and an enabled agent identity accepts a blank command
+ * (the default minting script runs).
  */
 public class RepositorySettingsDialogTest extends BasePlatformTestCase {
 
@@ -30,9 +31,18 @@ public class RepositorySettingsDialogTest extends BasePlatformTestCase {
     private final List<String> touchedKeys = new ArrayList<>();
 
     @Override
+    protected void setUp() throws Exception {
+        super.setUp();
+        // The workspace-box section exists in the dialog only while the
+        // experimental opt-in is on; the workspace tests below drive it.
+        WorkspaceSettings.setEnabled(true);
+    }
+
+    @Override
     protected void tearDown() throws Exception {
         try {
             PropertiesComponent properties = PropertiesComponent.getInstance();
+            WorkspaceSettings.setEnabled(false);
             for (String key : touchedKeys) {
                 properties.unsetValue(key);
             }
@@ -145,23 +155,14 @@ public class RepositorySettingsDialogTest extends BasePlatformTestCase {
                 .contains("full path"));
     }
 
-    public void testIdentityRefusalNamesTheMissingCommandOnlyWhenEnabled() {
-        assertTrue(AgentIdentitySettings.refusal(true, "").isPresent());
-        assertTrue(AgentIdentitySettings.refusal(true, "   ").isPresent());
-        assertTrue(AgentIdentitySettings.refusal(false, "").isEmpty());
-        assertTrue(AgentIdentitySettings.refusal(true, "glue mint").isEmpty());
-    }
-
-    public void testIdentityValidationOnTheDialogRejectsEnabledWithoutACommand() {
+    public void testIdentityValidationAcceptsAnEnabledBlankCommand() {
         ApplicationManager.getApplication().invokeAndWait(() -> {
             RepositorySettingsDialog dialog = new RepositorySettingsDialog(
                     getProject(), project(RepositoryId.newId()), "");
             try {
                 dialog.identityEnabledCheckbox().setSelected(true);
                 dialog.identityCommandField().setText("");
-                assertNotNull(dialog.doValidate()); // enabled without a command refuses to save
-                dialog.identityCommandField().setText("glue mint");
-                assertNull(dialog.doValidate());
+                assertNull(dialog.doValidate()); // blank runs the default minting script
             } finally {
                 Disposer.dispose(dialog.getDisposable());
             }

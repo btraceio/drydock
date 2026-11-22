@@ -243,7 +243,7 @@ class TaskActionsTest {
         // SHOW_* items a menu can offer are all reachable too. The session
         // link lists carry one page per kind, so the split link entries are
         // reachable as well.
-        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, false, false,
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, false,
                 List.of("https://github.com/o/r/pull/7"), List.of("https://github.com/o/r/issues/9"),
                 List.of("https://acme.atlassian.net/browse/PROJ-9"),
                 new app.drydock.tasks.TaskNode.DelayedTaskRow(

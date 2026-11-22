@@ -18,13 +18,23 @@ import java.util.function.Function;
  * byte-identically to a build without the feature. The credential command is
  * a user-supplied shell command whose {@code KEY=VALUE} output mints the
  * identity agent sessions in this repository commit, push and open PRs under;
- * its contract is documented in {@code docs/AgentGithubIdentity.md}. The
- * command is stored verbatim (whitespace-stripped); it is not a secret and it
- * does not run at save time.</p>
+ * its contract is documented in {@code docs/AgentGithubIdentity.md}. A blank
+ * command is not an error: it runs the user-local default minting script at
+ * {@link #DEFAULT_COMMAND}. The command is stored verbatim
+ * (whitespace-stripped); it is not a secret and it does not run at save
+time.</p>
  */
 public record AgentIdentitySettings(boolean enabled, String credentialCommand) {
 
     private static final String PREFIX = "drydock.agentIdentity.";
+
+    /**
+     * The command that runs when the stored command is blank: the user-local
+     * minting script. A per-repository command overrides it; the shell
+     * expands the {@code ~}, so the literal is stored and passed through
+     * verbatim.
+     */
+    public static final String DEFAULT_COMMAND = "~/.sdlc/agent-identity";
 
     public AgentIdentitySettings {
         credentialCommand = credentialCommand == null ? "" : credentialCommand.strip();
@@ -33,6 +43,11 @@ public record AgentIdentitySettings(boolean enabled, String credentialCommand) {
     /** The defaults: off, no command. */
     public static AgentIdentitySettings defaults() {
         return new AgentIdentitySettings(false, "");
+    }
+
+    /** The command the identity pipeline runs: the stored one, or the default location when blank. */
+    public String effectiveCommand() {
+        return credentialCommand.isEmpty() ? DEFAULT_COMMAND : credentialCommand;
     }
 
     /** Lenient read: missing values read as the defaults, never as broken. */
@@ -56,22 +71,6 @@ public record AgentIdentitySettings(boolean enabled, String credentialCommand) {
 
     public void save(RepositoryId id) {
         write(PropertiesComponent.getInstance()::setValue, id);
-    }
-
-    /**
-     * The validation refusal for a candidate configuration, or empty when it
-     * is usable. A disabled configuration never refuses; an enabled one needs
-     * a command to mint anything at all.
-     */
-    public static Optional<String> refusal(boolean enabled, String credentialCommand) {
-        if (!enabled) {
-            return Optional.empty();
-        }
-        String stripped = credentialCommand == null ? "" : credentialCommand.strip();
-        if (stripped.isEmpty()) {
-            return Optional.of("Enter the credential command, or turn agent identity off.");
-        }
-        return Optional.empty();
     }
 
     private static String prefix(RepositoryId id) {
