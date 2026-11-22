@@ -63,8 +63,8 @@ final class FakeMcpSessionContext implements McpSessionContext {
 
     /**
      * Backs {@link #answerAsk}: the fake owns the registry so tests mint
-     * questions and the router closes them, the real split of MainWorkspace
-     * (mint) and WorkspaceMcpSessionContext (answer).
+     * questions and the router closes them, the real split between the host
+     * UI (mint) and WorkspaceMcpSessionContext (answer).
      */
     final PendingQuestions pendingQuestions = new PendingQuestions(null);
 

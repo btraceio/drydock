@@ -14,7 +14,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
- * The peek questions this app run has asked an agent and is still waiting
+ * The peek questions this process run has asked an agent and is still waiting
  * for an answer to (spec §4, "ask the agent during review").
  *
  * <p>The question itself is typed into the agent's terminal ({@code
@@ -27,7 +27,7 @@ import java.util.function.Predicate;
  * thread, the same request/response correlation the RISK-check verdict
  * flow uses.</p>
  *
- * <p>Deliberately in-memory: a pending ask is tied to one app run's live
+ * <p>Deliberately in-memory: a pending ask is tied to one process run's live
  * sessions, not to anything a restart must reconstruct. Unanswered asks
  * die with the run, exactly as a typed question the agent never got to
  * does.</p>
@@ -37,7 +37,7 @@ public final class PendingQuestions {
     /**
      * One question still waiting for its answer. The session it was asked
      * of is part of the question: an ask dies when that session exits, not
-     * when any other thing about the app changes.
+     * when any other thing about the host changes.
      */
     public record PendingAsk(String questionId, String scopeId, String symbol,
                              ManagedSessionId sessionId, Instant askedAt) {
@@ -89,7 +89,7 @@ public final class PendingQuestions {
     /**
      * Closes one question with {@code answer}, atomically, and notifies
      * {@link #onAnswered}. Empty when there is no such pending question --
-     * already answered, evicted, or minted in another app run -- and when
+     * already answered, evicted, or minted in another process run -- and when
      * {@code allowed} rejects the ask, which is how the caller keeps
      * "another session's question" out of this one's hands <em>without
      * committing anything first</em>: a rejected ask stays pending, so the

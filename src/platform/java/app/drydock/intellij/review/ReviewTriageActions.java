@@ -36,13 +36,12 @@ import java.util.function.Supplier;
  * executor is gone, so the mutation surfaces as a
  * {@link java.util.concurrent.RejectedExecutionException} on the future.</p>
  *
- * <p>The triage semantics are the app's, mirrored deliberately: Confirm
+ * <p>The triage semantics: Confirm
  * promotes {@code postToPr} only on the transition into CONFIRMED (see
  * {@link #confirmedForPosting}), a comment is a
  * {@code Message(author="You")} appended to the finding's thread, and only
  * a {@link PromptOutcome#DELIVERED} hand-off marks findings
- * {@link AnnotationStatus#SENT} -- the plugin's stricter rule; the app
- * accepts more hand-off states, the plugin only counts a written prompt.</p>
+ * {@link AnnotationStatus#SENT} -- only a written prompt counts.</p>
  */
 public final class ReviewTriageActions {
 
@@ -104,13 +103,12 @@ public final class ReviewTriageActions {
     }
 
     /**
-     * The app's {@code MainWorkspace.confirmedForPosting}, mirrored exactly:
-     * only the transition into CONFIRMED promotes {@code postToPr} from
+     * Only the transition into CONFIRMED promotes {@code postToPr} from
      * false, because a vouched-for finding that silently drops out of the
      * posted review was the complaint the default fixes -- while a redundant
      * confirm of an already-confirmed finding must not silently undo the
      * human's later opt-out. Static and pure so the rule is testable without
-     * a workspace; keep this body and the app's in lockstep.
+     * a workspace.
      */
     static ReviewAnnotation confirmedForPosting(ReviewAnnotation current, Triage triage) {
         ReviewAnnotation next = current.withTriage(triage);
@@ -357,8 +355,8 @@ public final class ReviewTriageActions {
                     .filter(finding -> forSession(finding, prMode))
                     .toList();
             if (decided.isEmpty()) {
-                // The app's rule: an empty hand-off is refused outright,
-                // before a prompt is even built -- nothing sent, nothing marked.
+                // An empty hand-off is refused outright, before a prompt is
+                // even built -- nothing sent, nothing marked.
                 return FixOutcome.of(FixOutcome.State.EMPTY);
             }
             List<ReviewAnnotation> toFix = decided.stream()

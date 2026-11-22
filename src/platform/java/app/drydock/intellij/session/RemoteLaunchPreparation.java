@@ -11,7 +11,7 @@ import java.util.Optional;
  * The remote launch's capability preparation (INV-44, INV-64): core launch, workflow resources, the OPTIONAL
  * review connection/enrollment, review data and attached delivery are typed separately, never one boolean.
  * The review connection comes only from {@link RemoteReviewService#ensure} (live forward + current
- * credentials); nothing here installs software or edits SSH configuration. Blocking: callers run it off the FX thread.
+ * credentials); nothing here installs software or edits SSH configuration. Blocking: callers run it off the UI thread.
  */
 final class RemoteLaunchPreparation {
 

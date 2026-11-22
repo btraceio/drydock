@@ -309,8 +309,8 @@ final class NewTaskDialog extends DialogWrapper {
             }
             JBRadioButton button = new JBRadioButton(agent.displayName());
             // A remote target runs the agent on another host over ssh; a
-            // provider without remote support cannot serve it (the app's
-            // AgentSelector gate, requireRemoteCapability).
+            // provider without remote support cannot serve it
+            // (requireRemoteCapability).
             boolean remoteOk = !remoteTarget()
                     || DrydockPluginService.getInstance().registry().supportsRemote(agent.kind());
             if (!remoteOk) {

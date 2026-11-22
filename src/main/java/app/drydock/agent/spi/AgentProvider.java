@@ -26,7 +26,7 @@ import java.util.Optional;
  * <p>{@link #buildCreateCommand}/{@link #buildResumeCommand},
  * {@link #locateExecutable}, and {@link #probeCapabilities} may perform
  * blocking work (process spawns, filesystem probes) and MUST be called off the
- * JavaFX Application Thread.</p>
+ * UI thread.</p>
  */
 public interface AgentProvider {
 
@@ -46,7 +46,7 @@ public interface AgentProvider {
      * Whether this integration supports SSH-remote sessions. This is a static
      * fact about the integration (not something detected from the CLI), so
      * implementations MUST make this CHEAP and non-blocking: no process
-     * spawns, no filesystem or network I/O. Safe to call on the JavaFX
+     * spawns, no filesystem or network I/O. Safe to call on the UI
      * Application Thread.
      */
     boolean supportsRemote();
@@ -58,7 +58,7 @@ public interface AgentProvider {
      *
      * <p>Like {@link #supportsRemote()}, a static fact about the integration:
      * implementations MUST make this CHEAP and non-blocking -- no process
-     * spawns, no filesystem or network I/O. Safe to call on the JavaFX
+     * spawns, no filesystem or network I/O. Safe to call on the UI
      * Application Thread.</p>
      */
     default boolean supportsSubagents() {
@@ -87,7 +87,7 @@ public interface AgentProvider {
      * points at, overrides on its command line, or not at all. A static fact
      * about the integration, like {@link #supportsRemote()}, so implementations
      * MUST make this CHEAP and non-blocking: no process spawns, no I/O. Safe on
-     * the JavaFX thread.
+     * the UI thread.
      *
      * <p>Distinct from any probed CLI flag: this says what the integration can
      * consume at all, not that the installed binary accepts the option. The
@@ -137,8 +137,8 @@ public interface AgentProvider {
      * a separate watcher process that never calls {@link #init}: an
      * implementation may use executable discovery and bounded, ProcessRunner-run
      * capability probes of the executable itself (for example, {@code --help}),
-     * but must not depend on {@code init} state or run on the JavaFX Application
-     * Thread. Providers that cannot supply a required capability return empty;
+     * but must not depend on {@code init} state or run on the UI thread.
+     * Providers that cannot supply a required capability return empty;
      * the watcher leaves pending events for delivery when the IDE is available.</p>
      */
     default Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,

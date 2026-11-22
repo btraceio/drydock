@@ -51,7 +51,7 @@ import java.util.Set;
  * only as byte offsets into the source -- there is no {@code getText()},
  * so every string below is cut out of the file's own UTF-8 bytes.</p>
  *
- * <p>Blocking: parses and a repository filename walk. Never on the FX
+ * <p>Blocking: parses and a repository filename walk. Never on the UI
  * thread; {@link SymbolPeekService} calls this on its resolve executor. A
  * grammar that fails to load or a file that fails to parse binds nothing
  * -- the caller keeps the lexical answer, never an error.</p>

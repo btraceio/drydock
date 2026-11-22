@@ -42,7 +42,7 @@ import java.util.regex.Pattern;
  * and issues that repository views list, and the pull requests of every
  * state that badge a session by its branch. This service never runs
  * {@code gh pr create} or any other mutation -- Claude in the terminal opens
- * PRs; the app's own two writes, a posted review and a task's mirror issue,
+ * PRs; Drydock's own two writes, a posted review and a task's mirror issue,
  * live in {@code GitHubReviewService} and {@code GitHubIssueMirrorService}. Checking a PR out is a working-tree change and
  * lives in {@code PrCheckoutService}, not here.
  *
@@ -74,7 +74,7 @@ public final class GhCliService implements AutoCloseable {
      */
     public enum CiFailure { FAILURE, ERROR }
 
-    /** The bits of {@code gh pr view --json number,state,url} the app cares about. */
+    /** The bits of {@code gh pr view --json number,state,url} Drydock cares about. */
     public record PrInfo(int number, PrLifecycle state, Optional<String> url) {
         public enum PrLifecycle { OPEN, MERGED, CLOSED, UNKNOWN }
     }
@@ -235,9 +235,7 @@ public final class GhCliService implements AutoCloseable {
      * pr-664} answers "no pull requests found for branch pr-664" because the
      * PR's head branch is the author's name, not the {@code pr-<n>} checkout
      * name. Going by the number is what makes a session started
-     * from a PR able to find that PR again at all. Kept identical to the
-     * standalone app's copy: the two drifted once already and the IDE was
-     * the one left failing.</p>
+     * from a PR able to find that PR again at all.</p>
      */
     public CompletableFuture<Optional<PrInfo>> viewPr(Path root, String branch) {
         return CompletableFuture.supplyAsync(() -> viewPrBlocking(root, branch), executor);

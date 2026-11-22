@@ -40,7 +40,7 @@ import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 /**
- * The store of Review findings and verdicts: in-memory, mutated on the FX
+ * The store of Review findings and verdicts: in-memory, mutated on the UI
  * thread by the Review destination and on its own executor by the MCP tool
  * router, persisted as a JSON file <em>alongside</em> the application state
  * file ({@code annotations.json} beside {@code state.json}).
@@ -132,7 +132,7 @@ public final class AnnotationStore implements AutoCloseable {
      * (or {@code null} for a bulk change).
      *
      * <p>Exists because this store has more than one writer: the Review
-     * destination on the FX thread, and the MCP tool router on its own
+     * destination on the UI thread, and the MCP tool router on its own
      * executor. A view that caches a finding must be told to re-read it, or a
      * later read-modify-write from the stale value silently discards the
      * other writer's change (AGENTS.md, "One writer for persistent state").</p>
@@ -274,7 +274,7 @@ public final class AnnotationStore implements AutoCloseable {
      *
      * <p>The only way to change a stored finding, deliberately: a
      * replace-by-key mutator alongside it would let a caller read, decide, and
-     * then write, giving the other writer -- the FX Review destination or the
+     * then write, giving the other writer -- the UI Review destination or the
      * MCP tool router -- a window in which to land a change that the write then
      * overwrites (AGENTS.md names this read-modify-write pattern as a past
      * data-loss bug).</p>

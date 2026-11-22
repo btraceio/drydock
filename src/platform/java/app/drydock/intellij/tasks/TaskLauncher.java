@@ -37,7 +37,6 @@ import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
 import app.drydock.mcp.TaskToolContext;
 import app.drydock.projects.SharedProject;
-import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.tasks.NewTaskLauncherResult;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.workspace.BoxCheckout;
@@ -1335,7 +1334,7 @@ public final class TaskLauncher {
             if (registered != null && registered.isRemote()) {
                 return Optional.of(remoteInputs(from, plugin, registered, fixed));
             }
-            Optional<Path> main = SharedProjectsSeed.mainCheckoutVia(worktrees).apply(base.get())
+            Optional<Path> main = worktrees.mainCheckout(base.get())
                     .map(RepositoryCatalog::canonicalize);
             if (main.isEmpty()) {
                 report(from, base.get() + " is not a git repository, so Drydock cannot start a task in it.");
@@ -1446,8 +1445,7 @@ n     * git scans (the placeholder root is not a local checkout, and every
                 if (open.isDisposed() || open.getBasePath() == null) {
                     continue;
                 }
-                boolean sameRepository = SharedProjectsSeed.mainCheckoutVia(worktrees)
-                        .apply(Path.of(open.getBasePath()))
+                boolean sameRepository = worktrees.mainCheckout(Path.of(open.getBasePath()))
                         .map(RepositoryCatalog::canonicalize)
                         .map(mainRoot::equals)
                         .orElse(false);

@@ -38,7 +38,7 @@ import java.util.concurrent.Executors;
  * out to the real {@code git clone} into a caller-chosen parent directory.
  *
  * <p>All methods return futures completed on this service's own virtual
- * thread executor; nothing here ever blocks the FX thread.</p>
+ * thread executor; nothing here ever blocks the UI thread.</p>
  */
 public final class GitHubService implements AutoCloseable {
 

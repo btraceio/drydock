@@ -90,7 +90,7 @@ public final class GitHubReviewService implements AutoCloseable {
 
     /**
      * Posts one review -- summary and every comment together, so a rejected
-     * request never lands half of it. Runs off the FX thread; {@code root}
+     * request never lands half of it. Runs off the UI thread; {@code root}
      * is the working directory {@code gh} resolves {@code owner/repo} from.
      */
     public CompletableFuture<SubmitOutcome> submit(Path root, int pr, Event event, String summary,

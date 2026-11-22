@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
  * {@code app.drydock.git.GitStatusService} invokes {@code git}.
  *
  * <p>Runs entirely on a background executor (plan section 18: "Never block
- * the JavaFX application thread on ... Claude capability detection");
+ * the UI thread on ... Claude capability detection");
  * {@link #detectCapabilities()} returns a {@link CompletableFuture} rather
  * than blocking the caller.</p>
  */
@@ -88,7 +88,7 @@ public final class ClaudeCapabilityService implements AutoCloseable {
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     public ClaudeCapabilities detectCapabilitiesBlocking() {

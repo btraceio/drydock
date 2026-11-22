@@ -112,7 +112,7 @@ class SessionActivityWatcherTest {
         writeState(activity, "sess", "attention");
         SessionActivityWatcher watcher = watcherOn(activity);
 
-        // The delete is async (it must not run on the caller's FX thread).
+        // The delete is async (it must not run on the caller's UI thread).
         watcher.forget("sess").get(10, TimeUnit.SECONDS);
 
         assertTrue(watcher.readBlocking().isEmpty());

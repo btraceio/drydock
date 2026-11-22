@@ -31,7 +31,7 @@ import java.util.concurrent.RejectedExecutionException;
  * process (plan section 6.7, 21: argument list, never a shell string).
  *
  * <p>Runs entirely on a background executor (plan section 18: "Never block
- * the JavaFX application thread on ... Git"); {@link #getStatus(Path)}
+ * the UI thread on ... Git"); {@link #getStatus(Path)}
  * returns a {@link CompletableFuture} rather than blocking the caller.</p>
  */
 public final class GitStatusService implements AutoCloseable {
@@ -174,7 +174,7 @@ public final class GitStatusService implements AutoCloseable {
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     Path resolveRepositoryRootBlocking(Path directory) {
@@ -232,7 +232,7 @@ public final class GitStatusService implements AutoCloseable {
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     Path createWorktreeBlocking(Path repositoryRoot, Path worktreeDirectory, String branch) {
@@ -339,7 +339,7 @@ public final class GitStatusService implements AutoCloseable {
      * <p>Completes with the branch actually checked out -- verified via
      * {@link #currentBranchBlocking} rather than a bare exit code, because a
      * checkout can report success without leaving HEAD where the caller
-     * asked. Must never be called from the JavaFX application thread.</p>
+     * asked. Must never be called from the UI thread.</p>
      */
     public CompletableFuture<Optional<String>> checkoutBranch(Path workingDirectory, String branch) {
         return CompletableFuture.supplyAsync(() -> checkoutBranchBlocking(workingDirectory, branch), executor);
@@ -484,7 +484,7 @@ public final class GitStatusService implements AutoCloseable {
      * would lose with "cannot lock ref" -- spurious, and the loser is the
      * launch whose fork would then warn about a stale base it actually
      * got from its sibling's fetch. Unbounded on purpose: one small entry
-     * per distinct repository the app has forked in, a handful on any real
+     * per distinct repository Drydock has forked in, a handful on any real
      * desktop; a bounded map would evict a lock while its holder is
      * mid-fetch, which is worse than the memory it saves.
      */
@@ -1120,7 +1120,7 @@ public final class GitStatusService implements AutoCloseable {
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     GitStatus getStatusBlocking(Path repositoryRoot) {
@@ -1157,7 +1157,7 @@ public final class GitStatusService implements AutoCloseable {
      * or comparing metadata (a handoff brief's {@code writtenAtCommit}, and
      * the staleness that reads it). A session on a branch with no commits is
      * an ordinary state, not a failure, and must not cost the caller its
-     * operation. Blocking; never call on the FX thread.</p>
+     * operation. Blocking; never call on the UI thread.</p>
      */
     public Optional<String> headCommitBlocking(Path workingDirectory) {
         Optional<Path> git = locator.locate();
@@ -1189,7 +1189,7 @@ public final class GitStatusService implements AutoCloseable {
      *
      * <p>{@code --end-of-options} precedes the ref because a ref may begin
      * with {@code -} and would otherwise be read as a flag. Blocking; never
-     * call on the FX thread.</p>
+     * call on the UI thread.</p>
      */
     public Optional<String> commitForRefBlocking(Path workingDirectory, String ref) {
         Optional<Path> git = locator.locate();
@@ -1251,7 +1251,7 @@ public final class GitStatusService implements AutoCloseable {
      * (not a repository, git missing, a timeout) completes exceptionally with
      * a {@link GitException}: a failure must not read as "detached".</p>
      *
-     * <p>Never throws: the Review board calls this on the FX thread, and a
+     * <p>Never throws: the Review board calls this on the UI thread, and a
      * submit the executor rejects (it is shut down -- app shutdown racing a
      * reveal) arrives as a failed future the caller's handler sees, rather
      * than an exception out of the event handler that strands the board on

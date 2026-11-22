@@ -37,7 +37,7 @@ public final class McpSessionRegistry {
     /**
      * Renames one session may apply. Not about disk: {@code
      * ApplicationStateStore} coalesces saves and the activity log is a ring.
-     * It bounds FX-thread work -- every rename attempt costs a {@code
+     * It bounds UI-thread work -- every rename attempt costs a {@code
      * Platform.runLater} and a turn under the state lock, dispatched from an
      * unbounded virtual-thread executor, so a loop would freeze the UI.
      */
@@ -138,7 +138,7 @@ public final class McpSessionRegistry {
 
     /**
      * Charges one rename attempt. Refused attempts are charged too -- they
-     * cost the same FX hop, and each one tells the agent what is wrong, so
+     * cost the same UI hop, and each one tells the agent what is wrong, so
      * twenty is far more than it needs to learn.
      *
      * <p>Not the shared {@link #charge} helper: its message is written for a
@@ -161,7 +161,7 @@ public final class McpSessionRegistry {
 
     /**
      * Charges one handoff write. Like {@link #chargeRename}, a refused attempt
-     * is charged: it costs the same FX hop and turn under the state lock, and
+     * is charged: it costs the same UI hop and turn under the state lock, and
      * it explains itself, so the budget bounds looping rather than learning.
      */
     public void chargeHandoff(ManagedSessionId sessionId) throws McpBudgetExhaustedException {

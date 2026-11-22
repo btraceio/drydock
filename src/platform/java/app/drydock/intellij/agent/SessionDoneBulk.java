@@ -46,8 +46,7 @@ import java.util.function.Predicate;
  * session of the selected project at once. A session is done when its
  * worktree's work has landed -- the branch merged (ancestry, or its pull
  * request recorded as merged), or the worktree prunable or detached -- the
- * test {@link SessionDonePlan#doneSession} applies, the same one the
- * standalone app's stale bucket applies to session-less worktrees. A
+ * test {@link SessionDonePlan#doneSession} applies. A
  * merely idle session on an unmerged branch is not done and is never
  * touched.
  *

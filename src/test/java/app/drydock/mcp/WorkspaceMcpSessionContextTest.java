@@ -53,7 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * returns real paths by contract.
  *
  * <p>NOT covered here (needs a running window): {@code startSession}, which
- * delegates to {@code MainWorkspace.startAgentSession} and opens a tab.</p>
+ * delegates to the host's session-open path and opens a tab.</p>
  */
 class WorkspaceMcpSessionContextTest {
 
@@ -289,9 +289,8 @@ class WorkspaceMcpSessionContextTest {
     /**
      * Each local repository used to get its own 20-second {@code join} slice,
      * so N repositories could hold the HTTP connection for 20N seconds. One
-     * deadline now bounds the whole call, as it already does in {@code
-     * MainWorkspace.findWorktreeOwner}: an expiry fails the call rather than
-     * letting the next repository start a fresh slice.
+     * deadline now bounds the whole call: an expiry fails the call rather
+     * than letting the next repository start a fresh slice.
      */
     @Test
     void reposListFailsOnceItsSharedDeadlineIsGone(@TempDir Path repoDir) throws Exception {

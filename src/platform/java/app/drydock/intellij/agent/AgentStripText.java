@@ -145,7 +145,7 @@ public final class AgentStripText {
      * — the agent does not outlive its ssh client, so a stopped row is
      * stopped — and the activity monitor cannot see a remote agent (OQ10),
      * so no working/idle word appears here either. An EXITED row reads the
-     * app's connection-lost rendering: any process exit on a remote tab is
+     * connection-lost rendering: any process exit on a remote tab is
      * the ssh client's, not the agent's, so the copy says the session ended
      * and names the resume instead of implying the agent finished.
      */

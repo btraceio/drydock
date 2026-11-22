@@ -21,13 +21,13 @@ import java.util.function.UnaryOperator;
 
 /**
  * Everything {@link McpToolRouter} needs from the running application, behind
- * one interface with no JavaFX in its signatures.
+ * one interface with no host-UI type in its signatures.
  *
  * <p>The seam exists for testability: the build has no mocking library, and a
- * router that reached into {@code MainWorkspace} directly could only be
- * exercised on the FX thread. Implementations that <em>do</em> own FX state are
- * responsible for hopping threads and for timing out (AGENTS.md: a wedged FX
- * thread must fail the call, not hold it open).</p>
+ * router that reached into host UI directly could only be exercised on the UI
+ * thread. Implementations that <em>do</em> own UI state are responsible for
+ * hopping threads and for timing out (AGENTS.md: a wedged UI thread must fail
+ * the call, not hold it open).</p>
  *
  * <p>The context also owns worktree-directory naming and repository lookup.
  * The router never derives a path: the naming recipe needs a {@code Repository}
@@ -65,7 +65,7 @@ public interface McpSessionContext {
      * it. Empty when nothing is stored under that key.
      *
      * <p>A transform rather than a plain "replace this value": the human's
-     * Review tab writes the same threads from the FX thread, so a caller that
+     * Review tab writes the same threads from the UI thread, so a caller that
      * read a value, decided, and then wrote it back would overwrite whatever
      * the human did in between. The transform's own view is the stored value,
      * so a decision made inside it (including refusing by throwing) is made
@@ -101,7 +101,7 @@ public interface McpSessionContext {
      */
     String reviewerName(ManagedSessionId caller);
 
-    /** The diff of a scope, already parsed. Runs git, so never on the FX thread. */
+    /** The diff of a scope, already parsed. Runs git, so never on the UI thread. */
     UnifiedDiff reviewDiff(ReviewScope scope) throws McpToolException;
 
     /** The scope's tour record, if the agent has posted one. */

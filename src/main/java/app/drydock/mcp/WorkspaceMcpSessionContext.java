@@ -68,16 +68,15 @@ import java.util.logging.Logger;
  * every question {@link McpToolRouter} asks.
  *
  * <p>Every method here runs on an {@link McpServer} request thread, never the
- * JavaFX application thread. Slow work (git spawns, file reads, opening a tab)
+ * UI thread. Slow work (git spawns, file reads, opening a tab)
  * is therefore either done inline on that thread or handed to a service that
- * owns its own executor -- and every wait is bounded: a wedged FX thread must
+ * owns its own executor -- and every wait is bounded: a wedged UI thread must
  * fail the tool call, not hold the HTTP connection open (AGENTS.md).</p>
  *
- * <p>Deliberately holds no JavaFX type: everything this class needs from the
- * UI arrives as an injected function rather than a live reference to it.
- * Opening a session tab is a {@link BiFunction} bound to {@code
- * MainWorkspace.startAgentSession}; renaming one is {@code sessionRenamer}.
- * Both do their own FX-thread hop inside {@code MainWorkspace}, never here.</p>
+ * <p>Deliberately holds no host-UI type: everything this class needs from
+ * the UI arrives as an injected function rather than a live reference to it.
+ * Each injected function does its own UI-thread hop in its host, never
+ * here.</p>
  */
 public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
@@ -92,7 +91,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     /**
      * Bound on {@link #startSession}: resolving which repository owns the
-     * worktree, then the FX-thread hop that opens the tab.
+     * worktree, then the UI-thread hop that opens the tab.
      *
      * <p>Public because the whole budget of the work behind {@code
      * startSession} must be provably SMALLER than this. If it were not, this
@@ -104,7 +103,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public static final long START_SESSION_TIMEOUT_SECONDS = 30;
 
     /**
-     * Bound on {@link #renameSession}: one FX-thread hop and one state
+     * Bound on {@link #renameSession}: one UI-thread hop and one state
      * transform. Public for the same reason {@link
      * #START_SESSION_TIMEOUT_SECONDS} is -- the workspace derives its own,
      * smaller budget from it rather than restating a number. Deliberately not
@@ -113,7 +112,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public static final long RENAME_TIMEOUT_SECONDS = 25;
 
     /**
-     * Bound on {@link #reclaimConversation}: one FX-thread hop and one state
+     * Bound on {@link #reclaimConversation}: one UI-thread hop and one state
      * transform, the same shape as a rename. Public for the same reason
      * {@link #RENAME_TIMEOUT_SECONDS} is. Distinct from it so a reclaim that
      * also forgets the old conversation's activity state can never be
@@ -122,8 +121,8 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     public static final long RECLAIM_TIMEOUT_SECONDS = 25;
 
     /**
-     * Bound on {@link #writeHandoff}: one FX-thread hop, one state transform,
-     * and one {@code git rev-parse} off the FX thread to stamp the brief with
+     * Bound on {@link #writeHandoff}: one UI-thread hop, one state transform,
+     * and one {@code git rev-parse} off the UI thread to stamp the brief with
      * the commit it was written against. Slightly longer than a rename for
      * that git call, which a rename does not make.
      */
@@ -173,12 +172,12 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * @param sessionCatalog   every managed session, e.g. {@code SessionManager::sessions}
      * @param repositoryCatalog every registered repository, e.g. {@code RepositoryManager::repositories}
      * @param userConfig       supplier rather than a value because {@link UserConfig#load()}
-     *                         reads a file, and the user may edit it while the app runs
-     * @param sessionStarter   bound to {@code MainWorkspace.startAgentSession}
-     * @param sessionRenamer   bound to {@code MainWorkspace.renameSessionFromAgent}
-     * @param sessionReclaimer bound to {@code MainWorkspace.reclaimConversationFromAgent}
-     * @param handoffWriter    bound to {@code MainWorkspace.writeHandoffFromAgent}
-     * @param workflowHandoffWriter bound to {@code MainWorkspace.writeWorkflowHandoffFromAgent}
+     *                         reads a file, and the user may edit it while the process runs
+     * @param sessionStarter   the host's session-open path, or a not-served stub
+     * @param sessionRenamer   the host's session-rename path
+     * @param sessionReclaimer the host's conversation-reclaim path, or a not-served stub
+     * @param handoffWriter    the host's handoff-write path, or a not-served stub
+     * @param workflowHandoffWriter the host's workflow-handoff-write path, or a not-served stub
      */
     public WorkspaceMcpSessionContext(Supplier<List<ManagedAgentSession>> sessionCatalog,
                                       Supplier<List<Repository>> repositoryCatalog,
@@ -453,7 +452,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
 
     /**
      * Resolved inline on the request thread, unlike the board's cached
-     * baseline: this runs off the FX thread already, and handing {@code
+     * baseline: this runs off the UI thread already, and handing {@code
      * review_recheck} a first-call-always-unresolved answer -- which it would
      * refuse on -- is worse than one {@code git rev-parse}.
      */
@@ -562,8 +561,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
      * while the HTTP handler waits.</p>
      *
      * <p>The local repositories share ONE deadline for the whole call rather
-     * than each getting its own slice, for the same reason {@code
-     * MainWorkspace.findWorktreeOwner} does: N registered repositories would
+     * than each getting its own slice: N registered repositories would
      * otherwise multiply one plausible per-repository timeout into a total that
      * held the HTTP connection open for N times as long.</p>
      */
@@ -894,7 +892,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     /**
      * Awaits {@code future} within whatever is left of {@code deadlineNanos},
      * translating what comes back into a message the agent can act on. Never
-     * unbounded: a wedged FX thread or a hung git must fail the call, not hold
+     * unbounded: a wedged UI thread or a hung git must fail the call, not hold
      * the HTTP connection.
      *
      * <p>Running out of the shared deadline is reported as its own exception
@@ -964,7 +962,7 @@ public final class WorkspaceMcpSessionContext implements McpSessionContext {
     /** The shared deadline of one tool call ran out; the call fails rather than continuing. */
     private static final class DeadlineExceededException extends McpToolException {
         DeadlineExceededException() {
-            super("Drydock did not respond in time; the app may be busy.");
+            super("Drydock did not respond in time; it may be busy.");
         }
     }
 

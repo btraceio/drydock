@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * only then {@link Process#destroyForcibly()} joins the child for at
  * most two seconds more. Interruption during close restores the caller's
  * interrupt flag and still releases the child. Blocking — never call on
- * the JavaFX application thread.</p>
+ * the UI thread.</p>
  */
 public final class LspServerProcess implements AutoCloseable {
 

@@ -66,7 +66,7 @@ import java.util.regex.Pattern;
  *
  * <p>{@link #of} itself is string work over an already-built graph, but
  * {@link ChangeGraph#of} is blocking (it parses every changed file and can
- * trigger a first-time native grammar load), so the pair belongs off the FX
+ * trigger a first-time native grammar load), so the pair belongs off the UI
  * thread.</p>
  */
 public final class Sections {

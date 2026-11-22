@@ -106,7 +106,7 @@ import app.drydock.state.json.JsonWriter;
  * all eval containers as {@code XDG_DATA_HOME} (see {@link #DATA_VOLUME}),
  * so plugin installs made on first start outlive the container.</p>
  *
- * <p>All methods are blocking and must be called off the JavaFX application
+ * <p>All methods are blocking and must be called off the UI
  * thread. {@link #probe} is run once at provider init (background) and its
  * result cached.</p>
  */

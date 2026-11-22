@@ -59,7 +59,6 @@ import app.drydock.sdlc.ResourceManifestJournal;
 import app.drydock.sdlc.SessionWorkflowResourceOwner;
 import app.drydock.sdlc.WorkflowStagingLayout;
 import app.drydock.projects.SharedProjectsFile;
-import app.drydock.projects.SharedProjectsSeed;
 import app.drydock.state.JsonApplicationStateRepository;
 import app.drydock.workspace.CommandRunner;
 
@@ -105,8 +104,8 @@ import java.util.function.Supplier;
  * watcher, and review backend. Deliberately not {@code @State}-annotated —
  * persistence goes through the core single writer
  * ({@link ApplicationStateStore}), not the IDE's component state
- * machinery, so the plugin and the standalone app share one state format and
- * one writer discipline.
+ * machinery, keeping the core's single-writer discipline for the state
+ * format.
  *
  * <p>The constructor must stay cheap and EDT-safe (the platform may
  * instantiate the service on the dispatch thread): it only computes paths,
@@ -164,8 +163,7 @@ public final class DrydockPluginService implements Disposable {
     }
 
     public DrydockPluginService() {
-        this(defaultBaseDir(), SharedProjectsFile.defaultFile(), DrydockPluginService::seedFromApp,
-                PRODUCTION_BACKEND, INIT_TIMEOUT);
+        this(defaultBaseDir(), SharedProjectsFile.defaultFile(), PRODUCTION_BACKEND, INIT_TIMEOUT);
         // The quit question, for as long as the plugin is loaded. Here, not in
         // plugin.xml: the quit veto is an ApplicationListener added through
         // the application, not a message-bus topic.
@@ -178,12 +176,12 @@ public final class DrydockPluginService implements Disposable {
      * touch the user's real {@code ~/.drydock/projects.json}.
      */
     DrydockPluginService(Path baseDir) {
-        this(baseDir, baseDir.resolve("projects.json"), List::of, ReviewBackend::new, INIT_TIMEOUT);
+        this(baseDir, baseDir.resolve("projects.json"), ReviewBackend::new, INIT_TIMEOUT);
     }
 
     /** Test seam: as {@link #DrydockPluginService(Path)}, with the review backend built by {@code backends}. */
     DrydockPluginService(Path baseDir, BackendFactory backends) {
-        this(baseDir, baseDir.resolve("projects.json"), List::of, backends, INIT_TIMEOUT);
+        this(baseDir, baseDir.resolve("projects.json"), backends, INIT_TIMEOUT);
     }
 
     /**
@@ -191,7 +189,7 @@ public final class DrydockPluginService implements Disposable {
      * {@code initTimeout} for initialization.
      */
     DrydockPluginService(Path baseDir, BackendFactory backends, Duration initTimeout) {
-        this(baseDir, baseDir.resolve("projects.json"), List::of, backends, initTimeout);
+        this(baseDir, baseDir.resolve("projects.json"), backends, initTimeout);
     }
 
     /** Builds the review backend; {@code ReviewBackend::new} fits it. */
@@ -225,12 +223,12 @@ public final class DrydockPluginService implements Disposable {
         }
     }
 
-    private DrydockPluginService(Path baseDir, Path sharedProjectsFile, Supplier<List<SharedProject>> appSeed,
-                                BackendFactory backends, Duration initTimeout) {
+    private DrydockPluginService(Path baseDir, Path sharedProjectsFile, BackendFactory backends,
+                                Duration initTimeout) {
         this.baseDir = baseDir;
         this.initTimeout = initTimeout;
         this.backends = backends;
-        this.sharedProjects = new SharedProjectsService(new SharedProjectsFile(sharedProjectsFile), appSeed,
+        this.sharedProjects = new SharedProjectsService(new SharedProjectsFile(sharedProjectsFile),
                 Executors.newSingleThreadScheduledExecutor(runnable -> {
                     Thread thread = new Thread(runnable, "drydock-shared-projects");
                     thread.setDaemon(true);
@@ -478,12 +476,11 @@ public final class DrydockPluginService implements Disposable {
 
     /**
      * Sets {@link #TREE_SITTER_LIB_PROPERTY} to {@code directory} unless it is
-     * already set. Without it the binding extracts to {@code ~/.tree-sitter},
-     * which the standalone app uses too, and it rewrites a library file in
-     * place when the bundled one differs: an app and a plugin that bundle
-     * different versions would overwrite a library the other has loaded. The
-     * property is JVM-wide, so it applies to every user of the binding in
-     * this IDE.
+     * already set. Without it the binding extracts to {@code ~/.tree-sitter}
+     * and rewrites a library file in place when the bundled one differs, so
+     * two IDE configurations bundling different versions would overwrite a
+     * library the other has loaded. The property is JVM-wide, so it applies
+     * to every user of the binding in this IDE.
      */
     static void useOwnTreeSitterLibraries(Path directory) {
         if (System.getProperty(TREE_SITTER_LIB_PROPERTY) == null) {
@@ -493,10 +490,9 @@ public final class DrydockPluginService implements Disposable {
 
     private static Path defaultBaseDir() {
         // NOT StateDirectory: its per-code-source install id changes on every
-        // plugin update and would orphan the persisted state, and the plugin
-        // must not read or write the standalone app's state directory either.
-        // The IDE config path is stable across plugin updates and private to
-        // this IDE configuration.
+        // plugin update and would orphan the persisted state. The IDE config
+        // path is stable across plugin updates and private to this IDE
+        // configuration.
         return Path.of(PathManager.getConfigPath()).resolve("drydock");
     }
 
@@ -681,9 +677,8 @@ public final class DrydockPluginService implements Disposable {
     }
 
     /**
-     * The registered projects shared with the standalone app: what the
-     * Drydock tool window lists. Usable at once; its first read completes
-     * shortly after the service starts.
+     * The registered projects the Drydock tool window lists. Usable at once;
+     * its first read completes shortly after the service starts.
      */
     public SharedProjectsService sharedProjects() {
         return sharedProjects;
@@ -693,23 +688,6 @@ public final class DrydockPluginService implements Disposable {
       * before initialization. EDT-safe: a memory read of the published state, no I/O. */
     public List<Repository> repositories() {
         return catalogState().repositories();
-    }
-
-    /**
-     * The first shared list, when none exists: the standalone app's own
-     * projects, from its newest state file, read-only. The plugin's own
-     * catalog is deliberately not a source (it registered every project
-     * the IDE opened). Blocking git calls: runs on the shared list's thread.
-     */
-    private static List<SharedProject> seedFromApp() {
-        Optional<Path> appState = SharedProjectsSeed.newestAppStateFile(SharedProjectsSeed.appDataRoot());
-        if (appState.isEmpty()) {
-            return List.of();
-        }
-        try (WorktreeService worktrees = new WorktreeService()) {
-            return SharedProjectsSeed.fromRepositories(SharedProjectsSeed.readRepositoriesOnly(appState.get()),
-                    SharedProjectsSeed.mainCheckoutVia(worktrees));
-        }
     }
 
     /**

@@ -271,8 +271,7 @@ public sealed interface TaskNode {
     /**
      * One open pull request belonging to the containing registered project:
      * not a draft, and not already checked out in one of the repository's
-     * worktrees (a checked-out PR is its worktree's row, the same rule the
-     * standalone app's sidebar follows).
+     * worktrees (a checked-out PR is its worktree's row).
      */
     record PullRequestRow(Path mainRoot, OpenPullRequest pullRequest) implements TaskNode {
         public PullRequestRow {

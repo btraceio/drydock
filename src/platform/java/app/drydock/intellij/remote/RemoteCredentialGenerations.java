@@ -70,7 +70,7 @@ public final class RemoteCredentialGenerations {
     /** The secret material of one generation; handed to the delivery route only, never logged. */
     record Credential(Request request, long generation, String token, String epoch) { }
 
-    /** How a credential reaches the box (and is withdrawn from it); blocking, never on the FX thread. */
+    /** How a credential reaches the box (and is withdrawn from it); blocking, never on the UI thread. */
     interface Delivery {
         /** Delivers {@code credential}; false when it could not be delivered. Cleans up after itself. */
         boolean deliver(Credential credential, BooleanSupplier cancelled) throws IOException, InterruptedException;
@@ -205,7 +205,7 @@ public final class RemoteCredentialGenerations {
         }
     }
 
-    /** Publishes a fresh generation if enrollment is Ready now; blocking, never on the FX thread. */
+    /** Publishes a fresh generation if enrollment is Ready now; blocking, never on the UI thread. */
     public Outcome publish(Request req, Supplier<Verdict> enrollment, BooleanSupplier cancelled)
             throws InterruptedException {
         ManagedSessionId session = req.session();

@@ -37,7 +37,7 @@ public final class TerminalAgentProvider implements AgentProvider {
     /**
      * The user's shell, resolved by the wrapper shell at exec time (the same
      * expansion {@code TerminalSpec.loginShell} relies on). Never resolved
-     * eagerly: this app's own process environment is not the shell's, and a
+     * eagerly: this process's own environment is not the shell's, and a
      * GUI launch may not carry {@code SHELL} at all.
      */
     public static final String SHELL_COMMAND = "${SHELL:-/bin/zsh}";

@@ -50,7 +50,7 @@ final class PiActivityReporter implements ActivityReporter {
     }
 
     /**
-     * Drops activity left behind by a previous app run.
+     * Drops activity left behind by a previous process run.
      *
      * <p>No agent process survives the host JVM, so every state file present
      * at startup is by definition stale -- the same rule

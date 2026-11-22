@@ -20,8 +20,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Discovers and removes git worktrees for a repository by invoking the
@@ -71,7 +74,7 @@ public final class WorktreeService implements AutoCloseable {
      * docs/superpowers/specs/2026-10-08-lsp-tier3-usage-resolution.md, §5:
      * the worktree's ~/.drydock/lsp/&lt;slug&gt; cache is deleted when the
      * worktree is deleted). Fires on this service's background executor
-     * thread -- never the FX thread -- with the {@link #canonical(Path)
+     * thread -- never the UI thread -- with the {@link #canonical(Path)
      * canonical} form of the removed path, and never on any failed
      * removal: a listener must not be able to observe a worktree that is
      * still on disk, and a refusal must not be mistaken for a removal.
@@ -152,8 +155,7 @@ public final class WorktreeService implements AutoCloseable {
     /**
      * Registers a listener told after every successful worktree removal
      * ({@link #remove}/{@link #removeForced}); see {@link RemovalListener}.
-     * No unsubscribe: a listener lives for the owning component's lifetime
-     * (MainWorkspace, here, shares the application's).
+     * No unsubscribe: a listener lives for the owning component's lifetime.
      */
     public void addRemovalListener(RemovalListener listener) {
         removalListeners.add(Objects.requireNonNull(listener, "listener"));
@@ -186,10 +188,35 @@ public final class WorktreeService implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> listBlocking(repositoryRoot), executor);
     }
 
+    /** Bounded wait for {@code git worktree list} when resolving a main checkout. */
+    private static final long MAIN_CHECKOUT_TIMEOUT_SECONDS = 15;
+
+    /**
+     * The main checkout of the repository {@code root} belongs to, through
+     * {@code git worktree list}: the root itself for a main checkout, empty
+     * when git cannot tell (the folder is gone, or it is not a repository).
+     * Blocks at most {@value #MAIN_CHECKOUT_TIMEOUT_SECONDS} seconds; call
+     * it off the UI thread.
+     */
+    public Optional<Path> mainCheckout(Path root) {
+        try {
+            return list(root).get(MAIN_CHECKOUT_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                    .filter(Worktree::mainCheckout)
+                    .map(Worktree::path)
+                    .findFirst();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.DEBUG, () -> "No main checkout for " + root + ": " + e);
+            return Optional.empty();
+        }
+    }
+
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     List<Worktree> listBlocking(Path repositoryRoot) {
@@ -1062,7 +1089,7 @@ public final class WorktreeService implements AutoCloseable {
     /**
      * The real (symlink-resolved) form of {@code p}, the canonical key a
      * removed worktree is reported under and a per-worktree owner (e.g.
-     * MainWorkspace's language-server registry) keys its worktrees by:
+     * the language-server registry) keys its worktrees by:
      * macOS's temp directory lives under {@code /var}, a symlink to
      * {@code /private/var}, while git records the resolved
      * {@code /private/var/...} form, so raw absolute paths would not match.

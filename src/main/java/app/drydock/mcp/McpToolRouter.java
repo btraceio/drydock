@@ -146,9 +146,9 @@ public final class McpToolRouter {
 
     /**
      * The review tools plus {@code session_rename}: an agent reviewing here
-     * may also relabel its own session as the conversation finds its shape,
-     * exactly as the desktop app's MCP allows. The other session tools stay
-     * desktop-only -- the IDE plugin handles handoffs differently.
+     * may also relabel its own session as the conversation finds its shape.
+     * The other session tools stay unserved -- the IDE handles session
+     * lifecycle through its own UI, not through the agent's MCP.
      */
     public static final Set<String> REVIEW_TOOLS_AND_RENAME;
     static {
@@ -793,7 +793,7 @@ public final class McpToolRouter {
      * {@code scope} and {@code files}.
      *
      * <p>Scanned synchronously, unlike the board's own background scan:
-     * an MCP tool call already runs off the FX thread, {@link
+     * an MCP tool call already runs off the UI thread, {@link
      * OutOfDiffFanIn#scan} bounds itself with a 30s timeout, and handing an
      * agent a first-call-always-unavailable answer it will then act on is
      * worse than making it wait.</p>
@@ -1827,7 +1827,7 @@ public final class McpToolRouter {
                     .put("writtenAt", new JsonString(written.writtenAt().toString()));
         } catch (McpToolException | RuntimeException e) {
             // Only an outright failure is refunded -- but "outright" includes
-            // an unchecked one. The context reaches git and the FX thread, and
+            // an unchecked one. The context reaches git and the UI thread, and
             // a charge kept for a write that never happened would let a
             // repeatable infrastructure failure burn the whole budget.
             registry.refundHandoff(caller);
@@ -1878,7 +1878,7 @@ public final class McpToolRouter {
             outcome = context.renameSession(caller, title);
         } catch (McpToolException e) {
             // Only an outright failure is refunded. The refused OUTCOMES are
-            // charged: each one still costs an FX hop and a turn under the
+            // charged: each one still costs an UI hop and a turn under the
             // state lock, dispatched from an unbounded virtual-thread
             // executor, and each one says what is wrong, so twenty attempts
             // is far more than an agent needs to stop.

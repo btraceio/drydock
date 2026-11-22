@@ -9,16 +9,15 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * One entry of the registered-projects list that the standalone app and the
- * IntelliJ plugin share ({@link SharedProjectsFile}).
+ * One entry of the registered-projects list ({@link SharedProjectsFile}).
  *
  * <p>Membership only: what a tool remembers <em>about</em> a project (its
  * last-used agent, its sessions) stays in that tool's own state, keyed by
- * {@link #id()}. The id is therefore the contract between the two tools and
- * never changes once written.</p>
+ * {@link #id()}. The id is therefore the contract between writers of the
+ * file and never changes once written.</p>
  *
  * <p>{@code root} is the project's main checkout, absolute and normalized.
- * A remote (SSH) project, which only the app can open, carries its
+ * A remote (SSH) project, which no IDE window can open, carries its
  * {@link SshRemote} and the remote's placeholder root.</p>
  */
 public record SharedProject(RepositoryId id, Path root, String displayName, Instant addedAt,

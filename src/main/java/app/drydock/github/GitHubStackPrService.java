@@ -35,7 +35,7 @@ import java.util.concurrent.Executors;
  * branch -- or the repository's default branch for a stack root. Runs
  * {@code gh api --method POST repos/{owner}/{repo}/pulls} with a JSON
  * payload file, the exact ownership/timeout discipline of {@link
- * GitHubIssueMirrorService} (the app's other GitHub write). {@code gh} is
+ * GitHubIssueMirrorService} (Drydock's other GitHub write). {@code gh} is
  * optional: missing or unauthenticated is a visible {@link Outcome.Unavailable},
  * a refused POST a visible {@link Outcome.Rejected} that never retries by
  * itself -- the caller decides whether a retry is safe, since a killed POST

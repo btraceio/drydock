@@ -32,7 +32,7 @@ import java.util.Set;
  * prompt, which makes it arbitrary code execution in every Pi tab — so both
  * it and its directory are owner-only.</p>
  *
- * <p>Performs filesystem I/O; call off the JavaFX application thread
+ * <p>Performs filesystem I/O; call off the UI thread
  * (AGENTS.md).</p>
  */
 public final class PiExtensionInstaller {

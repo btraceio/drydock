@@ -107,7 +107,7 @@ class StateDirectoryTest {
         // Failed(OverlappingFileLockException) -- the JVM-wide lock table
         // rejects a second channel on the same file; the HeldByOther outcome
         // (tryLock returned null) is the cross-process second instance, which
-        // is what the app's own double-launch case hits.
+        // is what the double-launch case hits.
         StateDirectory.InstanceLock second = StateDirectory.tryLockInstance(directory);
         assertFalse(second instanceof StateDirectory.InstanceLock.Held, "a second claim is refused");
 

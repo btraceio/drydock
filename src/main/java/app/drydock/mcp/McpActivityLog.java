@@ -21,7 +21,7 @@ import java.util.function.Consumer;
  * bar still reflects the whole session.</p>
  *
  * <p>Thread-safe: the MCP server writes from its request threads, the UI
- * reads on the FX thread.</p>
+ * reads on the UI thread.</p>
  */
 public final class McpActivityLog {
 
@@ -73,7 +73,7 @@ public final class McpActivityLog {
             totalBytes += entry.responseBytes();
             totalCalls++;
         }
-        // Fired outside the monitor: a listener rebuilding an FX panel must
+        // Fired outside the monitor: a listener rebuilding an UI panel must
         // not hold the lock the server's request threads are writing under.
         for (Consumer<Entry> listener : listeners) {
             try {

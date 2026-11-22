@@ -186,10 +186,10 @@ class GitStatusServiceTest {
     }
 
     /**
-     * Called on the FX thread by the Review board's resolve. After the
+     * Called on the UI thread by the Review board's resolve. After the
      * service's executor is shut down (app shutdown racing a reveal), the
      * submit is rejected; that must arrive as a failed future the caller's
-     * handler sees, not an exception thrown into the FX event handler that
+     * handler sees, not an exception thrown into the UI event handler that
      * leaves the board on "Resolving…".
      */
     @Test

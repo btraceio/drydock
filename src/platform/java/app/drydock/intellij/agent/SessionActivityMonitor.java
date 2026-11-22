@@ -42,8 +42,8 @@ import java.util.function.Supplier;
  *
  * <p>An unchanged activity is not re-emitted: subscribers repaint on every
  * event, and a once-a-second repaint of every strip and widget in every window
- * is exactly the kind of idle cost that made the app's pulse driver burn 26 h
- * of CPU per 70 h of uptime.</p>
+ * is exactly the kind of idle cost that once burned 26 h of CPU per 70 h of
+ * uptime when a pulse driver repainted unconditionally.</p>
  */
 public final class SessionActivityMonitor implements Disposable {
 

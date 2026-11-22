@@ -12,8 +12,7 @@ import java.util.OptionalInt;
  *
  * <p>A selection stops at its anchor's <em>hunk</em>: GitHub requires both
  * ends of a multi-line review comment to lie in the same file and the same
- * diff hunk, and rejects the whole review otherwise (the rule the JavaFX
- * app's {@code DiffLineSelection} applies to its rows). The anchor is the
+ * diff hunk, and rejects the whole review otherwise. The anchor is the
  * selection's first line; the range runs from it towards the last selected
  * line and ends at the last diff row of the anchor's hunk on that side. A
  * selection whose first line is no diff row on its side (unchanged code

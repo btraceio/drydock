@@ -17,7 +17,7 @@ import java.util.Set;
  * would therefore dispatch a subagent per render, which is worse than the
  * per-base-move flood it was meant to prevent.</p>
  *
- * <p>Confined to the FX thread, like the base-move memo it sits beside; no
+ * <p>Confined to the UI thread, like the base-move memo it sits beside; no
  * synchronization, for the same reason.</p>
  */
 public final class RecheckDispatch {

@@ -108,7 +108,7 @@ class ApplicationStateCodecTest {
     void sessionWithoutBranchCreatedHereDecodesToTrue() {
         // Every session persisted before this field existed did create its
         // own branch; defaulting to false would silently stop deleting
-        // branches the app is responsible for.
+        // branches Drydock is responsible for.
         ApplicationState state = ApplicationStateCodec.fromJson(JsonParser.parse(SESSION_WITHOUT_PROVENANCE));
 
         assertTrue(state.sessions().get(0).branchCreatedHere());

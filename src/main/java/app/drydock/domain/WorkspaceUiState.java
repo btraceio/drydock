@@ -13,7 +13,7 @@ import java.util.Set;
  * sidebar/repo state, cosmetic preferences, and the open session tabs.
  *
  * <p>{@code openSessionIds} records the tab-strip order of sessions that
- * were open when the app last shut down, and {@code selectedSessionId}
+ * were open when the host last shut down, and {@code selectedSessionId}
  * records which of those tabs was active. These are cosmetic UI fields:
  * a malformed entry must not make the whole state file look corrupt.</p>
  *

@@ -14,7 +14,7 @@ import java.util.concurrent.CompletableFuture;
  * later language-server implementation would label its own {@link
  * Provenance#RESOLVED}, and is used only when a server for the language is
  * running and indexed. Every answer is a future because both kinds search:
- * a caller must never wait for one on the FX thread.</p>
+ * a caller must never wait for one on the UI thread.</p>
  */
 public interface UsageProvider {
 

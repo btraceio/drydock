@@ -81,7 +81,7 @@ public final class RemoteReviewService implements AutoCloseable {
         composition.annotationStore().flushPendingSaves();
     }
 
-    /** Blocking (call off the FX thread). Reuses a live current-generation transport; else prepares one. */
+    /** Blocking (call off the UI thread). Reuses a live current-generation transport; else prepares one. */
     public Ready ensure(Session s) throws ForwardException, InterruptedException {
         long epoch;
         synchronized (lock) {

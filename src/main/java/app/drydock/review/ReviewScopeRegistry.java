@@ -38,8 +38,8 @@ import java.util.function.Consumer;
  * verdicts would all be orphaned by a background rescan. The id a scope was
  * first minted with therefore survives until it is explicitly revoked.</p>
  *
- * <p>Thread-safe: scopes are resolved off the FX thread, the MCP router
- * resolves on its own executor, and the UI reads on the FX thread.</p>
+ * <p>Thread-safe: scopes are resolved off the UI thread, the MCP router
+ * resolves on its own executor, and the UI reads on the UI thread.</p>
  */
 public final class ReviewScopeRegistry {
 

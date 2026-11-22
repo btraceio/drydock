@@ -30,7 +30,7 @@ import java.util.Optional;
  *
  * <p>The token is a JWT; its {@code exp} claim is decoded (without
  * signature verification -- display only, not auth) so the UI can show
- * a countdown. Blocking; must be called off the FX thread.</p>
+ * a countdown. Blocking; must be called off the UI thread.</p>
  */
 public final class DtoolEvalTokenResolver implements EvalTokenResolver {
 

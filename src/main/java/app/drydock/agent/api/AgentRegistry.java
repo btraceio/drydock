@@ -16,14 +16,14 @@ import java.util.ServiceLoader;
  * Discovers {@link AgentProvider}s (via {@link ServiceLoader}), inits each with
  * the shared {@link AgentContext}, caches availability, remote-capability, and
  * subagent-capability once, and resolves the default agent for a new session.
- * Availability is computed off the FX thread by the caller of {@link #create}
+ * Availability is computed off the UI thread by the caller of {@link #create}
  * (construction probes {@code locateExecutable}, which may block on
  * filesystem I/O); remote-capability and subagent-capability come from
  * {@link AgentProvider#supportsRemote()} and
  * {@link AgentProvider#supportsSubagents()}, which are cheap and non-blocking
  * by contract, so they impose no such requirement. Every other reader (e.g.
  * the UI building a picker or a prompt) only ever reads the cached maps, so
- * it never needs to probe -- and never blocks the FX thread -- to know
+ * it never needs to probe -- and never blocks the UI thread -- to know
  * whether an agent is available, remote-capable, or subagent-capable.
  */
 public final class AgentRegistry {
@@ -37,7 +37,7 @@ public final class AgentRegistry {
     private final Map<AgentKind, Optional<SphinxReviewSupport>> sphinxReviewCapability = new EnumMap<>(AgentKind.class);
     private final Map<AgentKind, List<String>> modelSuggestionsCache = new EnumMap<>(AgentKind.class);
 
-    /** Discovers providers via ServiceLoader. Call off the FX thread (probes executables). */
+    /** Discovers providers via ServiceLoader. Call off the UI thread (probes executables). */
     public static AgentRegistry create(AgentContext ctx) {
         List<AgentProvider> discovered = new ArrayList<>();
         for (AgentProvider provider : ServiceLoader.load(AgentProvider.class)) {
@@ -52,8 +52,8 @@ public final class AgentRegistry {
      * loader, which cannot see the plugin's own {@code META-INF/services}
      * registrations, so plugin glue must pass its own class loader (e.g.
      * {@code AgentRegistry.class.getClassLoader()}); {@link #create(AgentContext)}
-     * keeps the TCCL semantics for the standalone app. Call off the FX thread
-     * (probes executables).
+     * keeps the thread-context-class-loader semantics of {@link #create(AgentContext)}.
+     * Call off the UI thread (probes executables).
      */
     public static AgentRegistry create(AgentContext ctx, ClassLoader loader) {
         List<AgentProvider> discovered = new ArrayList<>();
@@ -159,7 +159,7 @@ public final class AgentRegistry {
      * -- used by the UI to preview the actual command without importing the
      * {@code spi} layer itself. May block on capability probing, same as
      * {@link AgentProvider#buildCreateCommand}; callers should run this off
-     * the FX thread.
+     * the UI thread.
      *
      * @return the built command, or a bracketed placeholder describing why
      *         none is available (no provider for {@code kind}, or the plan
@@ -194,7 +194,7 @@ public final class AgentRegistry {
      * Whether {@code kind}'s provider can actually route an eval session's
      * traffic to the eval account. Delegates to the provider's cached
      * {@link app.drydock.agent.spi.AgentProvider#evalAvailable()}; safe to
-     * read on the FX thread.
+     * read on the UI thread.
      */
     public boolean evalAvailable(AgentKind kind) {
         return provider(kind).map(AgentProvider::evalAvailable).orElse(false);
@@ -207,7 +207,7 @@ public final class AgentRegistry {
      * {@link #supportsRemote}: a provider whose flag comes from a {@code
      * --help} probe only learns the answer once that probe lands, and a value
      * frozen at construction would read "not enforced" for the whole run.
-     * Safe on the FX thread -- the provider returns an in-memory snapshot.
+     * Safe on the UI thread -- the provider returns an in-memory snapshot.
      */
     public boolean enforcesReadOnly(AgentKind kind) {
         return provider(kind).map(AgentProvider::enforcesReadOnly).orElse(false);
@@ -215,7 +215,7 @@ public final class AgentRegistry {
 
     /**
      * When the eval session's auth token expires, for display only. Delegates
-     * to the provider; safe to read on the FX thread (it reads an in-memory
+     * to the provider; safe to read on the UI thread (it reads an in-memory
      * snapshot, no I/O).
      */
     public Optional<Instant> evalTokenExpiry(AgentKind kind, String sessionKey) {
@@ -227,7 +227,7 @@ public final class AgentRegistry {
      * {@link app.drydock.agent.spi.AgentProvider#supportsRemote()}. Cached
      * at construction time (alongside {@link #isAvailable}) so callers never
      * need to re-probe -- and, in particular, so the UI can read this
-     * synchronously off the FX thread without triggering a process spawn.
+     * synchronously off the UI thread without triggering a process spawn.
      */
     public boolean supportsRemote(AgentKind kind) {
         return remoteCapability.getOrDefault(kind, false);
@@ -237,7 +237,7 @@ public final class AgentRegistry {
      * Whether {@code kind}'s provider can dispatch a subagent, per
      * {@link app.drydock.agent.spi.AgentProvider#supportsSubagents()}.
      * Cached at construction alongside {@link #supportsRemote}, so the UI
-     * reads it on the FX thread without a process spawn.
+     * reads it on the UI thread without a process spawn.
      */
     public boolean supportsSubagents(AgentKind kind) {
         return subagentCapability.getOrDefault(kind, false);

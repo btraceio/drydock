@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link AgentRegistry#supportsSubagents} is cached at construction from
  * {@link AgentProvider#supportsSubagents()} -- the same idiom as {@link
  * AgentRegistryTest#supportsRemoteReflectsCachedCapability}, so the UI can
- * read it on the FX thread without a process spawn.
+ * read it on the UI thread without a process spawn.
  */
 class AgentRegistrySubagentsTest {
 

@@ -30,8 +30,8 @@ import java.util.Optional;
  * experimental workspace-box opt-in.
  *
  * <p>The worktree value lives in {@code ~/.drydock/config.json}
- * ({@link UserConfig}), the file the standalone app reads too, so the base is
- * set once for both tools. Reading and writing that file is I/O: it loads
+ * ({@link UserConfig}), so the base is set once per machine rather than per
+ * IDE configuration. Reading and writing that file is I/O: it loads
  * asynchronously and the field says "Loading…" until it has. The
  * workspace-box flag lives in the IDE's own application properties
  * ({@code WorkspaceSettings}), default off, so a fresh install stores
@@ -63,8 +63,7 @@ public final class DrydockConfigurable implements Configurable {
         baseField.setEnabled(false);
         String defaultBase = effectiveBase(Optional.empty(), Path.of(System.getProperty("user.home"))).toString();
         JLabel hint = new JLabel("<html>New tasks get a worktree in <i>&lt;folder&gt;/&lt;repo&gt;-&lt;branch&gt;</i>. "
-                + "Empty means " + defaultBase + ".<br>Shared with the standalone Drydock app "
-                + "(~/.drydock/config.json).</html>");
+                + "Empty means " + defaultBase + " (~/.drydock/config.json).</html>");
         hint.setForeground(UIUtil.getContextHelpForeground());
         UserConfig.loadAsync().whenComplete((config, failure) -> ApplicationManager.getApplication().invokeLater(() -> {
             if (baseField == null) {

@@ -15,7 +15,7 @@ import java.util.Optional;
  * integration is not bound to a single credential source.</p>
  *
  * <p>Implementations may block (process spawn, network) and MUST be called
- * off the JavaFX application thread. {@link #resolveToken()} is repeatable:
+ * off the UI thread. {@link #resolveToken()} is repeatable:
  * a long-running eval session may outlive the first token's TTL, so callers
  * re-invoke this to refresh (e.g. on resume).</p>
  */

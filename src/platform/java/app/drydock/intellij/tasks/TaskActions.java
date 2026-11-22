@@ -585,7 +585,7 @@ final class TaskActions {
 
     /**
      * "Remove from Drydock" on a project row: takes the project off the
-     * shared list — for the standalone app too — and touches nothing else:
+     * registered-projects list and touches nothing else:
      * not the repository, not its worktrees, not running agents. Asks only
      * when some of its agents are running here, to say they keep running.
      */
@@ -631,8 +631,8 @@ final class TaskActions {
     /**
      * {@code Remove <repo> from Drydock? <n> agents keep running.} A remote
      * (SSH) repository appends the {@code host:path} the files actually live
-     * at — never the placeholder root, which names nothing on any machine —
-     * the app's remove-confirm wording (spec: SSH remote repositories).
+     * at — never the placeholder root, which names nothing on any machine
+     * (spec: SSH remote repositories).
      */
     static String removeQuestion(String repo, int running, Optional<SshRemote> remote) {
         String question = "Remove " + repo + " from Drydock? "

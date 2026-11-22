@@ -8,7 +8,7 @@ import java.util.Optional;
  * The one-line prompt drydock hands a session when a human asks the agent to
  * address review findings.
  *
- * <p>One builder serves every host: the app's hand-off and the plugin's
+ * <p>One builder serves every host: a hand-off surface and the plugin's
  * ask-to-fix render the same bytes, so the prompt a session receives never
  * forks by which tree sent it. It is a pure builder -- it renders text and
  * nothing else. Whether an empty hand-off is worth delivering, how the prompt
@@ -21,7 +21,7 @@ public final class FindingsPrompt {
     }
 
     /**
-     * The prompt for a human's ask-to-fix: the exact heading the app has
+     * The prompt for a human's ask-to-fix: the exact heading the hosts
      * always sent, followed by the numbered findings.
      */
     public static String forFix(String subject, List<ReviewAnnotation> findings) {
@@ -105,7 +105,7 @@ public final class FindingsPrompt {
      * surrounding whitespace is stripped from the finished prompt.
      *
      * <p>An empty {@code findings} renders the stripped heading alone. The
-     * caller decides whether that is worth delivering: the app's hand-off
+     * caller decides whether that is worth delivering: a hand-off surface
      * refuses an empty list before it builds anything.</p>
      */
     public static String render(String heading, List<ReviewAnnotation> findings) {

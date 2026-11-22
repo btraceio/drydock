@@ -10,7 +10,7 @@ import java.util.Set;
  * The tool assigns its own id only after launch, so Drydock snapshots the id
  * store just before spawning and claims the first new matching record after.
  *
- * <p>Both methods may touch the filesystem and MUST run off the FX thread.</p>
+ * <p>Both methods may touch the filesystem and MUST run off the UI thread.</p>
  */
 public interface SessionIdDiscovery {
 
@@ -33,7 +33,7 @@ public interface SessionIdDiscovery {
      * candidates not already claimed by another session. Empty if not
      * resolvable (no unclaimed candidates near that time, or ambiguous).
      *
-     * <p>Both methods may touch the filesystem and MUST run off the FX thread.
+     * <p>Both methods may touch the filesystem and MUST run off the UI thread.
      * The default returns empty — providers that support DISCOVERED ids
      * override.</p>
      */

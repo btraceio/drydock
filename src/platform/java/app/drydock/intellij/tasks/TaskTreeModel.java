@@ -594,9 +594,9 @@ public final class TaskTreeModel {
 
     /**
      * The project's open, non-draft pull requests that no local worktree
-     * already holds -- the same rule the standalone app's sidebar applies
-     * (via {@link RepositoryPullRequests#selectable}, which also excludes
-     * drafts). Newest first; gh's own order is repository-dependent.
+     * already holds (via {@link RepositoryPullRequests#selectable}, which
+     * also excludes drafts). Newest first; gh's own order is
+     * repository-dependent.
      */
     private static Optional<List<TaskNode>> pullRequestChildren(Inputs in, Path main, String itemFilter) {
         return switch (in.pullRequestsByMainRoot().get(main)) {

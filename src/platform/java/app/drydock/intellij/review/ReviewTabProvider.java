@@ -1410,9 +1410,7 @@ final class ReviewTabProvider {
 
     /**
      * The one-line diagnosis of a failure, never blank: the message, or
-     * the type when the failure carries none. The same discipline as the
-     * app's {@code UiErrors.message} — which is JavaFX-bound and not part
-     * of the plugin, so this is the tab's two-line form of it.
+     * the type when the failure carries none.
      */
     static String rootMessage(Throwable failure) {
         Throwable t = failure;

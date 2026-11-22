@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The review store: {@code (scopeId, id)} keying, verdicts, persistence and
- * the concurrency contract between its two writers (the FX Review
+ * the concurrency contract between its two writers (the UI Review
  * destination and the MCP tool router).
  */
 class AnnotationStoreTest {
@@ -519,7 +519,7 @@ class AnnotationStoreTest {
      *
      * <p>A read-then-write pair loses one of them -- the slow thread writes a
      * value derived from what it read before the other thread's write landed.
-     * This is the FX-destination-versus-MCP-router race, with the latch
+     * This is the UI-destination-versus-MCP-router race, with the latch
      * standing in for the arbitrary scheduling that makes it rare in the
      * field and impossible to reproduce by hand.</p>
      */
@@ -558,7 +558,7 @@ class AnnotationStoreTest {
     }
 
     /**
-     * Listeners fire outside the monitor, so a listener that blocks -- an FX
+     * Listeners fire outside the monitor, so a listener that blocks -- an UI
      * view rebuilding its cards, say -- must not stop another thread from
      * mutating, and must not cost that mutation.
      */

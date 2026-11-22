@@ -32,7 +32,7 @@ import java.util.function.Function;
  * <p>NO rebuild per keystroke: the instance form coalesces requests on a
  * single background thread with AGENTS.md's keystroke debounce, so a burst
  * of inputs derives ONCE, from the last requested inputs, and the
- * immutable result is published off the FX thread (the subscriber hops
+ * immutable result is published off the UI thread (the subscriber hops
  * back; this class never touches the UI or the disk).</p>
  */
 public final class DelayedTaskTreeModel {

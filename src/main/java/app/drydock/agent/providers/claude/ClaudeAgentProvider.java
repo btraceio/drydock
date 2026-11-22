@@ -149,7 +149,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private ClaudeEvalContainer evalContainer;
     /** The activity state-word dir, needed to mount it into the eval container. Set at {@link #init}. */
     private Path activityDirectory;
-    /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the FX thread. */
+    /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the UI thread. */
     private volatile boolean evalAvailable;
     /** Snapshotted by the config read at {@link #init}; read by {@link #sphinxReview()} on the EDT. */
     private volatile Optional<SphinxReviewSupport> sphinxReview = Optional.empty();

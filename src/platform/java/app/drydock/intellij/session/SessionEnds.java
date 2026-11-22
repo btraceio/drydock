@@ -283,7 +283,7 @@ final class SessionEnds implements AgentExecutionListener {
             // An ssh-remote row's ssh client ended. The exit code is the ssh
             // client's, never the agent's, so the settle records the status
             // alone; a spontaneous end is "session ended — resume to
-            // reconnect" (the app's degraded contract), and a stop or close
+            // reconnect" (the degraded contract), and a stop or close
             // requested the end itself. No probe: the agent does not outlive
             // its ssh client the way a box-side agent outlives one — the
             // SIGHUP the client's end delivers is the stop.

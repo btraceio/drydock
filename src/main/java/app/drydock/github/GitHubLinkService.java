@@ -23,7 +23,7 @@ import java.util.concurrent.CompletableFuture;
  * <p>Everything here shells out through {@link ProcessRunner} (two quick
  * {@code git} queries per resolve, run per click rather than cached: ~10ms
  * each, and never stale), and opens the URL with the platform's browser
- * opener. All methods are async; nothing may run on the FX thread. When the
+ * opener. All methods are async; nothing may run on the UI thread. When the
  * remote is not github.com -- an internal GitLab, a bare SSH alias -- every
  * answer is empty, and the UI says "not available" rather than inventing a
  * URL that 404s.</p>
@@ -67,7 +67,7 @@ public final class GitHubLinkService implements AutoCloseable {
     /**
      * The checkout's GitHub remote, parsed from {@code git remote get-url
      * origin}, empty when no remote, git failed, or origin is not
-     * github.com. Never blocks the FX thread.
+     * github.com. Never blocks the UI thread.
      */
     public CompletableFuture<Optional<Remote>> remoteOf(Path checkout) {
         return CompletableFuture.supplyAsync(() -> {
@@ -130,7 +130,7 @@ public final class GitHubLinkService implements AutoCloseable {
                 "https://github.dev/" + repo + "/blob/" + sha + "/" + path + "#L" + line);
     }
 
-    /** Opens {@code url} in the browser. Off the FX thread. */
+    /** Opens {@code url} in the browser. Off the UI thread. */
     public CompletableFuture<Void> openInBrowser(String url) {
         return CompletableFuture.runAsync(() -> {
             String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);

@@ -619,7 +619,7 @@ class PiAgentProviderTest {
     /**
      * The property the memoised future exists for: a failed write must not be
      * latched, or one transient IOException costs every Pi tab its tools for
-     * the rest of the app run. This exercises the shared {@code memoised}
+     * the rest of the process run. This exercises the shared {@code memoised}
      * helper via the extension-install slot; {@link
      * #aFailedProbeIsNotLatchedAndTheNextLaunchRetries} exercises the same
      * un-publish path via the capabilities slot.
@@ -651,7 +651,7 @@ class PiAgentProviderTest {
      * #aFailedWriteIsNotLatchedAndTheNextLaunchRetries}: a probe reporting
      * {@code "unknown"} on its first call must not be latched, or one
      * transient probe failure costs every Pi tab its tools for the rest of
-     * the app run. Also the only test that drives an injected probe through
+     * the process run. Also the only test that drives an injected probe through
      * {@code memoised} instead of around it, so it is the one place the
      * "start both, join both" path and the un-publish branch are both
      * actually exercised for the capabilities slot.
@@ -867,8 +867,8 @@ class PiAgentProviderTest {
     // Behavioral coverage of the generated initial-prompt extension: the
     // generated TypeScript-stripped source is executed on GraalVM
     // Polyglot's embedded JS engine against a mock pi. This repo has no
-    // node/npm toolchain (the app module bundles a standalone esbuild
-    // binary), so a JVM-embedded engine is the only JS runtime available.
+    // node/npm toolchain, so a JVM-embedded engine is the only JS runtime
+    // available here.
     // The Buffer shim is identity on purpose: base64 transport is NOT
     // exercised here -- it is covered Java-side by
     // anImplementationPromptSurvivesBase64EnvironmentTransport and

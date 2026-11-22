@@ -5,7 +5,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 
-/** The minimal session-record source {@link SnapshotClaimDiscovery} needs (off-FX-thread callers). */
+/** The minimal session-record source {@link SnapshotClaimDiscovery} needs (off-UI-thread callers). */
 public interface CandidateSource {
 
     /** A session record with its id and creation timestamp, for late-binding resolution. */

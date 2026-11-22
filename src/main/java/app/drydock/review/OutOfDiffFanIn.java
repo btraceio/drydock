@@ -102,7 +102,7 @@ import java.util.logging.Logger;
  * prints. {@link #parse} is written against that NUL framing so a path
  * containing a colon, or a non-ASCII byte, or both, round-trips intact.</p>
  *
- * <p>Blocking; never call {@link #scan} on the FX thread.</p>
+ * <p>Blocking; never call {@link #scan} on the UI thread.</p>
  */
 public final class OutOfDiffFanIn {
 
@@ -229,7 +229,7 @@ public final class OutOfDiffFanIn {
      * distinction {@link Result#unavailable} draws everywhere else, and the
      * one thing a surface built on this may not blur.</p>
      *
-     * <p>Blocking, like {@link #scan}; never call on the FX thread.</p>
+     * <p>Blocking, like {@link #scan}; never call on the UI thread.</p>
      */
     public static Result forScope(ReviewScope scope, ChangeGraph graph, UnifiedDiff diff) {
         Optional<Path> worktree = scope.worktree();
@@ -268,7 +268,7 @@ public final class OutOfDiffFanIn {
      * unchanged lines of files it does (flagged
      * {@link Occurrence#inChangedFile}). Spawns one {@code git grep} over every
      * uniquely-named changed declaration at once. Blocking; never call on
-     * the FX thread.
+     * the UI thread.
      */
     public static Result scan(Path worktree, ChangeGraph graph,
                               Map<String, Set<Integer>> changedNewLinesByFile) {

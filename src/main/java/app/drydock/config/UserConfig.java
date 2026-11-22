@@ -30,8 +30,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * User-editable settings read from {@code ~/.drydock/config.json}, separate
- * from the app's own {@code ApplicationState} (which the app writes itself
- * and never expects a human to hand-edit). Deliberately tiny: {@code
+ * from {@code ApplicationState} (which the single writer owns and never
+ * expects a human to hand-edit). Deliberately tiny: {@code
  * worktreesDirectory} -- the directory new worktrees are created under, in
  * place of the {@code <home>/dev/wt} default (see {@link
  * app.drydock.git.WorktreeNaming}) -- {@code openChangedFilesInSkim},
@@ -123,8 +123,8 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
 
     /**
      * As {@link #load()}, but off the caller's thread (plan section 18:
-     * "file loading" must never block the JavaFX application thread) --
-     * {@link #load()} does a synchronous stat + read, so callers on the FX
+     * "file loading" must never block the UI thread) --
+     * {@link #load()} does a synchronous stat + read, so callers on the UI
      * thread (e.g. the create-worktree modal) must use this instead.
      *
      * <p>Routed through {@link #SAVE_EXECUTOR} rather than an independent
@@ -318,7 +318,7 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
 
     /**
      * As {@link #save}, off the caller's thread -- the settings modal calls
-     * this from the FX thread, where a synchronous write is forbidden. The
+     * this from the UI thread, where a synchronous write is forbidden. The
      * returned future completes exceptionally on failure so the caller can
      * surface it; it is never swallowed.
      *
@@ -379,7 +379,7 @@ public record UserConfig(Optional<Path> worktreesDirectory, boolean openChangedF
      * Java probe, which runs {@code java -version} through ProcessRunner in
      * production ({@code JdtServerManager.processRunnerJavaProbe()}) and is
      * injected here so tests never run a real {@code java}. Never call this
-     * on the JavaFX application thread; it returns a future instead.</p>
+     * on the UI thread; it returns a future instead.</p>
      *
      * <p>An empty {@code jdtHome} disables tier 3 and saves without
      * validation (there is nothing to validate); {@code javaHome} is carried

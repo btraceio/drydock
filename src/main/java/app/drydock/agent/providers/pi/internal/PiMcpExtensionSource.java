@@ -11,8 +11,8 @@ package app.drydock.agent.providers.pi.internal;
  *
  * <p>Nothing type-checks this string: pi loads it through {@code jiti}, which
  * strips types without checking them. The only guard is
- * {@code scripts/pi-bridge-smoke.sh} in the app tree, which runs the shared
- * bridge shape against a mock server.</p>
+ * {@code scripts/pi-bridge-smoke.sh}, which runs the shared bridge shape
+ * against a mock server.</p>
  *
  * <p>Why proxies and not Pi's {@code registerMcpServer} for the Drydock
  * server: the session-scoped tools must be <em>direct</em> tools, and an MCP
@@ -20,10 +20,8 @@ package app.drydock.agent.providers.pi.internal;
  * extension-registered servers no direct tools at all -- its own docs state
  * that {@code exposure: "direct"} on such registrations is ignored. Tool
  * proxies registered through {@code registerTool} cannot be second-guessed by
- * any MCP extension. The same bridge shape runs in the app tree
- * ({@code PiExtensionSource}); this copy adds only the IDE-hosted stdio
- * servers, which have no direct-tool requirement and stay on
- * {@code registerMcpServer}.</p>
+ * any MCP extension. This copy adds the IDE-hosted stdio servers, which have
+ * no direct-tool requirement and stay on {@code registerMcpServer}.</p>
  */
 public final class PiMcpExtensionSource {
 
@@ -42,7 +40,7 @@ public final class PiMcpExtensionSource {
             // retrying the handshake this long before standing down.
             const HANDSHAKE_DEADLINE_MS = 20000;
             const CALL_MS = 45000;
-            // One localhost round trip plus one FX-thread hop. The rebind itself
+            // One localhost round trip plus one UI-thread hop. The rebind itself
             // is a single state transform, so this is generous for a busy app
             // without holding pi's session_start open long enough to notice.
             const RECLAIM_MS = 3000;

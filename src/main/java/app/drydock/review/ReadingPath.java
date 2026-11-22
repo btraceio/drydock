@@ -70,7 +70,7 @@ import java.util.TreeSet;
  *
  * <p>{@link #of} is string work over an already-built graph, but {@link
  * ChangeGraph#of} is blocking -- it parses every changed file and can
- * trigger a first-time native grammar load -- so the pair belongs off the FX
+ * trigger a first-time native grammar load -- so the pair belongs off the UI
  * thread.</p>
  */
 public final class ReadingPath {
@@ -163,7 +163,7 @@ public final class ReadingPath {
     /**
      * {@code diff}'s hunks in reading order, and {@code sections} in the
      * order that path reaches them. Blocking only in the sense its inputs
-     * are; never call the {@link ChangeGraph#of} that feeds it on the FX
+     * are; never call the {@link ChangeGraph#of} that feeds it on the UI
      * thread.
      */
     public static Path of(UnifiedDiff diff, ChangeGraph graph,

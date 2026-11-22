@@ -39,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * "type":"summary"} entry (the latest one) and falls back to the first user
  * message's text. Only cheap string probes decide which lines get fully
  * parsed; transcripts can be many MB and this may be called for every
- * repository at once (always off the FX thread).</p>
+ * repository at once (always off the UI thread).</p>
  */
 public final class ConversationCatalog {
 
@@ -84,7 +84,7 @@ public final class ConversationCatalog {
      * Lists every resumable conversation for {@code workingDirectory},
      * newest first. Conversations with no user message at all (nothing for
      * claude to resume) are skipped. Blocking -- call on a background
-     * executor, never the FX thread.
+     * executor, never the UI thread.
      */
     public List<Conversation> listConversations(Path workingDirectory) {
         Path projectDir = projectDirFor(workingDirectory);

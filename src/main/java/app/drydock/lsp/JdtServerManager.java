@@ -60,7 +60,7 @@ import java.util.stream.Stream;
  * logged). The -data dir under ~/.drydock/lsp/<slug>/ is kept across closes (jdt.ls's import
  * cache) and only deleteCache() removes it. Sync-on-query: didOpen then full-text
  * didChange, only when a file's mtime advanced, one sync per file per query, never a
- * didClose, never outside the worktree root. FX-free, thread-safe on any service
+ * didClose, never outside the worktree root. host-UI-free, thread-safe on any service
  * executor; blocking work runs on the injected scheduler; all seams are injected so no
  * test needs a real jdt.ls or real time.
  */
@@ -122,7 +122,7 @@ public final class JdtServerManager implements AutoCloseable {
         record Invalid(String message) implements ValidationResult { }
     }
 
-    /** The process seam over {@link LspServerProcess}, the app's only long-lived child; faked in tests. */
+    /** The process seam over {@link LspServerProcess}, Drydock's only long-lived child; faked in tests. */
     public interface ServerProcess extends AutoCloseable {
         InputStream stdout();
 
@@ -165,7 +165,7 @@ public final class JdtServerManager implements AutoCloseable {
     /**
      * The clock-and-delay seam: tests drive a manual implementation so no test sleeps
      * a real minute; production uses wall time and a small pool. {@code execute} runs
-     * background (potentially blocking) pipeline work — never the FX thread.
+     * background (potentially blocking) pipeline work — never the UI thread.
      */
     public interface Scheduler {
         Instant now();
@@ -708,7 +708,7 @@ public final class JdtServerManager implements AutoCloseable {
      * Idempotent release. A live server gets the protocol shutdown request then exit
      * notification before {@link LspServerProcess#close()}; a mid-startup server is
      * cancelled, not waited on. The -data directory is kept (jdt.ls's import cache; only
-     * deleteCache() removes it). Never call on the FX thread — it blocks at most the
+     * deleteCache() removes it). Never call on the UI thread — it blocks at most the
      * shutdown grace plus the process's bounded close.
      */
     @Override
@@ -772,7 +772,7 @@ public final class JdtServerManager implements AutoCloseable {
      * §3 validation, run on save (by the settings wiring) and again at every server start
      * (the directory may have changed): normalized paths, config_mac present, exactly one
      * plugins/org.eclipse.equinox.launcher_*.jar (zero/several refused, reporting what was
-     * found), and a Java 17+ probe. Blocking — never call on the FX thread.
+     * found), and a Java 17+ probe. Blocking — never call on the UI thread.
      */
     public static ValidationResult validate(LaunchConfig config, JavaProbe probe) {
         Path jdtHome = config.jdtHome();

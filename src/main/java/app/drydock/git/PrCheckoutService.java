@@ -39,8 +39,8 @@ import java.util.function.Supplier;
  * re-reviewed. Without {@code --force}, gh syncs the existing branch with
  * {@code git merge --ff-only} and dies with "Not possible to
  * fast-forward" -- a review that can never start again (verified against
- * gh 2.102: the plugin's copy missed this flag while the standalone app's
- * had it, so IDE reviews kept failing on re-reviewed PRs). With it, gh does
+ * gh 2.102: this flag was missed once and IDE reviews kept failing on
+ * re-reviewed PRs). With it, gh does
  * {@code git reset --hard} to the PR's current head, which is what reviewing
  * "the PR as it is now" means. That reset applies to any existing
  * {@code pr-<n>}, including one a user made by hand: its old tip is then
@@ -178,7 +178,7 @@ public final class PrCheckoutService implements AutoCloseable {
                 () -> checkoutBlocking(repositoryRoot, worktreeDirectory, prNumber), executor);
     }
 
-    /** Synchronous form; must never run on the JavaFX application thread. */
+    /** Synchronous form; must never run on the UI thread. */
     Path checkoutBlocking(Path repositoryRoot, Path worktreeDirectory, int prNumber) {
         if (prNumber <= 0) {
             throw new PrCheckoutException("PR number must be positive: " + prNumber);

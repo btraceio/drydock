@@ -74,7 +74,7 @@ import java.lang.System.Logger.Level;
  * this class never touches it.</li>
  * </ul>
  *
- * <p>FX-free and thread-safe: every step is a {@link CompletableFuture};
+ * <p>host-UI-free and thread-safe: every step is a {@link CompletableFuture};
  * the wrapper's own file reads and manager calls hop onto the injected
  * {@code fileReader} executor, so nothing blocks the caller's thread.</p>
  */

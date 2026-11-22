@@ -20,7 +20,7 @@ import java.util.function.LongSupplier;
 /**
  * Application-scoped owner of the managed reverse SSH forwards: one isolated forward handle per managed
  * remote session (never shared or reference-counted), each on its own remote port. {@link #prepare} blocks
- * (call it off the FX thread) and only returns a {@link Prepared} after an authenticated initialize round
+ * (call it off the UI thread) and only returns a {@link Prepared} after an authenticated initialize round
  * trip succeeded over the real forward; spawn success alone is never readiness. Every partial preparation,
  * cancel and owner-close race closes the handle (which joins its readers and timers) exactly once.
  */

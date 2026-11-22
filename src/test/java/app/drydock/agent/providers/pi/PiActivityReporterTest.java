@@ -17,7 +17,7 @@ class PiActivityReporterTest {
     @Test
     void installWritesTheExtensionAndPurgesStaleState(@TempDir Path state) throws Exception {
         Path activity = Files.createDirectories(state.resolve("activity"));
-        // A leftover from a force-killed pi of a previous app run: no process
+        // A leftover from a force-killed pi of a previous process run: no process
         // survives the host JVM, so every state file at startup is stale.
         Path stale = Files.writeString(activity.resolve("019f-stale-session"), "attention");
         PiActivityReporter reporter = new PiActivityReporter(

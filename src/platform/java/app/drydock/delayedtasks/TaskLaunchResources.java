@@ -46,7 +46,7 @@ import java.util.function.BooleanSupplier;
  *
  * <p>Threading: resolution is blocking file I/O (receipt scan, directory
  * verification, installed-bytes check) and runs on the launch path's
- * background executor, never the FX application thread (AGENTS.md). It
+ * background executor, never the UI thread (AGENTS.md). It
  * reads through a fresh {@link TaskRuns} over the store root's one writer
  * lock -- never a parallel channel -- and writes nothing anywhere.
  */

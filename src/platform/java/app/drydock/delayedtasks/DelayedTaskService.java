@@ -13,7 +13,6 @@ import app.drydock.mcp.TaskToolContext;
 import app.drydock.intellij.tasks.NewTaskPlan.Choice;
 import app.drydock.intellij.tasks.TaskLauncher;
 import app.drydock.projects.SharedProject;
-import app.drydock.projects.SharedProjectsSeed;
 import com.intellij.openapi.project.Project;
 import app.drydock.tasks.PlanLaunch;
 import app.drydock.tasks.PlanLaunch.Origin;
@@ -77,7 +76,7 @@ import java.util.function.Supplier;
  * answers from the live catalogs.
  *
  * <p>Every context method runs on the injected executor (the plugin's
- * virtual threads), so nothing here blocks the FX thread; reads are fresh
+ * virtual threads), so nothing here blocks the UI thread; reads are fresh
  * {@link TaskFiles} scans -- the core exposes no locked read, and its atomic
  * moves make a scan see only committed files. A task tool call before init,
  * after a failed one, or after disposal answers a visibly failed future
@@ -210,7 +209,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             Supplier<List<Repository>> repositories, Supplier<List<SharedProject>> sharedProjects) {
         this(root, executor, sessions, repositories, sharedProjects, directory -> {
             try (WorktreeService worktrees = new WorktreeService()) {
-                return SharedProjectsSeed.mainCheckoutVia(worktrees).apply(directory);
+                return worktrees.mainCheckout(directory);
             }
         });
     }
@@ -1514,7 +1513,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
       * MCP tool, the tree's Claim action and the auto-start, and it names no
       * concrete preparation reason (prepareTask reports only an empty Optional
       * plus its own log). Fire-and-forget: the note rides {@link #appendNote}'s
-      * supply path (the service executor, never the FX thread) and fails safely
+      * supply path (the service executor, never the UI thread) and fails safely
       * after close; a note refusal or failure is logged at WARNING, never
       * rethrown or awaited (the launch chain's own failure handling already
       * ran). Exactly one note per failure path by construction: the

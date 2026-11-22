@@ -59,7 +59,7 @@ import java.util.regex.Pattern;
  * #guidanceDirectory()}, {@link #claudePluginDirectory()}, {@link
  * #piSkillFile()}, {@link #isInstalled()}) creates nothing -- materialization
  * happens only on explicit {@link #install()}, which is plain blocking
- * filesystem I/O callable from any thread the caller chooses (off the FX
+ * filesystem I/O callable from any thread the caller chooses (off the UI
  * application thread in production, per AGENTS.md) and needs no EDT.</p>
  */
 public final class TaskGuidance {
@@ -168,7 +168,7 @@ public final class TaskGuidance {
      * that touches nothing, and when the installed bytes mismatch the bundle
      * it fails visibly rather than rewriting the installed files. On any
      * failure no partial directory remains. Blocking filesystem I/O; call it
-     * off the FX application thread in production. Writes only under the
+     * off the UI thread in production. Writes only under the
      * injected state directory.
      */
     public Path install() throws IOException {

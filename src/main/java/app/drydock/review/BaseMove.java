@@ -49,7 +49,7 @@ public final class BaseMove {
         }
     }
 
-    /** The files {@code oldBase..newBase} touched. Blocking; never call on the FX thread. */
+    /** The files {@code oldBase..newBase} touched. Blocking; never call on the UI thread. */
     public static Delta between(Path worktree, String oldBase, String newBase) {
         List<String> command = List.of("git", "diff", "--name-only", "-z", "--end-of-options",
                 oldBase + ".." + newBase);

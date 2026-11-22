@@ -100,9 +100,8 @@ public final class SessionDonePlan {
      * Pure: whether a session is done -- its worktree is a non-main,
      * non-locked linked worktree whose work has already landed: the branch
      * merged (ancestry, or its pull request recorded as merged), or the
-     * worktree prunable (its directory already gone) or detached. The same
-     * test the standalone app's stale bucket applies to session-less
-     * worktrees, applied to the worktree a session sits on. A merely idle
+     * worktree prunable (its directory already gone) or detached, applied to
+     * the worktree a session sits on. A merely idle
      * session on an unmerged branch is not done and is never touched by the
      * bulk cleanup; a main-checkout or locked worktree never counts either.
      */

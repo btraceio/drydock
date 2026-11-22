@@ -22,7 +22,7 @@ import java.util.logging.Logger;
  *
  * <p>Grammars are resolved reflectively and cached. Loading pulls a native
  * library out of the jar and {@code System.load}s it, so the first call for
- * a language is disk I/O -- never make it on the FX thread.</p>
+ * a language is disk I/O -- never make it on the UI thread.</p>
  */
 public final class GrammarRegistry {
 

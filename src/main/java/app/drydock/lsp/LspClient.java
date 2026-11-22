@@ -69,7 +69,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * exceptionally (logged) and leaves every other pending request alone.</li>
  * </ul>
  *
- * <p>The class is FX-free and safe for callers on arbitrary service
+ * <p>The class is host-UI-free and safe for callers on arbitrary service
  * executors: all writes are serialized under one lock, request ids are
  * monotonic, and no caller-side method blocks on the reader. The injected
  * {@link ScheduledExecutorService} (used only for request timeouts) remains

@@ -117,7 +117,7 @@ public final class PiAgentProvider implements AgentProvider {
     /**
      * Memoised on success only. Caching a failure would turn one timeout on a
      * busy machine into every Pi tab silently losing its tools for the rest of
-     * the app run, and would mean installing or upgrading pi never takes
+     * the process run, and would mean installing or upgrading pi never takes
      * effect until drydock restarts. Futures rather than booleans because two
      * tabs opened together run the command builders on different background
      * threads.
@@ -206,7 +206,7 @@ public final class PiAgentProvider implements AgentProvider {
         return locator.describeSearched();
     }
 
-    /** Probes {@code pi --version} (blocking; off the FX thread per the SPI contract). */
+    /** Probes {@code pi --version} (blocking; off the UI thread per the SPI contract). */
     @Override
     public AgentCapabilities probeCapabilities() {
         return new AgentCapabilities(false, true, currentCapabilities().version());
@@ -597,7 +597,7 @@ public final class PiAgentProvider implements AgentProvider {
     /**
      * The installed extension's path, or null when the install failed, timed
      * out, or its file is gone. The last case is an install that succeeded
-     * earlier in this app run and was memoised, whose file was since removed
+     * earlier in this process run and was memoised, whose file was since removed
      * or whose state directory was wiped. {@code pi -e <missing>} exits 1 and
      * takes the whole tab down with it, which is exactly the invariant this
      * extension must not violate. Degrade this one launch, and un-latch the memo
@@ -636,7 +636,7 @@ public final class PiAgentProvider implements AgentProvider {
         // keeping -- re-probing cannot change it. A version that did not
         // parse (including the probe's own "unknown") is not: it might be a
         // transient probe hiccup, so the next launch should try again rather
-        // than repeat a false read for the rest of the app run.
+        // than repeat a false read for the rest of the process run.
         return memoised(capabilities, work, PiCapabilities::versionParsed);
     }
 
@@ -665,7 +665,7 @@ public final class PiAgentProvider implements AgentProvider {
     }
 
     /**
-     * Installs an extension once per app run and memoises the result.
+     * Installs an extension once per process run and memoises the result.
      * {@code piCommand} re-validates the memoised path with
      * {@code Files.isReadable} on every launch, but only for existence: it
      * does not check content, so a truncated or hand-edited file would still
@@ -726,7 +726,7 @@ public final class PiAgentProvider implements AgentProvider {
                 // anything else here is unexpected. Either way this must not leave
                 // an uncompleted future latched in the slot forever -- that would
                 // make every later launch pay the full join and degrade, for the
-                // rest of the app run, over a submission that never even started.
+                // rest of the process run, over a submission that never even started.
                 slot.compareAndSet(created, null);
                 created.completeExceptionally(e);
             }

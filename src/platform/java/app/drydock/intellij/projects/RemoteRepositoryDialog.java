@@ -29,17 +29,15 @@ import java.util.concurrent.TimeUnit;
  * "Add remote repository…" (spec: SSH remote repositories): pick or type an
  * SSH host, type the repo path on that host, validate over ssh (via
  * {@link GitStatusService#resolveRemoteRepositoryRoot}, which runs {@code git
- * rev-parse --show-toplevel} in BatchMode), register on success — the
- * plugin's counterpart of the desktop app's {@code RemoteRepositoryModal}.
- * Registration lands in {@link SharedProjectsService#registerRemote}, so the
- * project is shared with the app like every other entry.
+ * rev-parse --show-toplevel} in BatchMode), register on success.
+ * Registration lands in {@link SharedProjectsService#registerRemote}, like
+ * every other entry.
  *
  * <p>The validation is a real ssh round-trip, so it runs off the EDT and the
  * OK button stays down ("Validating…") until it concludes; every exit path —
  * success, classified failure, or cancel — restores the button. Failures are
- * classified from the exit code and stderr the same way the app classifies
- * them: host key, auth, git not on the non-interactive PATH, not a
- * repository, unreachable.</p>
+ * classified from the exit code and stderr: host key, auth, git not on the
+ * non-interactive PATH, not a repository, unreachable.</p>
  */
 public final class RemoteRepositoryDialog extends DialogWrapper {
 

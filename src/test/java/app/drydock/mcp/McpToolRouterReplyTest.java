@@ -183,7 +183,7 @@ class McpToolRouterReplyTest {
     }
 
     /**
-     * The MCP-versus-FX race the atomic transform exists to close: the human
+     * The MCP-versus-UI race the atomic transform exists to close: the human
      * clicks Resolve after the router has read the thread but before it writes.
      * The refusal is decided inside the transform, against the stored value, so
      * the verdict stands instead of being overwritten with ADDRESSED.

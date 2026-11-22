@@ -133,7 +133,7 @@ public final class DiffService implements AutoCloseable {
     /**
      * Synchronous form, exposed package-private so tests can assert on the
      * thrown exception type directly instead of unwrapping a
-     * {@code CompletionException}. Must never be called from the JavaFX
+     * {@code CompletionException}. Must never be called from the UI
      * application thread.
      */
     UnifiedDiff diffBlocking(Path checkoutRoot, DiffScope scope, String baseBranch) {

@@ -22,8 +22,6 @@ import java.util.function.BiFunction;
  * The pull request lane's submit, the parts with no UI (spec §8, "PR lane"):
  * the diff index a {@link SubmitPlan} checks anchors against, the fresh-head
  * check's classification, and what a posted review records in the store.
- * Ported from the app's submit flow ({@code MainWorkspace}), which the plugin
- * does not share.
  */
 final class PrSubmission {
 

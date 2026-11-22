@@ -160,7 +160,7 @@ class ReviewBackendEndToEndTest {
             names.add(str(tool, "name"));
         }
         // session_rename rides the review set: an agent reviewing here may
-        // relabel its own session, as the desktop app's MCP allows.
+        // relabel its own session.
         assertEquals(Set.of("review_comments", "review_reply", "review_scope", "review_tour",
                 "review_check", "review_finding", "review_answer", "review_ask_answer",
                 "review_state", "review_recheck", "session_rename"), names);

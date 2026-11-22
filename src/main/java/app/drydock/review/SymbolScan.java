@@ -61,7 +61,7 @@ import java.util.regex.Matcher;
  *
  * <p>Blocking: parsing -- and, the first time any language is used, loading
  * its native grammar library via {@link GrammarRegistry} -- both do real
- * work (native calls, disk I/O). Never call {@link #of} on the FX thread.</p>
+ * work (native calls, disk I/O). Never call {@link #of} on the UI thread.</p>
  */
 public final class SymbolScan {
 

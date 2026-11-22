@@ -130,7 +130,7 @@ public final class ClaudeHookInstaller {
     /**
      * Writes the hook script and its settings file, creating the activity
      * directory. Idempotent, and cheap enough to run on every startup.
-     * Performs filesystem I/O, so callers must invoke it off the JavaFX
+     * Performs filesystem I/O, so callers must invoke it off the UI
      * application thread (AGENTS.md).
      */
     public void install() throws IOException {
@@ -142,7 +142,7 @@ public final class ClaudeHookInstaller {
     }
 
     /**
-     * Drops activity left behind by a previous app run.
+     * Drops activity left behind by a previous process run.
      *
      * <p>This is a routine path, not a crash-only safety net. Closing a session
      * sends Ctrl+D and force-closes the child after a 3s grace period (see

@@ -93,7 +93,7 @@ class TaskTreePanelTargetTest {
         assertFalse(TaskTreePanel.offersProjectWindow(missing, registered),
                 "a folder the tree saw missing is not offered; the click still re-checks");
         assertFalse(TaskTreePanel.offersProjectWindow(remote, remote.project()),
-                "a remote project's root is a placeholder only the standalone app opens");
+                "a remote project's root is a placeholder no IDE window can open");
         assertFalse(TaskTreePanel.offersProjectWindow(new IdleWorktree(LINKED_WORKTREE,
                 "fix-allocation-profile", Optional.empty(), false, false), registered));
         // The session row shares the gate: its own window is the project's

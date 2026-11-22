@@ -46,9 +46,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *       property of a live process, so a leftover state file must never
  *       label an exited or failed session "busy".</li>
  *   <li>Rendering is STATIC — a filled dot for anything worth attention, a
- *       hollow ring for the idle band, and no animation of any kind. The
- *       app's FX pulse driver burned 26h CPU per 70h uptime through exactly
- *       that mistake (btraceio--drydock/main/status-dot-pulse-cpu/
+ *       hollow ring for the idle band, and no animation of any kind. A UI
+ *       pulse driver once burned 26h CPU per 70h uptime through exactly that
+ *       mistake (btraceio--drydock/main/status-dot-pulse-cpu/
  *       find-status-dot-pulse-driver); the plugin does not repeat it.</li>
  * </ul>
  *
@@ -160,8 +160,8 @@ public final class SessionDots {
 
     /**
      * The static dot icon: filled for the running and error bands,
-     * a hollow ring for the idle band (mirrors the app's design vocabulary —
-     * error always fills, so a failed idle session still shows a solid dot).
+     * a hollow ring for the idle band (error always fills, so a failed idle
+     * session still shows a solid dot).
      */
     public static Icon dotIcon(SessionStatus status, Optional<SessionActivity> activity) {
         Color color = dotColor(status, activity);

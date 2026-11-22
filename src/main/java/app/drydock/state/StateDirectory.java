@@ -16,11 +16,11 @@ import java.util.HexFormat;
 import java.util.Optional;
 
 /**
- * Resolves the app's per-launch-path state directory: {@code <data root>/<app
+ * Resolves the per-launch-path state directory: {@code <data root>/<app
  * dir>/<install id>}, where the install id is derived from where this
  * instance's code actually runs from.
  *
- * <p>Why. The state directory used to be one fixed, shared path, so two app
+ * <p>Why. The state directory used to be one fixed, shared path, so two
  * instances running side by side -- a kept-running working install and the
  * image of the build under test, which is exactly how a release is verified
  * -- each held the same {@code state.json} in memory and wrote it through
@@ -58,8 +58,8 @@ public final class StateDirectory {
     private static final Logger LOG = System.getLogger(StateDirectory.class.getName());
 
     /**
-     * The subdirectory of the platform's Application Support the app keeps its
-     * data under. Historical name, kept so existing data stays where it is
+     * The subdirectory of the platform's Application Support the state keeps
+     * its data under. Historical name, kept so existing data stays where it is
      * rather than moving an unknown install's files out of reach.
      */
     private static final String APP_DIRECTORY_NAME = "ClaudeProjectManager";
@@ -70,12 +70,12 @@ public final class StateDirectory {
     /**
      * This install's state file, {@code
      * <data root>/ClaudeProjectManager/install-<id>/state.json}. {@code
-     * anchor} is this app's own class -- the code source {@link
+     * anchor} is Drydock's own class -- the code source {@link
      * #installDirectoryName} hashes.
      *
      * <p>The data root is macOS-only by construction: {@code ~/Library/
-     * Application Support}. The app is macOS-only (AppKit/ghostty host),
-     * so no other platform's convention is resolved here.
+     * Application Support}; no other platform's convention is resolved
+     * here.
      *
      * <p>A launch whose code source cannot be determined keeps the shared
      * directory it has always used ({@code .../ClaudeProjectManager/state.json}):

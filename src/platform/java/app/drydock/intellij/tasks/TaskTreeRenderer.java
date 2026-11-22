@@ -134,9 +134,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case ProjectRow project -> {
                 setIcon(AllIcons.Nodes.Folder);
                 append(project.project().displayName(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
-                // The remote host chip: the counterpart of the app sidebar's
-                // ⇅ chip. A remote row's root is a placeholder this machine
-                // never had, so the host names where the files actually are.
+                // The remote host chip: a remote row's root is a placeholder
+                // this machine never had, so the host names where the files
+                // actually are.
                 project.project().remote().ifPresent(remote -> {
                     append("  ⇅ " + remote.host(), SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                     setToolTipText("Remote host: " + remote.host() + " · path " + remote.remotePath());

@@ -45,7 +45,7 @@ import java.util.stream.Stream;
  * is owner-only ({@code rwx------}) for the same reason.</p>
  *
  * <p>All methods perform filesystem I/O and must be invoked off the
- * JavaFX application thread (AGENTS.md).</p>
+ * UI thread (AGENTS.md).</p>
  */
 public final class McpConfigWriter {
 
@@ -86,7 +86,7 @@ public final class McpConfigWriter {
     /**
      * Writes (or idempotently rewrites) the {@code --mcp-config} file for a
      * session, returning the path to pass on the command line. Performs
-     * filesystem I/O; callers must invoke this off the JavaFX application
+     * filesystem I/O; callers must invoke this off the UI
      * thread (AGENTS.md).
      */
     public Path writeFor(ManagedSessionId sessionId, String endpointUrl, String token) throws IOException {
@@ -143,7 +143,7 @@ public final class McpConfigWriter {
      *
      * <p>No trailing newline, and none is needed: command substitution strips
      * them. Owner-only like the JSON config, and purged by the same sweeps.
-     * Performs filesystem I/O; callers must invoke this off the JavaFX
+     * Performs filesystem I/O; callers must invoke this off the UI
      * application thread (AGENTS.md).</p>
      */
     public Path writeTokenFor(ManagedSessionId sessionId, String token) throws IOException {
@@ -157,7 +157,7 @@ public final class McpConfigWriter {
      * Removes a session's config file, logging a WARNING rather than
      * throwing on failure: a leftover file is cosmetic next to failing a
      * session close. Performs filesystem I/O; callers must invoke this off
-     * the JavaFX application thread (AGENTS.md).
+     * the UI thread (AGENTS.md).
      */
     public void delete(ManagedSessionId sessionId) {
         // Both forms: a session has one or the other depending on its
@@ -172,7 +172,7 @@ public final class McpConfigWriter {
     }
 
     /**
-     * Drops every config file left behind by a previous app run. No
+     * Drops every config file left behind by a previous process run. No
      * terminal process survives an app restart, so every file present at
      * startup is by definition stale -- and each holds a token that no
      * longer resolves to a running {@link McpServer}. Mirrors {@code
@@ -181,7 +181,7 @@ public final class McpConfigWriter {
      * <p>Tolerates a missing {@code mcp/} directory: on a first run it does
      * not exist yet, and {@link Files#list} would otherwise throw {@link
      * java.nio.file.NoSuchFileException}. Performs filesystem I/O; callers
-     * must invoke this off the JavaFX application thread (AGENTS.md).</p>
+     * must invoke this off the UI thread (AGENTS.md).</p>
      */
     public void purgeStale() {
         try (Stream<Path> stale = Files.list(mcpDirectory())) {

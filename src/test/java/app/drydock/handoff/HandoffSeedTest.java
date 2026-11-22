@@ -16,7 +16,7 @@ class HandoffSeedTest {
     private static HandoffFacts facts() {
         return new HandoffFacts("feat/fork-codex", Optional.of("main"),
                 List.of("Add the banner"),
-                List.of("MainWorkspace.java"),
+                List.of("SessionService.java"),
                 List.of("Rework the rail"));
     }
 
@@ -60,7 +60,7 @@ class HandoffSeedTest {
         assertTrue(seed.contains("feat/fork-codex"), seed);
         assertTrue(seed.contains("main"), seed);
         assertTrue(seed.contains("Add the banner"), seed);
-        assertTrue(seed.contains("MainWorkspace.java"), seed);
+        assertTrue(seed.contains("SessionService.java"), seed);
         assertTrue(seed.contains("Rework the rail"), seed);
     }
 

@@ -34,7 +34,7 @@ public final class CodexExecHelpProbe {
 
     /**
      * Runs {@code <executable> exec --help} with bounded output and time. This method blocks and must only be called
-     * from the detached watcher/background path, never the JavaFX Application Thread.
+     * from the detached watcher/background path, never the UI thread.
      */
     public static Result probe(Path executable) {
         try {

@@ -520,7 +520,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // one when no window shows it: the shared raise-or-open (RaiseOrOpenWindow)
         // for a task's worktree, applied to the checkout itself. Offered on
         // the project row and on the project's session rows alike. A remote
-        // project has placeholder roots only the standalone app opens; a
+        // project has placeholder roots no IDE window can open; a
         // folder gone since the tree's last pass is re-checked, and said,
         // at the click.
         AnAction openMainCheckout = new DumbAwareAction("Project Window",
@@ -939,8 +939,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 "Reveal the pull request this row works"));
         menuActions.put(TaskMenu.Item.SHOW_SESSION, showLinkedAction(ShowKind.SESSION, "Show Session",
                 "Reveal the session row this pull request belongs to"));
-        // The global add gesture for the popup's empty-space selection: the
-        // counterpart of the desktop app's sidebar "Add repository" menu. A
+        // The global add gesture for the popup's empty-space selection. A
         // remote (SSH) repository cannot be a window's project, so this is
         // the one registration gesture that creates one.
         AnAction addRemoteRepository = addRemoteRepositoryAction();
@@ -1329,10 +1328,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             List<TaskNode> selection = e.getData(SELECTED_NODES);
             Path root = e.getData(SELECTED_PROJECT_ROOT);
             // No selection (an empty area of the tree or the inbox): the
-            // global add gestures live here — the counterpart of the
-            // desktop app's sidebar "Add repository" menu. A remote (SSH)
-            // repository cannot be a window's project, so it is the one
-            // registration this popup offers outright.
+            // global add gestures live here. A remote (SSH) repository
+            // cannot be a window's project, so it is the one registration
+            // this popup offers outright.
             if (e.getData(SELECTED_NODE) == null && selection == null && root == null) {
                 return new AnAction[] {addRemoteRepository};
             }
@@ -1457,8 +1455,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * whose folder the tree's last pass found present, or one of that
      * project's session rows under the same gate — the session belongs to a
      * project, and the window that opens is the project's main checkout, not
-     * the session's worktree. A remote project's root is a placeholder only
-     * the standalone app opens, and a folder-present answer is re-checked at
+     * the session's worktree. A remote project's root is a placeholder no
+     * IDE window can open, and a folder-present answer is re-checked at
      * the click. Pure, so the gate is testable without the action system.
      */
     static boolean offersProjectWindow(TaskNode node, SharedProject project) {

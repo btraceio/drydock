@@ -35,7 +35,7 @@ import java.util.stream.Stream;
  * directories that are not a git checkout (or when git is unavailable).
  * Everything runs on a background virtual-thread executor, mirroring
  * {@link app.drydock.git.GitStatusService} (plan section 18: never block the
- * FX thread).</p>
+ * UI thread).</p>
  */
 public final class SessionSearchService implements AutoCloseable {
 

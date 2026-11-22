@@ -29,14 +29,14 @@ import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 /**
- * The registered-projects list shared by the standalone app and the
- * IntelliJ plugin: {@code ~/.drydock/projects.json}.
+ * The registered-projects list: {@code ~/.drydock/projects.json}.
  *
- * <p><b>Why its own file.</b> Each app install keeps its whole state in a
- * {@code state.json} that exactly one process may write (see {@code
+ * <p><b>Why its own file.</b> Each IDE configuration keeps its whole state
+ * in a {@code state.json} that exactly one process may write (see {@code
  * StateDirectory}: two writers on one state file wiped each other's
- * sessions). Only the project list is shared, so only the project list
- * lives here; everything else stays in each tool's own state.</p>
+ * sessions). Only the project list is shared across writers, so only the
+ * project list lives here; everything else stays in each writer's own
+ * state.</p>
  *
  * <p><b>Two processes write it.</b> Every change is a short transaction
  * under an OS lock on a sibling {@code projects.json.lock}: lock, re-read,

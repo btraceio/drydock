@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** {@link DiffSelection}: the same-hunk rule over an editor selection, ported from the app's DiffLineSelection. */
+/** {@link DiffSelection}: the same-hunk rule over an editor selection. */
 class DiffSelectionTest {
 
     // Hunk 1: old 9..11 / new 9..12 (context 9, del o10, add n10, add n11, context 11/12).

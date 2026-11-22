@@ -95,7 +95,7 @@ public final class CodexAgentProvider implements AgentProvider {
         return locator.describeSearched();
     }
 
-    /** Probes {@code codex --version} (blocking; off the FX thread per the SPI contract). */
+    /** Probes {@code codex --version} (blocking; off the UI thread per the SPI contract). */
     @Override
     public AgentCapabilities probeCapabilities() {
         return new AgentCapabilities(false, true, CodexVersionProbe.probe(locator.locate().orElse(null)));

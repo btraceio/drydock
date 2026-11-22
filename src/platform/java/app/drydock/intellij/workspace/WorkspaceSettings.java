@@ -33,8 +33,9 @@ import java.util.Optional;
  *       discovers its own clone instead of inheriting the old box's path;
  * </ul>
  *
- * <p>This is plugin-only IDE state, deliberately not shared with the desktop
- * app's config, and it holds no secrets. Values are stored verbatim after
+ * <p>This is plugin-only IDE state, deliberately not shared with {@code
+ * ~/.drydock/config.json}, and it holds no secrets. Values are stored
+ * verbatim after
  * whitespace stripping; a null or blank writer argument clears the key, so a
  * cleared override leaves no trace behind.</p>
  */

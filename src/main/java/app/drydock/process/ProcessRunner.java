@@ -54,7 +54,7 @@ public final class ProcessRunner {
      * {@link Process#destroyForcibly() forcibly destroyed} and a
      * {@link ProcessTimeoutException} is thrown; on interruption the child
      * is likewise destroyed before the {@link InterruptedException}
-     * propagates. Blocking -- never call on the JavaFX application thread.
+     * propagates. Blocking -- never call on the UI thread.
      */
     public static ProcessResult run(List<String> command, Path workingDirectory, Duration timeout)
             throws IOException, InterruptedException {

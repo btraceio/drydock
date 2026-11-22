@@ -38,7 +38,7 @@ import java.util.TreeSet;
  *
  * <p>Building the graph parses every changed file through {@link
  * SymbolScan}, which can trigger a first-time native grammar load. Blocking;
- * never call {@link #of} on the FX thread.</p>
+ * never call {@link #of} on the UI thread.</p>
  */
 public final class ChangeGraph {
 
@@ -136,7 +136,7 @@ public final class ChangeGraph {
     /**
      * Builds the graph for {@code diff}. Blocking -- scans every file with
      * {@link SymbolScan}, which can load a native grammar library the first
-     * time a language is seen -- never call on the FX thread.
+     * time a language is seen -- never call on the UI thread.
      */
     public static ChangeGraph of(UnifiedDiff diff) {
         Map<String, List<SymbolScan.Symbol>> scans = new LinkedHashMap<>();

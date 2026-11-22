@@ -115,7 +115,7 @@ public final class McpServer implements AutoCloseable {
     private final McpActivityLog activityLog;
 
     // Volatile: {@link #start()} runs on a startup virtual thread while
-    // {@link #close()} is called from the JavaFX shutdown path, so a
+    // {@link #close()} is called from the IDE shutdown path, so a
     // non-volatile field would let a stop() racing startup read a stale null
     // and leak the bound listener socket.
     private volatile HttpServer server;

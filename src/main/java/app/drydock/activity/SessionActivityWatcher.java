@@ -31,7 +31,7 @@ import java.util.stream.Stream;
  * and one second of latency is imperceptible on a status badge.</p>
  *
  * <p>All I/O runs on a background executor (AGENTS.md: never block the
- * JavaFX application thread on filesystem work), so {@link #poll()} returns
+ * UI thread on filesystem work), so {@link #poll()} returns
  * a future rather than a map.</p>
  */
 public final class SessionActivityWatcher implements AutoCloseable {
@@ -141,7 +141,7 @@ public final class SessionActivityWatcher implements AutoCloseable {
      * Drops any state left behind for a session that is gone for good.
      *
      * <p>The delete runs on this watcher's executor rather than the caller's
-     * thread: callers are on the JavaFX thread (session close), where AGENTS.md
+     * thread: callers are on the UI thread (session close), where AGENTS.md
      * bars filesystem I/O. The returned future is for tests; callers that do not
      * care may ignore it, since failure only means the file waits for the next
      * startup purge.</p>

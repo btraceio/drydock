@@ -23,23 +23,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
- * The plugin's view of the registered-projects list it shares with the
- * standalone app ({@link SharedProjectsFile}): which projects the Drydock
- * tool window lists.
+ * The plugin's view of the registered-projects list ({@link
+ * SharedProjectsFile}): which projects the Drydock tool window lists.
  *
- * <p>Seeded from the app's own list when no shared list exists yet — never
- * from the plugin's catalog, which registered every project the IDE ever
- * opened (the user's decision). Opening a project registers nothing; only
- * {@link #register} does, and only the tool window's "Add" and starting a
- * task call it.</p>
+ * <p>The list starts empty and grows only by registration — opening a
+ * project registers nothing; only {@link #register} does, and only the
+ * tool window's "Add" and starting a task call it.
  *
  * <p>All file work runs on the given single-thread scheduler, which also
  * re-reads the file every {@value #POLL_SECONDS} seconds so a project added
- * or removed in the app shows up here. {@link #projects()} is a cached
- * snapshot and safe on the EDT. Listeners run on the scheduler.</p>
+ * by another IDE configuration shows up here. {@link #projects()} is a
+ * cached snapshot and safe on the EDT. Listeners run on the scheduler.</p>
  */
 public final class SharedProjectsService {
 
@@ -48,7 +44,6 @@ public final class SharedProjectsService {
     private static final long POLL_SECONDS = 2;
 
     private final SharedProjectsFile file;
-    private final Supplier<List<SharedProject>> appSeed;
     private final ScheduledExecutorService executor;
     private final List<Runnable> listeners = new CopyOnWriteArrayList<>();
 
@@ -60,10 +55,8 @@ public final class SharedProjectsService {
     /** Once stopped, never started or written again — disposal can come before initialization's start(). */
     private volatile boolean stopped;
 
-    public SharedProjectsService(SharedProjectsFile file, Supplier<List<SharedProject>> appSeed,
-                                 ScheduledExecutorService executor) {
+    public SharedProjectsService(SharedProjectsFile file, ScheduledExecutorService executor) {
         this.file = Objects.requireNonNull(file, "file");
-        this.appSeed = Objects.requireNonNull(appSeed, "appSeed");
         this.executor = Objects.requireNonNull(executor, "executor");
     }
 
@@ -75,7 +68,7 @@ public final class SharedProjectsService {
         try {
             CompletableFuture<Void> first = CompletableFuture.runAsync(() -> {
                 try {
-                    file.seedIfAbsent(appSeed);
+                    file.seedIfAbsent(List::of);
                 } catch (SharedProjectsException e) {
                     LOG.log(Level.WARNING, () -> "Could not seed the shared projects list: " + e.getMessage());
                 }
@@ -144,7 +137,7 @@ public final class SharedProjectsService {
                     List<SharedProject> next = new ArrayList<>(list);
                     next.add(result[0]);
                     return next;
-                }, appSeed);
+                }, List::of);
             } catch (SharedProjectsException e) {
                 throw new CompletionException(e);
             }
@@ -180,7 +173,7 @@ public final class SharedProjectsService {
                     List<SharedProject> next = new ArrayList<>(list);
                     next.add(result[0]);
                     return next;
-                }, appSeed);
+                }, List::of);
             } catch (SharedProjectsException e) {
                 throw new CompletionException(e);
             }
@@ -195,11 +188,11 @@ public final class SharedProjectsService {
         return fileName == null ? remotePath : fileName.toString();
     }
 
-    /** Takes {@code id} off the shared list — for the app too. Touches nothing else. */
+    /** Takes {@code id} off the registered-projects list. Touches nothing else. */
     public CompletableFuture<Void> remove(RepositoryId id) {
         return CompletableFuture.runAsync(() -> {
             try {
-                file.update(list -> list.stream().filter(project -> !project.id().equals(id)).toList(), appSeed);
+                file.update(list -> list.stream().filter(project -> !project.id().equals(id)).toList(), List::of);
             } catch (SharedProjectsException e) {
                 throw new CompletionException(e);
             }
@@ -223,7 +216,7 @@ public final class SharedProjectsService {
             // Deleted while running (the advice for a malformed file): seed
             // it again rather than show, and later write, an empty list.
             try {
-                file.seedIfAbsent(appSeed);
+                file.seedIfAbsent(List::of);
             } catch (SharedProjectsException e) {
                 LOG.log(Level.WARNING, () -> "Could not re-seed the shared projects list: " + e.getMessage());
             }

@@ -13,7 +13,7 @@ public interface ConversationSource {
     /** True if a transcript for {@code agentSessionId} exists on disk under {@code workingDirectory}. */
     boolean transcriptExists(Path workingDirectory, String agentSessionId);
 
-    /** Blocking local-transcript scan; callers must keep it off the FX thread. */
+    /** Blocking local-transcript scan; callers must keep it off the UI thread. */
     default Optional<ResumeCostEstimate> estimateResumeCost(Path workingDirectory, String agentSessionId) {
         return Optional.empty();
     }

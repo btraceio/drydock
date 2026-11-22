@@ -100,9 +100,9 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     /**
      * As above, with the agent-rename write: {@code sessionRenamer} receives
      * a validated title and answers with the outcome (refusing a human-pinned
-     * name, republishing on a real change) -- the same channel the desktop
-     * app binds to its workspace. The production backend serves {@code
-     * session_rename} through it; backends without one keep refusing.
+     * name, republishing on a real change) -- the channel the workspace
+     * binds to the plugin's session rename. The production backend serves
+     * {@code session_rename} through it; backends without one keep refusing.
      */
     public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
@@ -126,8 +126,9 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                 ? configWriter.writeTokenFor(id, token)
                 : configWriter.writeFor(id, endpointUrl, token);
         // The router serves the review tools plus session_rename: an agent
-        // reviewing here may relabel its own session, as the desktop app's
-        // MCP allows. Everything else session-side stays desktop-only.
+        // reviewing here may relabel its own session. Everything else
+        // session-side stays unserved (the IDE handles it through its own
+        // UI, not through the agent's MCP).
         WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
                 sessions,
                 repositories,

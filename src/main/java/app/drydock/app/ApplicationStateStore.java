@@ -36,7 +36,7 @@ import java.util.function.UnaryOperator;
  * decoupled from mutation -- {@link #update} returns as soon as the
  * in-memory state is swapped, and a background single-thread writer saves
  * the LATEST state (coalescing bursts of updates into one disk write), so
- * FX-thread callers never block on disk I/O. Per the repository guideline
+ * UI-thread callers never block on disk I/O. Per the repository guideline
  * on services that write files from background threads, {@link #flush}
  * exposes the barrier shutdown and tests need to not race pending
  * writes.</p>
@@ -150,7 +150,7 @@ public final class ApplicationStateStore {
      * writer free to write into its temp directory after the test returns,
      * racing JUnit's cleanup ("Failed to close extension context", a temp
      * directory that no longer deletes). Called after each test by the
-     * {@code app.drydock.testing} extension; never on the FX thread.
+     * {@code app.drydock.testing} extension; never on the UI thread.
      */
     public static void flushAll() {
         List<ApplicationStateStore> live;
@@ -170,7 +170,7 @@ public final class ApplicationStateStore {
     /**
      * Blocks until every save queued before this call has been written
      * (the writer is a FIFO single thread, so an empty barrier task
-     * suffices). For shutdown and tests; never call on the FX thread.
+     * suffices). For shutdown and tests; never call on the UI thread.
      */
     public void flush() {
         try {
@@ -190,7 +190,7 @@ public final class ApplicationStateStore {
      * #FLUSH_TIMEOUT_SECONDS} s. For a caller that may delete another copy
      * of what it just put into the state only once the state has it
      * durably; {@link #flush} cannot tell, since a failed save is swallowed.
-     * Blocking; never on the FX thread or the EDT.
+     * Blocking; never on the UI thread or the EDT.
      */
     public boolean flushDurably() {
         try {

@@ -104,11 +104,8 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * The IDE session orchestrator: the create flow plus the resume flows, a
- * lean port of the app tree's {@code SessionManager.launchNewSession} and
- * {@code SessionManager.resumeSession}/{@code adoptConversation} (R6 — the
- * 1615-LOC FX-bound class is deliberately NOT extracted), against the same
- * core SPI. Drydock MCP access is minted per launch through
+ * The IDE session orchestrator: the create flow plus the resume flows,
+ * against the core SPI. Drydock MCP access is minted per launch through
  * {@link SessionMcpAccess} and released when the agent ends
  * ({@link SessionEnds}), when a launch fails before reaching a process, and
  * when the session is forgotten. Remote launches run on workspace boxes
@@ -119,7 +116,7 @@ import java.util.function.Supplier;
  * refuse a remote row, each with a named reason. Diagnostic command
  * overrides and the handoff paths are absent by design; eval marking is
  * present: an eval row's mode rides the launch and resume contexts and the
- * provider's mark/unmark lifecycle, like the app's {@code SessionManager}.
+ * provider's mark/unmark lifecycle.
  *
  * <p>Threading (AC7/AC12): every blocking step — the pre-spawn id-store
  * snapshot (disk I/O), {@code buildCreateCommand} (may probe capabilities),
@@ -428,7 +425,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * Mints the metadata for a brand-new session in {@code repoRoot} WITHOUT
-     * launching anything (the app tree's prepare-then-launch split: the launch
+     * launching anything (the prepare-then-launch split: the launch
      * persists the session almost immediately, so UI bookkeeping must not
      * register placeholders under a provisional id). Off the EDT; the repo
      * resolution is R7-keyed on the working directory itself, not on the
@@ -1115,8 +1112,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
 
     /**
      * The SSH remote of {@code session}'s repository — the ssh-remote arm's
-     * source of remote truth, the way the app's {@code SessionManager} derives
-     * it. A row bound to a workspace box has its own, binding-derived remote
+     * source of remote truth. A row bound to a workspace box has its own,
+     * binding-derived remote
      * and reads nothing here (its repository is the local checkout); a local
      * row's repository carries no remote. Pure memory read.
      */
@@ -1148,7 +1145,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * ({@link #consoleCwdFor}), never the placeholder the row stores. The
      * provider's remote branch carries no {@code --session-id}, so the row
      * persists without a bound id and its resume opens the provider's own
-     * picker — the app's shipped contract for plain SSH remotes.</p>
+     * picker — the shipped contract for plain SSH remotes.</p>
      */
     private StartedLaunch startSshRemoteLaunch(ManagedAgentSession prepared, SshRemote remote,
                                                AgentProvider provider, Optional<String> initialPrompt,
@@ -1298,8 +1295,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
     // ---- resume flow ----------------------------------------------------------
 
     /**
-     * Resumes a persisted session (the app tree's {@code resumeSession} minus
-     * MCP/remote/eval): a known agent session id resumes by id; an unknown
+     * Resumes a persisted session (resume minus MCP/remote/eval): a known
+     * agent session id resumes by id; an unknown
      * one resumes through the provider's no-id resume (Pi: the interactive
      * {@code pi --resume} picker, AC21 — the provider enforces that shape,
      * this service only passes an empty optional). Always launches from the
@@ -1483,7 +1480,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * {@link ConversationSource} (AC20's record half): records a fresh
      * managed session bound to the conversation's agent session id — unless
      * one already tracks it, which is then reused (one row per
-     * conversation, the app's {@code adoptConversation}) — and takes the
+     * conversation, one row per adopted conversation) — and takes the
      * same resume-with-id path. The working directory is the repository's
      * root: the conversation was listed for that directory.
      */
@@ -1508,7 +1505,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                                                                   Optional<String> promptOverride) {
         // A persisted agent kind the plugin's providers do not know decodes
         // to this status with a placeholder kind; launching it would silently
-        // run the wrong agent (the app's checkResumeBlocked guard).
+        // run the wrong agent (the checkResumeBlocked guard).
         if (prepared.status() == SessionStatus.UNSUPPORTED_AGENT) {
             return CompletableFuture.completedFuture(prepared);
         }
@@ -1521,7 +1518,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // The ssh-remote arm's resume: the conversation lives on the remote
         // host, so the same local-only probes are skipped; the provider's
         // remote branch re-attaches -- an exact id resumes by id, no id
-        // opens the provider's own picker (the app's degraded contract).
+        // opens the provider's own picker (the degraded contract).
         Optional<SshRemote> sshRemote = remoteFor(prepared);
         if (sshRemote.isPresent()) {
             return resumeSshRemotePrepared(prepared, sshRemote.get());
@@ -1574,7 +1571,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // Drydock MCP access is minted for this launch when available. The
             // provider's own no-id branch is what a session without an id gets
             // (AC21). The row's eval mode rides the resume: an eval session
-            // resumes on the eval account, like the app's resumeSession.
+            // resumes on the eval account.
             Optional<McpAccess> access = launch.mcpAccessFor(session.id(), provider);
             // T29a: resolved before the context, on this executor stage
             // (never the EDT); a resumed task session re-receives exactly

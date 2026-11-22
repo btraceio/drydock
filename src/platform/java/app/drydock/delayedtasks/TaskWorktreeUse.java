@@ -47,7 +47,7 @@ import java.util.Set;
  * a visible missing-context failure, never a silent success.
  *
  * <p>Threading: every method is blocking file I/O (receipt scan, store
- * scan, directory probe) and runs off the FX application thread
+ * scan, directory probe) and runs off the UI thread
  * (AGENTS.md). Nothing here writes.
  */
 public final class TaskWorktreeUse {
@@ -80,7 +80,7 @@ public final class TaskWorktreeUse {
      * lookup ({@link TaskRuns#byTask}), which refuses a torn record
      * visibly; candidates come from the live sessions' retained rows and
      * from the task store's documents, so provenance that outlived either
-     * is still found. Blocking I/O, off the FX thread.
+     * is still found. Blocking I/O, off the UI thread.
      */
     public static Use resolve(Path storeRoot, Path worktree, Set<String> liveSessions) {
         Objects.requireNonNull(storeRoot, "storeRoot");

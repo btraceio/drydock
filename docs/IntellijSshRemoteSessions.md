@@ -21,7 +21,7 @@ host's non-interactive PATH, not a git repository, unreachable. A duplicate
 
 Registration writes a `SharedProject` carrying the `SshRemote` and its deterministic
 placeholder root (`/.drydock-remote/<percent-encoded host>/<remote path>`) into the
-shared projects file — visible to the desktop app too. The per-install repository the
+shared projects file. The per-install repository the
 session paths key on is registered on first use with the same `SshRemote` carried over;
 remote-ness is always derived from that repository, never guessed.
 

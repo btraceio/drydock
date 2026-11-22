@@ -8,10 +8,9 @@ import java.util.Objects;
  * {@code claude} session, before it is delivered, and validates
  * agent-authored text that drydock itself renders.
  *
- * <p>The prompt is not sent as an API message: {@code
- * MainWorkspace.sendTaskWhenReady} collapses its whitespace and types the
- * result as real keystrokes into the session's terminal via {@code
- * TerminalBridge.sendPrompt}, then presses Return. In the {@code claude} TUI
+ * <p>The prompt is not sent as an API message: the host collapses its
+ * whitespace and types the result as real keystrokes into the session's
+ * terminal, then presses Return. In the {@code claude} TUI
  * a leading {@code !} enters bash mode, a leading {@code /} invokes a slash
  * command, and a leading {@code #} is a memory directive -- none of those is
  * a model turn. An embedded newline or carriage return submits the text

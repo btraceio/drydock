@@ -59,7 +59,7 @@ class ClaudeHookInstallerTest {
         return process.exitValue();
     }
 
-    /** Reads back what the script wrote, through the same watcher the app uses. */
+    /** Reads back what the script wrote, through the production watcher. */
     private static SessionActivity observedActivity(Path base) {
         return new SessionActivityWatcher(base.resolve("activity"), EXECUTOR)
                 .poll()
@@ -80,8 +80,8 @@ class ClaudeHookInstallerTest {
     }
 
     /**
-     * Regression: killing the app leaves SessionEnd unable to run, so a
-     * session's state file survives with no process behind it. Observed live --
+     * Regression: a killed agent process leaves SessionEnd unable to run, so
+     * a session's state file survives with no process behind it. Observed live --
      * a force-quit left a session stuck reporting NEEDS_ATTENTION, which would
      * have badged on every subsequent launch.
      */

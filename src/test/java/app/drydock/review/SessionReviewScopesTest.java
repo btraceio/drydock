@@ -552,7 +552,7 @@ class SessionReviewScopesTest {
 
     /**
      * A resolve racing shutdown: the git service's executor is gone. The
-     * call runs on the FX thread, so it must not throw -- the future must
+     * call runs on the UI thread, so it must not throw -- the future must
      * complete, one way or the other, so the board's completion handler
      * replaces "Resolving…".
      */

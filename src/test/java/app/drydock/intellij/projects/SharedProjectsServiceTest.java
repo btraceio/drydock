@@ -49,22 +49,20 @@ class SharedProjectsServiceTest {
     }
 
     @Test
-    void seedsFromAppWhenAbsent() {
-        SharedProject fromApp = project(dir.resolve("app-repo"));
-        SharedProjectsService service = new SharedProjectsService(file, () -> List.of(fromApp), executor);
+    void aMissingFileStartsEmpty() {
+        SharedProjectsService service = new SharedProjectsService(file, executor);
 
         service.start().join();
 
-        assertEquals(List.of(fromApp), service.projects());
-        assertEquals(List.of(fromApp), file.read().projects());
+        assertEquals(List.of(), service.projects());
+        assertTrue(Files.exists(file.file()), "the list file is created on start");
     }
 
     @Test
     void existingFileIsNotReseeded() throws Exception {
         SharedProject existing = project(dir.resolve("existing"));
         file.update(list -> List.of(existing));
-        SharedProjectsService service = new SharedProjectsService(file,
-                () -> List.of(project(dir.resolve("app-repo"))), executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
 
         service.start().join();
 
@@ -73,7 +71,7 @@ class SharedProjectsServiceTest {
 
     @Test
     void registerIsIdempotentByRoot() {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         Path root = dir.resolve("repo");
 
@@ -87,7 +85,7 @@ class SharedProjectsServiceTest {
 
     @Test
     void removeDropsIt() {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         SharedProject added = service.register(dir.resolve("repo"), "repo").join();
 
@@ -99,9 +97,9 @@ class SharedProjectsServiceTest {
 
     @Test
     void byIdNowReadsTheFileFreshNotTheLaggedCache() throws Exception {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
-        SharedProject added = project(dir.resolve("from-app"));
+        SharedProject added = project(dir.resolve("external"));
         // Another tool's write the 2-second poll has not picked up yet.
         new SharedProjectsFile(file.file()).update(list -> List.of(added));
 
@@ -111,23 +109,23 @@ class SharedProjectsServiceTest {
 
     @Test
     void externalChangeFiresListenerOnce() throws Exception {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         AtomicInteger fired = new AtomicInteger();
         service.addListener(fired::incrementAndGet);
-        SharedProject fromApp = project(dir.resolve("from-app"));
-        new SharedProjectsFile(file.file()).update(list -> List.of(fromApp));
+        SharedProject external = project(dir.resolve("external"));
+        new SharedProjectsFile(file.file()).update(list -> List.of(external));
 
         service.refresh();
         service.refresh();
 
-        assertEquals(List.of(fromApp), service.projects());
+        assertEquals(List.of(external), service.projects());
         assertEquals(1, fired.get());
     }
 
     @Test
     void removedListenerIsNotCalled() throws Exception {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         AtomicInteger fired = new AtomicInteger();
         Runnable unsubscribe = service.addListener(fired::incrementAndGet);
@@ -142,7 +140,7 @@ class SharedProjectsServiceTest {
     @Test
     void malformedFileExposesFlagAndRegisterFails() throws Exception {
         Files.writeString(file.file(), "{broken");
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
 
         service.start().join();
 
@@ -152,36 +150,33 @@ class SharedProjectsServiceTest {
     }
 
     @Test
-    void aDeletedFileIsReseededNotEmptied() throws Exception {
-        SharedProject fromApp = project(dir.resolve("app-repo"));
-        SharedProjectsService service = new SharedProjectsService(file, () -> List.of(fromApp), executor);
+    void aDeletedFileIsReseededNotLeftAbsent() throws Exception {
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         Files.delete(file.file());
 
         service.refresh();
 
-        assertEquals(List.of(fromApp), service.projects());
-        assertEquals(List.of(fromApp), file.read().projects());
+        assertEquals(List.of(), service.projects());
+        assertTrue(Files.exists(file.file()), "the deleted file is recreated, not left absent");
     }
 
     @Test
-    void registeringAfterADeleteKeepsTheSeededProjects() throws Exception {
-        SharedProject fromApp = project(dir.resolve("app-repo"));
-        SharedProjectsService service = new SharedProjectsService(file, () -> List.of(fromApp), executor);
+    void registeringAfterADeleteWritesOntoTheRecreatedFile() throws Exception {
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         Files.delete(file.file());
 
         SharedProject added = service.register(dir.resolve("new"), "new").join();
 
-        assertEquals(List.of(fromApp, added), file.read().projects());
+        assertEquals(List.of(added), file.read().projects());
     }
 
     @Test
     void aServiceStoppedBeforeItStartedNeverWrites() throws Exception {
         // The IDE can dispose the plugin service before its initialization
         // reaches start(): the late start must not seed files afterwards.
-        SharedProjectsService service = new SharedProjectsService(file,
-                () -> List.of(project(dir.resolve("app-repo"))), executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
 
         service.stop();
         service.start().join();
@@ -192,7 +187,7 @@ class SharedProjectsServiceTest {
 
     @Test
     void registerRemoteStoresThePlaceholderRootAndTheRemote() {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
 
@@ -202,8 +197,8 @@ class SharedProjectsServiceTest {
         assertEquals(Optional.of(remote), registered.remote());
         assertEquals(remote.placeholderRoot(), registered.root());
         assertEquals("engine", registered.displayName());
-        // The shared file is the app's too: a remote entry must round-trip
-        // through the same codec so both sides agree on the row.
+        // A remote entry must round-trip through the same codec as every
+        // other entry so all writers agree on the row.
         List<SharedProject> stored = file.read().projects();
         assertEquals(1, stored.size());
         assertTrue(stored.get(0).isRemote());
@@ -212,7 +207,7 @@ class SharedProjectsServiceTest {
 
     @Test
     void registerRemoteIsIdempotentOnTheSameHostAndPath() {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
         SshRemote remote = new SshRemote("build-box", "/srv/work/engine");
 
@@ -226,7 +221,7 @@ class SharedProjectsServiceTest {
 
     @Test
     void aDifferentHostIsNotADuplicateOfTheSamePath() {
-        SharedProjectsService service = new SharedProjectsService(file, List::of, executor);
+        SharedProjectsService service = new SharedProjectsService(file, executor);
         service.start().join();
 
         service.registerRemote(new SshRemote("build-box", "/srv/work/engine")).join();

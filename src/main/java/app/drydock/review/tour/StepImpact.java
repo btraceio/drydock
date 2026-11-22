@@ -37,7 +37,7 @@ import java.util.regex.Matcher;
  * never reaches the rows the reviewer clicks.</p>
  *
  * <p>Pure and blocking-free given its inputs, but its inputs are not: the
- * graph and the scan are built off the FX thread, and so is this.</p>
+ * graph and the scan are built off the UI thread, and so is this.</p>
  *
  * @param calledFromOutside  occurrences of the step's declarations outside
  *                           the change, by file then line

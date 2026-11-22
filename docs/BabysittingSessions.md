@@ -1,10 +1,8 @@
 # Babysitting sessions for PR-carrying sessions — requirements
 
 Status: REQUIREMENTS (not yet implemented). Decisions confirmed in
-conversation 2026-11-18. TARGET: the IntelliJ plugin tree
-(`intellij-plugin/`, headless core `src/main/java`, IDE glue
-`src/platform/java`). The desktop app (`app/`) is not touched; a port there
-is a possible follow-up, not part of this change.
+conversation 2026-11-18. TARGET: the plugin tree at the repository root
+(headless core `src/main/java`, IDE glue `src/platform/java`).
 
 ## Goal
 
@@ -218,7 +216,7 @@ implementation changes) back to the main session.
 
 - Injecting messages into the watched session's conversation (only the
   babysitter is nudged programmatically).
-- The desktop app (`app/`) — plugin only in this change.
+- A standalone desktop app — Drydock is the IntelliJ plugin only.
 - Non-GitHub remotes.
 - The plugin pushing anything itself except the sanctioned rerun API call
   (agents push; drydock reruns CI).

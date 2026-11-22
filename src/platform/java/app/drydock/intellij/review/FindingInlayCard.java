@@ -715,7 +715,7 @@ public final class FindingInlayCard extends JPanel {
         return age(at, clock.instant());
     }
 
-    /** Relative age against a given now, clamped like the app's "time ago" (never negative). */
+    /** Relative age against a given now, never negative. */
     static String age(Instant at, Instant now) {
         long seconds = Math.max(0, Duration.between(at, now).getSeconds());
         if (seconds < 60) {

@@ -33,9 +33,7 @@ import java.util.function.Function;
 /**
  * The starting-model picker of the Drydock task dialogs: an editable,
  * searchable combo over the selected harness's model suggestions, plus
- * whatever models this repository has launched with before. The Swing twin
- * of the standalone app's {@code app.drydock.ui.ModelSelector}, with the
- * same contract.
+ * whatever models this repository has launched with before.
  *
  * <p>Search filters the popup's items (case-insensitive substring, over the
  * selected harness's retained suggestions, so clearing the query restores the full list) while the
@@ -57,7 +55,7 @@ import java.util.function.Function;
  * suggestions replace the previous harness's wholesale on switch, because a
  * merged list reads as one harness's offering while carrying another's ids
  * (Pi's whole catalog under Claude's or Codex's toggle — the defect this
- * scoping fixes; the standalone app's {@code ModelSelector} had it too). A
+ * scoping fixes). A
  * harness whose catalog has not loaded yet shows an empty list until it
  * lands; the editor's remembered model stays usable throughout.</p>
  */

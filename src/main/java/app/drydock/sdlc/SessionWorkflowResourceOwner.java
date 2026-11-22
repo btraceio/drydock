@@ -25,7 +25,7 @@ public final class SessionWorkflowResourceOwner {
 
     public enum Outcome { ACCEPTED, REFUSED_CAP, REFUSED_JOURNAL, REFUSED_DUPLICATE }
 
-    /** Cleanup for resources without an in-memory lease (after restart) and for remote copies; may block off-FX. */
+    /** Cleanup for resources without an in-memory lease (after restart) and for remote copies; may block off-UI. */
     public interface Cleaner {
         CompletableFuture<Void> deleteLocal(Lease lease);
 
