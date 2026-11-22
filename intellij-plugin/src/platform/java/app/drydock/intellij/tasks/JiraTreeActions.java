@@ -23,30 +23,13 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
- * The Jira rows' tree actions (spec AC11, AC15, AC22). {@code TaskTreePanel}
- * is already the panel's own home, so these live beside it and reuse its data
- * keys and presentation seams, exactly like the GitHub settings action.
- *
- * <p>The settings action opens the shared repository settings dialog, whose
- * password-safe touches run off the EDT under modal progress; the tree reacts
- * only after the save completed.</p>
+ * The Jira rows' tree actions (spec AC11, AC22). {@code TaskTreePanel} is
+ * already the panel's own home, so these live beside it and reuse its data
+ * keys and presentation seams.
  */
 final class JiraTreeActions {
 
     private JiraTreeActions() {
-    }
-
-    /**
-     * Whether the Jira settings action applies to the selected row: a
-     * registered project, its Issues section, its Jira node, one of its Jira
-     * rows, or its Jira ghost (spec AC11). Pure.
-     */
-    static boolean settingsNode(TaskNode node) {
-        return node instanceof ProjectRow
-                || node instanceof Section section && section.kind() == SectionKind.ISSUES
-                || node instanceof TaskNode.JiraNode
-                || node instanceof TaskNode.Ghost ghost && ghost.source() == TaskNode.GhostSource.JIRA
-                || node instanceof JiraIssueRow;
     }
 
     /**
@@ -88,47 +71,6 @@ final class JiraTreeActions {
                 }
             }
         };
-    }
-
-    /**
-     * {@code Jira Settings…} for the selected project: reads the stored token
-     * off the EDT, shows the repository settings dialog, saves the
-     * non-secret settings, writes the token off the EDT, and only then runs
-     * {@code afterSave} with the project's root (spec AC14, AC15).
-     */
-    static AnAction settings(Project project, Consumer<Path> afterSave) {
-        return new DumbAwareAction("Jira Settings…",
-                "Configure Jira issues for this Drydock project", AllIcons.General.Settings) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, settingsNode(e.getData(TaskTreePanel.SELECTED_NODE)));
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.BGT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                Path root = e.getData(TaskTreePanel.SELECTED_PROJECT_ROOT);
-                if (root == null) {
-                    return;
-                }
-                openSettings(project, root, afterSave);
-            }
-        };
-    }
-
-    /**
-     * Opens the repository settings for {@code root}'s project directly —
-     * the ghost node's click reuses the settings action's whole flow — and
-     * runs {@code afterSave} with the root once the save completed.
-     */
-    static void openSettings(Project project, Path root, Consumer<Path> afterSave) {
-        DrydockPluginService.getInstance().sharedProjects().byRoot(root)
-                .ifPresent(registered -> RepositorySettingsDialog.open(project, registered,
-                        () -> afterSave.accept(root)));
     }
 
     /**

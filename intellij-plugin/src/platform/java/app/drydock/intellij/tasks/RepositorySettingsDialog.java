@@ -33,18 +33,18 @@ import javax.swing.JPanel;
 
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
- * One sectioned settings dialog per registered Drydock project, replacing the
- * three single-purpose dialogs (Jira, GitHub, workspace box) that each needed
- * their own menu item and their own modal round trip. The sections, in order:
- * Jira, GitHub, Workspace box, Agent identity. OK saves every section and
- * then runs the caller's {@code afterSave} — the tree reactions stay with the
- * callers, because only they know which caches a Jira change invalidates and
- * a workspace change does not.
+ * One sectioned settings dialog per registered Drydock project: Jira, GitHub,
+ * workspace box (its section shown only while the experimental opt-in flag is
+ * on) and agent identity, one dialog instead of per-source menu entries. OK
+ * saves every section and then runs the caller's {@code afterSave} — the tree
+ * reactions stay with the callers, because only they know which caches a
+ * Jira change invalidates and a workspace change does not.
  *
  * <p>The dialog only collects values (spec AC11, carried over): it performs
  * no I/O beyond reading the current values to pre-fill. The Jira secret is
@@ -69,9 +69,17 @@ public final class RepositorySettingsDialog extends DialogWrapper {
         this.registered = registered;
         this.jiraSection = new JiraSection(storedJiraSecret);
         this.githubSection = new GitHubSection();
-        this.workspaceSection = new WorkspaceSection();
+        // The workspace-box opt-in is read at dialog build time: a flag-off
+        // dialog shows no workspace-box surface, matching the menu that never
+        // offered the entry without the flag.
+        this.workspaceSection = WorkspaceSettings.enabled() ? new WorkspaceSection() : null;
         this.agentIdentitySection = new AgentIdentitySection();
-        this.sections = List.of(jiraSection, githubSection, workspaceSection, agentIdentitySection);
+        List<Section> sections = new ArrayList<>(List.of(jiraSection, githubSection));
+        if (workspaceSection != null) {
+            sections.add(workspaceSection);
+        }
+        sections.add(agentIdentitySection);
+        this.sections = List.copyOf(sections);
         setTitle("Drydock Repository Settings — " + registered.displayName());
         setOKButtonText("Save");
         init();

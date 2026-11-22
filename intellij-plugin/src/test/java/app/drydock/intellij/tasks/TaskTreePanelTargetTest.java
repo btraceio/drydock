@@ -691,33 +691,6 @@ class TaskTreePanelTargetTest {
         assertEquals(Optional.empty(), TaskTreePanel.newTaskTarget(row, REGISTERED_ROOT));
     }
 
-    @Test
-    void jiraSettingsAreReachableFromProjectIssuesSectionAndJiraRows() {
-        SharedProject registered = SharedProject.local(
-                RepositoryId.newId(), REGISTERED_ROOT, "profiling-backend", NOW);
-        ProjectRow project = new ProjectRow(registered, false, false, List.of(), List.of(), 0);
-        Section issues = new Section(SectionKind.ISSUES, List.of(new Deferred("Loading issues…")));
-        JiraIssueRow jira = new JiraIssueRow(REGISTERED_ROOT, new JiraIssue("PROJ-123",
-                "Fix allocation accounting", "https://acme.atlassian.net/browse/PROJ-123",
-                List.of(), Optional.of(NOW)));
-
-        assertTrue(JiraTreeActions.settingsNode(project));
-        assertTrue(JiraTreeActions.settingsNode(issues));
-        assertTrue(JiraTreeActions.settingsNode(jira));
-    }
-
-    @Test
-    void jiraSettingsAreNotOfferedOnIssueRowsOrPullRequestSections() {
-        IssueRow issue = new IssueRow(REGISTERED_ROOT, new OpenIssue(42, "Fix allocation profile",
-                Optional.of("https://github.com/DataDog/profiling-backend/issues/42"), List.of(), List.of(),
-                Optional.of(NOW)));
-        Section pullRequests = new Section(SectionKind.PULL_REQUESTS,
-                List.of(new Deferred("Loading pull requests…")));
-
-        assertFalse(JiraTreeActions.settingsNode(issue));
-        assertFalse(JiraTreeActions.settingsNode(pullRequests));
-    }
-
     // --- Jira group expansion state: restoration walk and eviction ------------------
 
     private static ListingExpansionTracker tracker() {

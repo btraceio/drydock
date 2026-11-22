@@ -24,7 +24,6 @@ import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.projects.SharedProject;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
-import app.drydock.intellij.tasks.TaskNode.GhostSource;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
 import app.drydock.intellij.tasks.TaskNode.IssueRow;
@@ -40,7 +39,6 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
-import app.drydock.intellij.workspace.WorkspaceSettings;
 import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
@@ -837,17 +835,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
-        // One GitHub Settings action for every row that offers it — an
-        // issue, a project, or a listings section (A10: the old duplicate
-        // pair is gone).
-        AnAction githubSettings = githubSettingsAction(node -> node instanceof IssueRow
-                || githubSettingsNode(node));
-        // The workspace-box settings for a project row, next to GitHub
-        // settings. The experimental opt-in gates both halves: TaskMenu
-        // lays the entry out only while the flag is on, and TreeMenu
-        // registers the action per menu build only then, so a flag-off
-        // build has no workspace-box surface anywhere.
-        AnAction workspaceBoxSettings = workspaceBoxSettingsAction(node -> node instanceof ProjectRow);
+        // One repository-settings action for every row that offers it — an
+        // issue, a project, a listings section, or a ghost node: it opens the
+        // single sectioned dialog (Jira, GitHub, workspace box, agent
+        // identity), and saving any of it drops every cache the sections can
+        // change and rebuilds (A10: the old per-source settings actions are
+        // gone).
+        AnAction repositorySettings = repositorySettingsAction(node -> node instanceof IssueRow
+                || node instanceof JiraIssueRow || node instanceof ProjectRow
+                || node instanceof GitHubNode
+                || node instanceof Section section
+                        && (section.kind() == SectionKind.ISSUES || section.kind() == SectionKind.PULL_REQUESTS)
+                || node instanceof Ghost);
         // The manual refresh, one shared instance for the toolbar and the
         // tree's context menu alike: it is the same "show me now" gesture
         // (A10), but what it drops depends on where it ran — global from the
@@ -920,13 +919,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
         menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
-        menuActions.put(TaskMenu.Item.GITHUB_SETTINGS, githubSettings);
+        menuActions.put(TaskMenu.Item.REPOSITORY_SETTINGS, repositorySettings);
         menuActions.put(TaskMenu.Item.OPEN_IN_JIRA, JiraTreeActions.openInJira());
         menuActions.put(TaskMenu.Item.OPEN_MIRRORED_TASK, openMirroredTask);
-        menuActions.put(TaskMenu.Item.JIRA_SETTINGS, JiraTreeActions.settings(project, root -> {
-            inputs.invalidateJira();
-            requestRebuild(false);
-        }));
         // Group edits only ever touch the project's own group storage and
         // listings: one project's Jira caches drop, nothing else.
         Consumer<Path> afterJiraGroupChange = root -> {
@@ -949,7 +944,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // remote (SSH) repository cannot be a window's project, so this is
         // the one registration gesture that creates one.
         AnAction addRemoteRepository = addRemoteRepositoryAction();
-        TreeMenu treeMenu = new TreeMenu(menuActions, workspaceBoxSettings, addRemoteRepository, delayedTaskActions,
+        TreeMenu treeMenu = new TreeMenu(menuActions, addRemoteRepository, delayedTaskActions,
                 newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
                 () -> displayedTasks, TaskTreePanel::watchedSnapshot);
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
@@ -1005,16 +1000,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                             TaskActions.confirmAndRemove(project, root, stale.worktrees(), true,
                                     TaskTreePanel.this::worktreesRemoved));
                 } else if (node instanceof Ghost ghost && acts) {
-                    projectRootOf(path).ifPresent(root -> {
-                        if (ghost.source() == GhostSource.GITHUB) {
-                            openGitHubSettings(root);
-                        } else {
-                            JiraTreeActions.openSettings(project, root, fixed -> {
-                                inputs.invalidateJira();
-                                requestRebuild(false);
-                            });
-                        }
-                    });
+                    projectRootOf(path).ifPresent(root -> openRepositorySettings(root));
                 } else if (node instanceof IssueRow issue && primaryButton && event.getClickCount() == 2) {
                     issue.issue().url().ifPresent(BrowserUtil::browse);
                 } else if (node instanceof JiraIssueRow jira && primaryButton && event.getClickCount() == 2) {
@@ -1109,7 +1095,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.Item.OPEN_IN_WORKBENCH, TaskMenu.Item.RESOLVE_CONFLICTS,
                 TaskMenu.Item.QUICK_REVIEW, TaskMenu.Item.REVIEW, TaskMenu.Item.REVIEW_IN_SPHINX,
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
-                TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
+                TaskMenu.Item.REPOSITORY_SETTINGS,
                 TaskMenu.Item.ADD_JIRA_GROUP, TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP,
                 TaskMenu.Item.REFRESH, TaskMenu.Item.FOCUS_PROJECT);
     }
@@ -1287,7 +1273,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static final class TreeMenu extends ActionGroup implements DumbAware {
 
         private final Map<TaskMenu.Item, AnAction> actions;
-        private final AnAction workspaceBoxSettings;
         private final AnAction addRemoteRepository;
         private final AnAction[] delayedTaskActions;
         private final AnAction newDelayedTask;
@@ -1300,13 +1285,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Supplier<TaskLayer> tasks;
         private final Supplier<WatchedSnapshot> watched;
 
-        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction workspaceBoxSettings, AnAction addRemoteRepository,
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
                  AnAction[] delayedTaskActions,
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched) {
             this.actions = actions;
-            this.workspaceBoxSettings = workspaceBoxSettings;
             this.addRemoteRepository = addRemoteRepository;
             this.delayedTaskActions = delayedTaskActions;
             this.newDelayedTask = newDelayedTask;
@@ -1352,19 +1336,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             if (e.getData(SELECTED_NODE) == null && selection == null && root == null) {
                 return new AnAction[] {addRemoteRepository};
             }
-            // The opt-in is read per menu build, so toggling it in Settings
-            // applies on the next popup: on, the workspace-box action is
-            // registered; off, it is neither laid out nor registered
-            // (TaskMenu skips an Item without an action).
-            Map<TaskMenu.Item, AnAction> actions = this.actions;
-            if (WorkspaceSettings.enabled()) {
-                actions = new EnumMap<>(this.actions);
-                actions.put(TaskMenu.Item.WORKSPACE_BOX, workspaceBoxSettings);
-            }
+            // TaskMenu skips an Item without an action.
             return TaskActions.withRemoteReveal(e.getData(SELECTED_NODE),
-                    TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, actions,
-                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get(),
-                    WorkspaceSettings.enabled()).getChildActionsOrStubs());
+                    TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, this.actions,
+                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get())
+                            .getChildActionsOrStubs());
         }
     }
 
@@ -1523,31 +1499,14 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
     }
 
-    private static boolean githubSettingsNode(TaskNode node) {
-        return node instanceof ProjectRow || node instanceof Section section
-                && (section.kind() == SectionKind.ISSUES || section.kind() == SectionKind.PULL_REQUESTS)
-                || node instanceof GitHubNode
-                || node instanceof Ghost ghost && ghost.source() == GhostSource.GITHUB;
-    }
-
-    /** Opens the repository settings for {@code root}'s project, then rebuilds. EDT. */
-    private void openGitHubSettings(Path root) {
+    /** Opens the repository settings for {@code root}'s project: every section's caches drop, then a rebuild. EDT. */
+    private void openRepositorySettings(Path root) {
         DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered ->
                 RepositorySettingsDialog.open(project, registered, () -> {
                     inputs.invalidateGitHub();
+                    inputs.invalidateJira();
                     requestRebuild(false);
                 }));
-    }
-
-    /**
-     * Opens the workspace-box settings for {@code root}'s project. EDT, modal,
-     * and no process spawns: the dialog only writes {@code WorkspaceSettings},
-     * which the launch path reads when a remote session starts, so no tree
-     * cache needs invalidating afterwards.
-     */
-    private void openWorkspaceBoxSettings(Path root) {
-        DrydockPluginService.getInstance().sharedProjects().byRoot(root).ifPresent(registered ->
-                RepositorySettingsDialog.open(project, registered, () -> { }));
     }
 
     /** Opens the pull request's review workbench in its worktree's window. EDT. */
@@ -1768,9 +1727,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 .ifPresent(plan -> TaskLauncher.saveTask(from, plan));
     }
 
-    private AnAction githubSettingsAction(Predicate<TaskNode> applies) {
-        return new DumbAwareAction("GitHub Settings…",
-                "Configure GitHub issues for this Drydock project", AllIcons.General.Settings) {
+    private AnAction repositorySettingsAction(Predicate<TaskNode> applies) {
+        return new DumbAwareAction("Repository Settings…",
+                "Configure this Drydock project's Jira, GitHub, workspace box, and agent identity",
+                AllIcons.General.Settings) {
             @Override
             public void update(@NotNull AnActionEvent e) {
                 TaskActions.present(e, applies.test(e.getData(SELECTED_NODE)));
@@ -1787,12 +1747,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 if (root == null) {
                     return;
                 }
-                openGitHubSettings(root);
+                openRepositorySettings(root);
             }
         };
     }
 
-    /** One workspace-box settings action for every project row; laid out next to GitHub settings. */
     /** EDT: the "Add Remote Repository…" dialog, then the tree rebuilds from the shared list's change. */
     private AnAction addRemoteRepositoryAction() {
         return new DumbAwareAction("Add Remote Repository\u2026",
@@ -1815,31 +1774,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                         DrydockPluginService.getInstance().sharedProjects()).showAndGet()) {
                     requestRebuild(false);
                 }
-            }
-        };
-    }
-
-    private AnAction workspaceBoxSettingsAction(Predicate<TaskNode> applies) {
-        return new DumbAwareAction("Workspace Box…",
-                "Configure the workspace box this Drydock project's agent sessions run on",
-                AllIcons.General.Settings) {
-            @Override
-            public void update(@NotNull AnActionEvent e) {
-                TaskActions.present(e, applies.test(e.getData(SELECTED_NODE)));
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.BGT;
-            }
-
-            @Override
-            public void actionPerformed(@NotNull AnActionEvent e) {
-                Path root = e.getData(SELECTED_PROJECT_ROOT);
-                if (root == null) {
-                    return;
-                }
-                openWorkspaceBoxSettings(root);
             }
         };
     }

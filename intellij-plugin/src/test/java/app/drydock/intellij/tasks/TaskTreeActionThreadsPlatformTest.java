@@ -107,7 +107,6 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
 
     public void testEveryJiraTreeActionUpdatesOffTheEdt() throws Exception {
         List<AnAction> actions = List.of(JiraTreeActions.openInJira(),
-                JiraTreeActions.settings(getProject(), root -> { }),
                 JiraTreeActions.addGroup(getProject(), root -> { }),
                 JiraTreeActions.editGroup(getProject(), root -> { }),
                 JiraTreeActions.deleteGroup(getProject(), root -> { }));
@@ -220,10 +219,9 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         AnAction[] delayed = { stub("Delayed") };
         AnAction newDelayed = stub("New Delayed");
         AnAction refreshTasks = stub("Refresh Tasks");
-        AnAction workspaceBox = stub("Workspace Box…");
         AnAction addRemote = stub("Add Remote Repository…");
         List<Path> jiraQueries = new ArrayList<>();
-        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, workspaceBox, addRemote, delayed, newDelayed,
+        TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, addRemote, delayed, newDelayed,
                 refreshTasks,
                 root -> {
             jiraQueries.add(root);

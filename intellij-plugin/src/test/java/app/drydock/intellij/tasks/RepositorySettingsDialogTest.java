@@ -30,9 +30,18 @@ public class RepositorySettingsDialogTest extends BasePlatformTestCase {
     private final List<String> touchedKeys = new ArrayList<>();
 
     @Override
+    protected void setUp() throws Exception {
+        super.setUp();
+        // The workspace-box section exists in the dialog only while the
+        // experimental opt-in is on; the workspace tests below drive it.
+        WorkspaceSettings.setEnabled(true);
+    }
+
+    @Override
     protected void tearDown() throws Exception {
         try {
             PropertiesComponent properties = PropertiesComponent.getInstance();
+            WorkspaceSettings.setEnabled(false);
             for (String key : touchedKeys) {
                 properties.unsetValue(key);
             }

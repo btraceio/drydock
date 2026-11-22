@@ -53,9 +53,8 @@ class TaskMenuTest {
     private static final TaskMenu.MenuFacts TRANSFER = new TaskMenu.MenuFacts(true, false);
     private static final TaskMenu.MenuFacts NO_TRANSFER = new TaskMenu.MenuFacts(false, false);
     private static final TaskMenu.MenuFacts JIRA = new TaskMenu.MenuFacts(false, true);
-    private static final TaskMenu.MenuFacts WORKSPACE_BOX = new TaskMenu.MenuFacts(false, false, false, true);
     /** The facts of an ALIVE-detached workspace-box row: the remote Stop. */
-    private static final TaskMenu.MenuFacts REMOTE_STOP = new TaskMenu.MenuFacts(false, false, false, false, true);
+    private static final TaskMenu.MenuFacts REMOTE_STOP = new TaskMenu.MenuFacts(false, false, false, true);
 
     private static TaskRow task(boolean running, TaskPlacement placement) {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
@@ -123,7 +122,7 @@ class TaskMenuTest {
 
     /** The facts of a session row whose tasks mirror one GitHub issue and one Jira ticket. */
     private static final TaskMenu.MenuFacts SESSION_LINKS = new TaskMenu.MenuFacts(false, false, false, false,
-            false, List.of(), List.of("https://github.com/o/r/issues/12"),
+            List.of(), List.of("https://github.com/o/r/issues/12"),
             List.of("https://acme.atlassian.net/browse/PROJ-7"));
 
     @Test
@@ -152,7 +151,7 @@ class TaskMenuTest {
 
     @Test
     void aSessionRowWithPullRequestsOffersThePullRequestEntry() {
-        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, false, false, false,
+        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, false, false,
                 List.of("https://github.com/o/r/pull/9"), List.of(), List.of());
         assertEquals(List.of(
                 List.of(TaskMenu.Item.SWITCH_TO_TASK, TaskMenu.Item.SWITCH_TO_TASK_IN_OWN_WINDOW),
@@ -172,7 +171,7 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.OPEN_JIRA_TICKETS),
                 List.of(TaskMenu.Item.DEACTIVATE_AND_CLOSE, TaskMenu.Item.DONE_WITH_TASK)),
                 TaskMenu.sections(task(true, new TaskPlacement.ThisWindow()), List.of(),
-                        new TaskMenu.MenuFacts(false, false, false, false, false,
+                        new TaskMenu.MenuFacts(false, false, false, false,
                                 List.of(), List.of(), List.of("https://acme.atlassian.net/browse/PROJ-7"))));
     }
 
@@ -379,8 +378,8 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.RENAME, TaskMenu.Item.ASSOCIATE_PR, TaskMenu.Item.FLAG, TaskMenu.Item.NEW_TASK),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
-                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX));
-        assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), WORKSPACE_BOX)
+                TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), NO_TRANSFER));
+        assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), NO_TRANSFER)
                 .stream().anyMatch(section -> section.contains(TaskMenu.Item.DEACTIVATE)));
     }
 
@@ -402,11 +401,11 @@ class TaskMenuTest {
     void issueRowOffersImplementTriageThenGitHubSettings() {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
-                List.of(TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.GITHUB_SETTINGS)),
+                List.of(TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
-                List.of(TaskMenu.Item.GITHUB_SETTINGS)),
+                List.of(TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(issue(Optional.empty())));
     }
 
@@ -414,7 +413,7 @@ class TaskMenuTest {
     void jiraRowOffersImplementTriageThenOpenInJiraAndSettings() {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
-                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.JIRA_SETTINGS)),
+                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(jiraIssue()));
     }
 
@@ -432,16 +431,15 @@ class TaskMenuTest {
     void addJiraGroupIsOfferedOnlyWhenTheFactsSayJiraIsEnabled() {
         TaskNode issues = new Section(SectionKind.ISSUES, List.of(issue(Optional.empty())));
         assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.ADD_JIRA_GROUP,
-                        TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS)),
+                        TaskMenu.Item.REPOSITORY_SETTINGS)),
                 TaskMenu.sections(issues, List.of(), JIRA));
         // Disabled Jira: the old menu, Add would only ever fetch nothing.
-        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS,
-                        TaskMenu.Item.JIRA_SETTINGS)),
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(issues));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS,
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS,
                         TaskMenu.Item.ADD_JIRA_GROUP),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 TaskMenu.sections(project(), List.of(), JIRA));
@@ -474,10 +472,9 @@ class TaskMenuTest {
 
     @Test
     void listingSectionsOfferRefreshAndSettingsOthersNothing() {
-        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS,
-                        TaskMenu.Item.JIRA_SETTINGS)),
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty())))));
-        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS)),
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 sectionsOf(new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty())))));
         assertEquals(List.of(List.of(TaskMenu.Item.CLEANUP_DONE_SESSIONS)),
                 sectionsOf(new Section(SectionKind.SESSIONS, List.of(
@@ -497,19 +494,19 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_INACTIVE_WORKTREES, TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(false, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project(worktree(true, false))));
         assertEquals(List.of(
                 List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
+                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS),
                 List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
                 sectionsOf(project()));
     }
@@ -558,7 +555,7 @@ class TaskMenuTest {
                 sectionsOf(new TaskNode.StaleWorktrees(List.of(worktree(false, false)))),
                 sectionsOf(project(worktree(false, false))));
         List<TaskMenu.Item> last = List.of(TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.DONE_WITH_TASK,
-                TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.GITHUB_SETTINGS,
+                TaskMenu.Item.DONE_WITH_TASK, TaskMenu.Item.NEW_TASK, TaskMenu.Item.REPOSITORY_SETTINGS,
                 TaskMenu.Item.REMOVE_WORKTREE, TaskMenu.Item.REMOVE_STALE_WORKTREES,
                 TaskMenu.Item.REMOVE_FROM_DRYDOCK);
         assertEquals(last.size(), menus.size());
@@ -588,7 +585,7 @@ class TaskMenuTest {
         assertEquals(List.of(
                 List.of(TaskMenu.Item.OPEN_MIRRORED_TASK),
                 List.of(TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE),
-                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.JIRA_SETTINGS)),
+                List.of(TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.REPOSITORY_SETTINGS)),
                 TaskMenu.sections(jiraIssue(), List.of(jiraIssue()), mirrored));
         IssueRow github = issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"));
         assertEquals(TaskMenu.Item.OPEN_MIRRORED_TASK,
@@ -619,7 +616,7 @@ class TaskMenuTest {
 
     /** Facts with every jump target resolved to non-null markers. */
     private static TaskMenu.MenuFacts jumps(Object task, Object pullRequest, Object session) {
-        return new TaskMenu.MenuFacts(false, false, false, false, false,
+        return new TaskMenu.MenuFacts(false, false, false, false,
                 (app.drydock.tasks.TaskNode.DelayedTaskRow) task,
                 (PullRequestRow) pullRequest, (TaskRow) session);
     }
@@ -659,7 +656,7 @@ class TaskMenuTest {
 
     @Test
     void anIssueRowAddsTheShowTaskJumpBesideTheMirroredTaskOpen() {
-        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, true, false, false, newDelayedTaskRow(), null, null);
+        TaskMenu.MenuFacts facts = new TaskMenu.MenuFacts(false, false, true, false, newDelayedTaskRow(), null, null);
         IssueRow github = issue(Optional.of("https://github.com/DataDog/profiling-backend/issues/42"));
         assertEquals(List.of(TaskMenu.Item.SHOW_TASK, TaskMenu.Item.OPEN_MIRRORED_TASK),
                 TaskMenu.sections(github, List.of(), facts).get(0));
@@ -671,60 +668,6 @@ class TaskMenuTest {
                 new app.drydock.tasks.TaskState.TaskView(app.drydock.tasks.TaskId.of("fix-alloc-k3f9"),
                         app.drydock.tasks.TaskState.Presentation.READY, List.of(), List.of()),
                 "Fix allocation profile", RepositoryId.newId(), Optional.empty(), false, List.of());
-    }
-
-    @Test
-    void projectRowOffersWorkspaceBoxNextToGitHubSettingsOnlyWhileTheOptInIsOn() {
-        // Flag on: the entry sits next to GitHub settings, before Jira's —
-        // both settings facts on at once keeps every other entry in place.
-        assertEquals(List.of(
-                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
-                        TaskMenu.Item.JIRA_SETTINGS),
-                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
-                TaskMenu.sections(project(), List.of(), WORKSPACE_BOX));
-        assertEquals(List.of(
-                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.WORKSPACE_BOX,
-                        TaskMenu.Item.JIRA_SETTINGS, TaskMenu.Item.ADD_JIRA_GROUP),
-                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
-                TaskMenu.sections(project(), List.of(), new TaskMenu.MenuFacts(false, true, false, true)));
-        // Flag off — every delegating MenuFacts constructor keeps it off, so
-        // the existing flag-off assertions already pin this: no project menu
-        // contains the entry, and neither does any other row that shares
-        // the settings section.
-        assertEquals(List.of(
-                List.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN),
-                List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT, TaskMenu.Item.FOCUS_PROJECT),
-                List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.GITHUB_SETTINGS, TaskMenu.Item.JIRA_SETTINGS),
-                List.of(TaskMenu.Item.REMOVE_FROM_DRYDOCK)),
-                sectionsOf(project()));
-        assertFalse(TaskMenu.sections(new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))), List.of(),
-                        WORKSPACE_BOX).stream()
-                .anyMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)));
-    }
-
-    @Test
-    void noOtherRowOffersWorkspaceBoxEvenWithTheOptInOn() {
-        List<TaskNode> rows = List.of(
-                task(true, new TaskPlacement.OwnWindow()),
-                task(false, new TaskPlacement.Idle(false)),
-                issue(Optional.empty()),
-                jiraIssue(),
-                pullRequest(Optional.empty()),
-                worktree(false, false),
-                new WorktreeGroup(WORKTREE, "fix-allocation-profile", List.of(task(false, new TaskPlacement.Idle(false)))),
-                new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
-                new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty()))),
-                new TaskNode.StaleWorktrees(List.of(worktree(false, false))),
-                new TaskNode.AddCurrentProject(ROOT, "profiling-backend"));
-        for (TaskNode row : rows) {
-            assertTrue(TaskMenu.sections(row, List.of(), WORKSPACE_BOX).stream()
-                            .noneMatch(section -> section.contains(TaskMenu.Item.WORKSPACE_BOX)),
-                    "only a project row may offer the workspace-box settings: " + row.getClass().getSimpleName());
-        }
     }
 
     // -- babysitting ------------------------------------------------------
