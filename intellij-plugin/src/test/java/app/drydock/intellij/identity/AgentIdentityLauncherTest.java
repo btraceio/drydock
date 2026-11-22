@@ -13,7 +13,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -72,6 +74,22 @@ class AgentIdentityLauncherTest {
         assertTrue(Files.exists(base.resolve("identity").resolve("env").resolve(SESSION + ".env")),
                 "the env file exists between preparation and the launch");
         assertTrue(Files.exists(prepared.orElseThrow().wrapperBin().resolve("gh")));
+    }
+
+    @Test
+    void anEnabledRepositoryWithABlankCommandRunsTheDefaultMintingScript(@TempDir Path base) throws Exception {
+        store.put(key(".enabled"), "true"); // no command stored: blank is the default location
+        List<String> run = new ArrayList<>();
+        AgentIdentityLauncher launcher = new AgentIdentityLauncher(
+                new AgentIdentityPipeline((command, directory) -> {
+                    run.add(command);
+                    return AgentIdentitySpec.parse("GH_TOKEN=tok\n");
+                }, new AgentIdentityEnvFile(base), base),
+                id -> id.equals(SESSION) ? Optional.of(REPO) : Optional.empty(),
+                this::settings);
+
+        assertTrue(launcher.prepare(SESSION, base, "claude --do").isPresent());
+        assertEquals(List.of(AgentIdentitySettings.DEFAULT_COMMAND), run);
     }
 
     @Test

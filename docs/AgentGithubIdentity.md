@@ -12,11 +12,12 @@ without stored settings behaves exactly as before.
 
 ## Configuring
 
-Open the Drydock tool window's repository settings (the same dialog that
-holds the Jira, GitHub, and workspace-box settings) and enable **Agent
-Identity** for the repository, then enter the credential command: a single
-shell command, executed with `/bin/sh -c` in the launching session's working
-directory.
+Open the Drydock tool window's repository settings (the single **Repository
+Settings…** dialog that holds the Jira, GitHub, workspace-box, and agent
+identity sections) and enable **Agent Identity** for the repository. The
+credential command is a single shell command, executed with `/bin/sh -c` in
+the launching session's working directory. Leaving it blank runs the
+default: the user-local minting script at `~/.sdlc/agent-identity`.
 
 Settings are stored under `drydock.agentIdentity.<repositoryId>.*` in the
 IDE's application properties. The command is stored verbatim; it is not a

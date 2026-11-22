@@ -468,7 +468,7 @@ public final class RepositorySettingsDialog extends DialogWrapper {
             AgentIdentitySettings settings = AgentIdentitySettings.load(registered.id());
             enabled.setSelected(settings.enabled());
             credentialCommand.setText(settings.credentialCommand());
-            credentialCommand.getEmptyText().setText("The shell command that mints the identity");
+            credentialCommand.getEmptyText().setText("Blank runs " + AgentIdentitySettings.DEFAULT_COMMAND);
         }
 
         @Override
@@ -497,8 +497,10 @@ public final class RepositorySettingsDialog extends DialogWrapper {
 
         @Override
         public Optional<ValidationInfo> validate() {
-            return AgentIdentitySettings.refusal(enabled.isSelected(), credentialCommand.getText())
-                    .map(message -> new ValidationInfo(message, credentialCommand));
+            // Nothing to refuse: a blank command is the default minting
+            // script's location, and any non-blank command is the user's own
+            // glue, run only at launch — its failures surface there, loudly.
+            return Optional.empty();
         }
 
         @Override

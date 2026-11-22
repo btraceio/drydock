@@ -59,12 +59,12 @@ class AgentIdentitySettingsTest {
     }
 
     @Test
-    void refusalNamesTheMissingCommandOnlyWhenEnabled() {
-        assertTrue(AgentIdentitySettings.refusal(true, "").isPresent());
-        assertTrue(AgentIdentitySettings.refusal(true, "   ").isPresent());
-        assertTrue(AgentIdentitySettings.refusal(true, null).isPresent());
-        assertTrue(AgentIdentitySettings.refusal(false, "").isEmpty(),
-                "a disabled configuration never refuses");
-        assertTrue(AgentIdentitySettings.refusal(true, "glue mint").isEmpty());
+    void aBlankCommandResolvesToTheDefaultMintingScript() {
+        assertEquals(AgentIdentitySettings.DEFAULT_COMMAND,
+                new AgentIdentitySettings(true, "").effectiveCommand());
+        assertEquals(AgentIdentitySettings.DEFAULT_COMMAND,
+                new AgentIdentitySettings(true, "   ").effectiveCommand());
+        assertEquals("glue mint --repo .",
+                new AgentIdentitySettings(true, "glue mint --repo .").effectiveCommand());
     }
 }

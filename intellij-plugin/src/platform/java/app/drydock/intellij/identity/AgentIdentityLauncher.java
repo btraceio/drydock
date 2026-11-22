@@ -113,7 +113,7 @@ public final class AgentIdentityLauncher {
             return Optional.empty();
         }
         AgentIdentitySettings settings = settingsFor.apply(repository.get());
-        if (!settings.enabled() || settings.credentialCommand().isEmpty()) {
+        if (!settings.enabled()) {
             return Optional.empty();
         }
         if (TerminalAgentProvider.SHELL_COMMAND.equals(planCommand)) {
@@ -130,7 +130,7 @@ public final class AgentIdentityLauncher {
         OriginLookup origin = lookupOrigin(workingDirectory);
         try {
             AgentIdentityPipeline.Session session = pipeline.prepare(
-                    sessionId, settings.credentialCommand(), workingDirectory, origin.url(), origin.failed());
+                    sessionId, settings.effectiveCommand(), workingDirectory, origin.url(), origin.failed());
             return Optional.of(new Prepared(
                     AgentIdentityPipeline.prefix(session.envFile(), planCommand), session.wrapperBin(),
                     () -> pipeline.deleteEnvFile(sessionId)));
