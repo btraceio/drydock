@@ -202,6 +202,12 @@ public final class GhCliService implements AutoCloseable {
     /** How many open PRs one listing reads; one row per PR, so it can be generous. */
     private static final int PR_LIST_LIMIT = 100;
 
+    /** The badge listings' base fields, shared by the heavy badge fetch and its light sibling. */
+    private static final String BADGE_BASE_FIELDS = "number,state,isDraft,headRefName,title,url,isCrossRepository";
+
+    /** The heavy fields only the badge fetch carries -- and the only ones its reduced retry drops. */
+    private static final String BADGE_HEAVY_FIELDS = "mergeable,statusCheckRollup";
+
     /** Enough for normal repositories without letting a large tracker swamp the task tree. */
     public static final int ISSUE_LIST_LIMIT = 100;
 
@@ -632,18 +638,30 @@ public final class GhCliService implements AutoCloseable {
     /** The light badge listing with {@code gh} already looked up; static so the argv is testable with a scripted gh. */
     static Map<String, BranchPullRequest> branchPullRequestRowsWith(Optional<Path> located, Path root,
                                                                     Optional<String> repository, Duration timeout) {
+        Path gh = badgeListingGh(located, root, repository);
+        if (gh == null) {
+            return Map.of();
+        }
+        return branchPullRequestsRun(root, badgeCommand(gh, repository, BADGE_BASE_FIELDS), timeout).badges();
+    }
+
+    /**
+     * The two badge listings' shared preconditions: {@code gh} present and
+     * the repository selector valid. Empty when either fails -- logged, and
+     * the listing reads as no badges.
+     */
+    private static Path badgeListingGh(Optional<Path> located, Path root, Optional<String> repository) {
         Path gh = located.orElse(null);
         if (gh == null) {
             LOG.log(Level.DEBUG, "gh is not installed; no pull-request badges for " + root);
-            return Map.of();
+            return null;
         }
         if (repository.filter(value -> !validRepository(value)).isPresent()) {
             LOG.log(Level.WARNING, "The configured GitHub repository for " + root
                     + " is not OWNER/REPO or HOST/OWNER/REPO; no pull-request badges");
-            return Map.of();
+            return null;
         }
-        return branchPullRequestsRun(root, badgeCommand(gh, repository,
-                "number,state,isDraft,headRefName,title,url,isCrossRepository"), timeout).badges();
+        return gh;
     }
 
     /** The badge listing's {@code gh pr list --state all} argv with {@code fields}. */
@@ -662,18 +680,12 @@ public final class GhCliService implements AutoCloseable {
     /** The badge listing with {@code gh} already looked up; static for the same reason as {@link #openPullRequestsWith}. */
     static Map<String, BranchPullRequest> branchPullRequestsWith(Optional<Path> located, Path root,
                                                                  Optional<String> repository, Duration timeout) {
-        Path gh = located.orElse(null);
+        Path gh = badgeListingGh(located, root, repository);
         if (gh == null) {
-            LOG.log(Level.DEBUG, "gh is not installed; no pull-request badges for " + root);
-            return Map.of();
-        }
-        if (repository.filter(value -> !validRepository(value)).isPresent()) {
-            LOG.log(Level.WARNING, "The configured GitHub repository for " + root
-                    + " is not OWNER/REPO or HOST/OWNER/REPO; no pull-request badges");
             return Map.of();
         }
         List<String> command = badgeCommand(gh, repository,
-                "number,state,isDraft,headRefName,title,url,isCrossRepository,mergeable,statusCheckRollup");
+                BADGE_BASE_FIELDS + "," + BADGE_HEAVY_FIELDS);
         BadgeRun first = branchPullRequestsRun(root, command, timeout);
         List<String> reduced = withoutOptionalListingFields(command);
         if (first.result() != null || command.equals(reduced)) {

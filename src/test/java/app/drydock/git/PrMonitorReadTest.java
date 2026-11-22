@@ -14,12 +14,18 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -384,6 +390,250 @@ class PrMonitorReadTest {
                         new HashMap<>())).message());
     }
 
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void a200WithoutAnEtagStillAnswersTheRead(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir,
+                "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n" + noEtagScript());
+
+        Map<String, PrMonitorRead.CachedResponse> etags = new HashMap<>();
+        PrSnapshot first = PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42,
+                Duration.ofSeconds(15), etags);
+        PrSnapshot second = PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42,
+                Duration.ofSeconds(15), etags);
+
+        assertInstanceOf(PrSnapshot.Snapshot.class, first);
+        assertEquals(first, second, "an ETag-less endpoint re-reads in full every poll, never fails");
+        assertTrue(etags.isEmpty(), "nothing was cached without a validator");
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(8, calls.size(), "two full reads: four endpoints each, none conditional");
+        assertTrue(calls.stream().noneMatch(call -> call.contains("If-None-Match")), calls::toString);
+    }
+
+    /** A full four-endpoint script whose 200 answers carry no ETag header at all. */
+    private static String noEtagScript() {
+        return "case \"$2\" in\n"
+                + "  pulls/42)\n"
+                + "    printf 'HTTP/2.0 200 OK\\n\\n%s' '" + pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"") + "'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/check-runs*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\n\\n%s' '{\"total_count\":1,\"check_runs\":[]}'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/status)\n"
+                + "    printf 'HTTP/2.0 200 OK\\n\\n%s' '{\"state\":\"pending\",\"statuses\":[]}'\n"
+                + "    ;;\n"
+                + "  *pulls/42/reviews*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\n\\n%s' '[]';\n"
+                + "    ;;\n"
+                + "esac\n";
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aDifferentHostNeverReusesAnotherHostsCache(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, apiScript(receipt, true));
+
+        Map<String, PrMonitorRead.CachedResponse> etags = new HashMap<>();
+        assertInstanceOf(PrSnapshot.Snapshot.class, PrMonitorRead.readWith(Optional.of(gh), dir,
+                Optional.of("ghe1.example.com/o/r"), 42, Duration.ofSeconds(15), etags));
+        assertInstanceOf(PrSnapshot.Snapshot.class, PrMonitorRead.readWith(Optional.of(gh), dir,
+                Optional.of("ghe1.example.com/o/r"), 42, Duration.ofSeconds(15), etags));
+        assertInstanceOf(PrSnapshot.Snapshot.class, PrMonitorRead.readWith(Optional.of(gh), dir,
+                Optional.of("ghe2.example.com/o/r"), 42, Duration.ofSeconds(15), etags));
+
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(12, calls.size(), "three reads; the third host starts cold");
+        for (int i = 4; i < 8; i++) {
+            assertTrue(calls.get(i).contains("If-None-Match"), "warm second read: " + calls.get(i));
+        }
+        for (int i = 8; i < 12; i++) {
+            assertFalse(calls.get(i).contains("If-None-Match"),
+                    "the second host must not reuse the first host's validators: " + calls.get(i));
+        }
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aPushDropsTheDeadCommitScopeCacheEntries(@TempDir Path dir) throws Exception {
+        String sha2 = "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0";
+        Path pulls = dir.resolve("pulls.json");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir,
+                "case \"$2\" in\n"
+                + "  pulls/42)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"p\"\\n\\n%s' \"$(cat " + pulls + ")\"\n"
+                + "    ;;\n"
+                + "  *" + SHA + "*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"c1\"\\n\\n%s' '[]'\n"
+                + "    ;;\n"
+                + "  *" + sha2 + "*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"c2\"\\n\\n%s' '[]'\n"
+                + "    ;;\n"
+                + "  *reviews*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"rv\"\\n\\n%s' '[]'\n"
+                + "    ;;\n"
+                + "  *) echo \"unexpected: $*\" >&2; exit 1 ;;\n"
+                + "esac\n");
+
+        Files.writeString(pulls, pull("\"mergeable\":false,\"mergeable_state\":\"dirty\""));
+        Map<String, PrMonitorRead.CachedResponse> etags = new HashMap<>();
+        PrSnapshot.Snapshot before = assertInstanceOf(PrSnapshot.Snapshot.class,
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42, Duration.ofSeconds(15), etags));
+        // The push: the second read reports a new head commit.
+        Files.writeString(pulls, pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"")
+                .replace(SHA, sha2));
+        PrSnapshot.Snapshot after = assertInstanceOf(PrSnapshot.Snapshot.class,
+                PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42, Duration.ofSeconds(15), etags));
+
+        assertEquals(SHA, before.headRefOid());
+        assertEquals(sha2, after.headRefOid());
+        for (String key : etags.keySet()) {
+            assertFalse(key.contains(SHA), "dead pre-push cache entry survived: " + key);
+        }
+        assertTrue(etags.keySet().stream().anyMatch(key -> key.contains(sha2)),
+                "the new head's commit-scoped entries are cached: " + etags.keySet());
+        assertEquals(4, etags.size(), "pulls + two commit-scoped pages + reviews, nothing dead");
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void aFreshFirstPageForcesTheLaterPagesOfTheSameRead(@TempDir Path dir) throws Exception {
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir,
+                "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n" + straddlingReviewsScript());
+
+        Map<String, PrMonitorRead.CachedResponse> etags = new HashMap<>();
+        assertInstanceOf(PrSnapshot.Snapshot.class, PrMonitorRead.readWith(Optional.of(gh), dir,
+                Optional.empty(), 42, Duration.ofSeconds(15), etags));
+        PrSnapshot secondRaw = PrMonitorRead.readWith(Optional.of(gh), dir, Optional.empty(), 42, Duration.ofSeconds(15), etags);
+        if (secondRaw instanceof PrSnapshot.Failed f) { java.nio.file.Files.writeString(java.nio.file.Path.of("/tmp/straddle-failed.txt"), f.message()); }
+        PrSnapshot.Snapshot second = assertInstanceOf(PrSnapshot.Snapshot.class, secondRaw);
+
+        List<String> authors = second.reviews().stream().map(PrMonitorRead.Review::author).toList();
+        assertTrue(authors.stream().noneMatch(author -> author.startsWith("old-")),
+                "a stale 304 page beside a fresh page 1 leaked old entries: " + authors.size() + " reviews");
+        assertTrue(authors.contains("new-extra"), "the forced page 2 answered fresh: " + authors);
+        assertTrue(Files.readAllLines(receipt).stream()
+                .filter(call -> call.contains("page=2"))
+                .anyMatch(call -> !call.contains("If-None-Match")),
+                "page 2 of the second read was fetched unconditionally");
+    }
+
+    /**
+     * A two-read, two-page reviews endpoint: the first read caches both
+     * pages (old entries); the second read's page 1 shifts to new entries
+     * while its page 2 would answer 304 if asked conditionally -- the stale
+     * page that must not be reused beside a fresh page 1.
+     */
+    private static String straddlingReviewsScript() {
+        return reviewArrayFn()
+                + "R=$(cat RD 2>/dev/null || echo 0); R=$((R+1)); echo $R > RD\n"
+                + "if printf '%s' \"$*\" | grep -q 'If-None-Match'; then"
+                + " case \"$2\" in *reviews*) ;; *) printf 'HTTP/2.0 304 Not Modified\\nEtag: \"x\"\\n\\n'; exit 1;; esac; fi\n"
+                + "case \"$2\" in\n"
+                + "  pulls/42)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"p\"\\n\\n%s' '" + pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"") + "'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/check-runs*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"c\"\\n\\n%s' '{\"total_count\":0,\"check_runs\":[]}'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/status)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"s\"\\n\\n%s' '{\"state\":\"pending\",\"statuses\":[]}'\n"
+                + "    ;;\n"
+                + "  *'reviews?per_page=100&page=1')\n"
+                + "    if [ \"$(cat RD)\" -ge 2 ]; then\n"
+                + "      printf 'HTTP/2.0 200 OK\\nEtag: \"r2p1\"\\n\\n%s' \"$(reviewArray new)\"\n"
+                + "    else\n"
+                + "      printf 'HTTP/2.0 200 OK\\nEtag: \"r1p1\"\\n\\n%s' \"$(reviewArray old)\"\n"
+                + "    fi\n"
+                + "    ;;\n"
+                + "  *'reviews?per_page=100&page=2')\n"
+                + "    if [ \"$(cat RD)\" -ge 2 ]; then\n"
+                + "      printf 'HTTP/2.0 200 OK\\nEtag: \"r2p2\"\\n\\n%s' "
+                + "'[{\"user\":{\"login\":\"new-extra\"},\"state\":\"COMMENTED\",\"submitted_at\":\"t\",\"body\":\"\"}]'\n"
+                + "    else\n"
+                + "      printf 'HTTP/2.0 200 OK\\nEtag: \"r1p2\"\\n\\n%s' "
+                + "'[{\"user\":{\"login\":\"old-extra\"},\"state\":\"COMMENTED\",\"submitted_at\":\"t\",\"body\":\"\"}]'\n"
+                + "    fi\n"
+                + "    ;;\n"
+                + "  *) echo \"unexpected: $*\" >&2; exit 1 ;;\n"
+                + "esac\n";
+    }
+
+    /** A shell function emitting 100 review entries whose authors are {@code <prefix>-0..99}. */
+    private static String reviewArrayFn() {
+        return "reviewArray() { printf '['; i=0; while [ $i -lt 100 ]; do "
+                + "[ $i -gt 0 ] && printf ','; "
+                + "printf '{\"user\":{\"login\":\"%s-%d\"},\"state\":\"COMMENTED\","
+                + "\"submitted_at\":\"t\",\"body\":\"\"}' \"$1\" \"$i\"; i=$((i+1)); done; printf ']'; }\n";
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void stillFullPagesAtTheCapWarnInsteadOfTruncatingSilently(@TempDir Path dir) throws Exception {
+        Path gh = GhCliPullRequestListingTest.scriptedGh(dir, fullPagesScript());
+        List<LogRecord> warnings = new ArrayList<>();
+
+        PrSnapshot read = warningsDuring(warnings, () -> PrMonitorRead.readWith(
+                Optional.of(gh), dir, Optional.empty(), 42, Duration.ofSeconds(15), new HashMap<>()));
+        PrSnapshot.Snapshot snapshot = assertInstanceOf(PrSnapshot.Snapshot.class, read);
+
+        assertEquals(PrMonitorRead.MAX_REVIEWS, snapshot.reviews().size());
+        assertTrue(warnings.stream().anyMatch(record -> record.getMessage().contains("truncated")),
+                warnings::toString);
+    }
+
+    /** Reviews pages that never come back short: five full pages, a sixth is never requested. */
+    private static String fullPagesScript() {
+        return reviewArrayFn()
+                + "if printf '%s' \"$*\" | grep -q 'If-None-Match'; then"
+                + " printf 'HTTP/2.0 304 Not Modified\\nEtag: \"x\"\\n\\n'; exit 1; fi\n"
+                + "case \"$2\" in\n"
+                + "  pulls/42)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"p\"\\n\\n%s' '" + pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"") + "'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/check-runs*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"c\"\\n\\n%s' '{\"total_count\":0,\"check_runs\":[]}'\n"
+                + "    ;;\n"
+                + "  *" + SHA + "/status)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"s\"\\n\\n%s' '{\"state\":\"pending\",\"statuses\":[]}'\n"
+                + "    ;;\n"
+                + "  *reviews*)\n"
+                + "    printf 'HTTP/2.0 200 OK\\nEtag: \"rv\"\\n\\n%s' \"$(reviewArray full)\"\n"
+                + "    ;;\n"
+                + "  *) echo \"unexpected: $*\" >&2; exit 1 ;;\n"
+                + "esac\n";
+    }
+
+    /** Runs {@code body}, collecting the WARNING+ records {@link PrMonitorRead} logs meanwhile. */
+    private static <T> T warningsDuring(List<LogRecord> into, Callable<T> body) throws Exception {
+        Logger logger = Logger.getLogger(PrMonitorRead.class.getName());
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                    synchronized (into) {
+                        into.add(record);
+                    }
+                }
+            }
+
+            @Override
+            public void flush() { }
+
+            @Override
+            public void close() { }
+        };
+        logger.addHandler(handler);
+        logger.setLevel(Level.ALL);
+        try {
+            return body.call();
+        } finally {
+            logger.removeHandler(handler);
+        }
+    }
+
     /**
      * A scripted {@code gh} answering the monitor's four endpoints. With
      * {@code conditionally}, any call carrying {@code If-None-Match} is
@@ -402,8 +652,8 @@ class PrMonitorReadTest {
                 + pull("\"mergeable\":false,\"mergeable_state\":\"dirty\"") + "'\n    ;;\n"
                 + "  *" + SHA + "/check-runs*)\n"
                 + "    printf 'HTTP/2.0 200 OK\\nEtag: \"ec\"\\n\\n%s' "
-                + "'[{\"name\":\"tests\",\"status\":\"completed\",\"conclusion\":\"failure\","
-                + "\"details_url\":\"https://github.com/o/r/actions/runs/44315117281/job/134839058118\"}]'\n"
+                + "'{\"total_count\":1,\"check_runs\":[{\"name\":\"tests\",\"status\":\"completed\",\"conclusion\":\"failure\","
+                + "\"details_url\":\"https://github.com/o/r/actions/runs/44315117281/job/134839058118\"}]}'\n"
                 + "    ;;\n"
                 + "  *" + SHA + "/status)\n"
                 + "    printf 'HTTP/2.0 200 OK\\nEtag: \"es\"\\n\\n%s' "

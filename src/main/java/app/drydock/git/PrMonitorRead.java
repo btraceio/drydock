@@ -10,7 +10,6 @@ import app.drydock.state.json.JsonParser;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonBoolean;
-import app.drydock.state.json.JsonValue.JsonNull;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
@@ -51,7 +50,9 @@ import java.util.regex.Pattern;
  * <li>{@code pulls/{n}} -- lifecycle, draft, base/head refs, head commit,
  * mergeability. The head commit it reports gates the next two: check runs
  * and status contexts belong to it.</li>
- * <li>{@code commits/{sha}/check-runs} (paged) -- the Actions-side rollup.</li>
+ * <li>{@code commits/{sha}/check-runs} (paged; each page answers the
+ * object {@code {"total_count":…,"check_runs":[…]}}) -- the Actions-side
+ * rollup.</li>
  * <li>{@code commits/{sha}/status} -- the legacy status contexts of the
  * same rollup.</li>
  * <li>{@code pulls/{n}/reviews} (paged) -- the actionable reviews.</li>
@@ -108,6 +109,9 @@ public final class PrMonitorRead implements AutoCloseable {
     private static final Pattern STATUS_LINE = Pattern.compile("HTTP/\\S+\\s+(\\d{3})");
 
     private static final Pattern ETAG_HEADER = Pattern.compile("(?i)etag:\\s*(\\S+)");
+
+    /** The check-runs page's array rides this member of its object answer. */
+    private static final String CHECK_RUNS_MEMBER = "check_runs";
 
     /**
      * GitHub's {@code mergeable}, kept three-way: GitHub computes it lazily,
@@ -235,6 +239,9 @@ public final class PrMonitorRead implements AutoCloseable {
         }
     }
 
+    /** One conditional endpoint answer: the body, and whether it was freshly fetched (a 200), not a 304. */
+    record FetchedAnswer(String body, boolean fresh) { }
+
     /** A read gave up: any endpoint that neither answered nor reaffirmed its cache fails the whole read. */
     static final class Unusable extends RuntimeException {
         Unusable(String message) {
@@ -316,13 +323,19 @@ public final class PrMonitorRead implements AutoCloseable {
         RepoSpec repo = RepoSpec.of(repository);
         try {
             Core core = parsePullCore(conditionalGet(gh, root,
-                    repo.resolve("pulls/" + prNumber), timeout, repo.host(), etags));
-            List<Check> checks = new ArrayList<>(parseCheckRuns(paged(gh, root, repo,
-                    repo.resolve("commits/" + core.headRefOid() + "/check-runs"), timeout, etags)));
+                    repo.resolve("pulls/" + prNumber), timeout, repo.host(), false, etags).body());
+            // A push moves the head commit; the commit-scoped endpoints' URLs
+            // change with it and their old cache entries become unreachable
+            // dead weight -- drop them here, while the map is small.
+            pruneCommitScopes(etags, root, core.headRefOid());
+            List<Check> checks = new ArrayList<>(parseCheckRunEntries(pagedEntries(gh, root, repo,
+                    repo.resolve("commits/" + core.headRefOid() + "/check-runs"),
+                    timeout, Optional.of(CHECK_RUNS_MEMBER), etags)));
             checks.addAll(parseLegacyStatuses(conditionalGet(gh, root,
-                    repo.resolve("commits/" + core.headRefOid() + "/status"), timeout, repo.host(), etags)));
-            List<Review> reviews = parseReviews(paged(gh, root, repo,
-                    repo.resolve("pulls/" + prNumber + "/reviews"), timeout, etags));
+                    repo.resolve("commits/" + core.headRefOid() + "/status"), timeout, repo.host(), false,
+                    etags).body()));
+            List<Review> reviews = parseReviewEntries(pagedEntries(gh, root, repo,
+                    repo.resolve("pulls/" + prNumber + "/reviews"), timeout, Optional.empty(), etags));
             return new PrSnapshot.Snapshot(prNumber, core.lifecycle(), core.draft(), core.baseRefName(),
                     core.headRefName(), core.headRefOid(), core.mergeable(), core.mergeStateStatus(),
                     checks, reviews);
@@ -332,49 +345,105 @@ public final class PrMonitorRead implements AutoCloseable {
     }
 
     /**
-     * One paged endpoint, conditionally: pages are read in order until one
-     * comes back short, each page's ETag its own. A 304 page serves its
-     * cached body, so a poll of an unchanged long list reads all its pages
-     * at no quota cost.
+     * Drops this root's commit-scoped cache entries that no longer name the
+     * current head commit. Every push moves the sha, the old pages' URLs die
+     * with it, and a monitor watching engagements around the clock would
+     * otherwise accumulate one dead multi-page body per push, forever: the
+     * two commit-scoped endpoints are also the read's largest responses.
      */
-    private static String paged(Path gh, Path root, RepoSpec repo, String path, Duration timeout,
-                                Map<String, CachedResponse> etags) {
-        StringBuilder collected = new StringBuilder("[");
+    private static void pruneCommitScopes(Map<String, CachedResponse> etags, Path root, String headSha) {
+        String rootPrefix = root + "\n";
+        etags.keySet().removeIf(key -> {
+            if (!key.startsWith(rootPrefix)) {
+                return false;
+            }
+            // Key shape: root, host (possibly empty), path -- each on its own line.
+            String rest = key.substring(rootPrefix.length());
+            int hostEnd = rest.indexOf('\n');
+            String path = hostEnd < 0 ? "" : rest.substring(hostEnd + 1);
+            boolean commitScoped = path.startsWith("commits/") || path.contains("/commits/");
+            return commitScoped && !path.contains(headSha);
+        });
+    }
+
+    /**
+     * One paged endpoint's entries, read page by page. Pages are read in
+     * order until one comes back short; each page's ETag is its own, and a
+     * 304 page serves its cached body, so a poll of an unchanged long list
+     * reads all its pages at no quota cost.
+     *
+     * <p>When the first page comes back as a fresh 200, the list has moved
+     * under the cache, and the later pages of this read are fetched
+     * unconditionally: a stale 304 page beside a fresh page 1 duplicates
+     * every entry that moved between the two pages' windows and drops those
+     * that left, and the monitor diffs exactly these lists. The forced
+     * pages still store their fresh ETags, so the next unchanged poll is
+     * conditional again.</p>
+     *
+     * <p>{@code member} selects the array inside an object answer (the
+     * check-runs endpoint answers {@code {"total_count":…,"check_runs":[…]}});
+     * an empty member reads a top-level array (the reviews endpoint). A page
+     * without the expected shape fails the read -- a garbled page must not
+     * read as an empty list. Still-full pages after {@link #MAX_PAGES} end
+     * the read with a WARNING: a silently truncated check list could hide a
+     * failing check from the monitor.</p>
+     */
+    private static List<JsonValue> pagedEntries(Path gh, Path root, RepoSpec repo, String path, Duration timeout,
+                                                Optional<String> member, Map<String, CachedResponse> etags) {
+        List<JsonValue> entries = new ArrayList<>();
+        boolean firstPageFresh = false;
         for (int page = 1; page <= MAX_PAGES; page++) {
-            String body = conditionalGet(gh, root, path + "?per_page=" + PER_PAGE + "&page=" + page,
-                    timeout, repo.host(), etags);
-            String inner = body.strip();
+            FetchedAnswer answer = conditionalGet(gh, root, path + "?per_page=" + PER_PAGE + "&page=" + page,
+                    timeout, repo.host(), page > 1 && firstPageFresh, etags);
             JsonValue parsed;
             try {
-                parsed = JsonParser.parse(inner);
+                parsed = JsonParser.parse(answer.body().strip());
             } catch (JsonParseException | NumberFormatException e) {
                 throw new Unusable("gh api " + path + " returned a page that could not be parsed: " + e.getMessage());
             }
-            if (!(parsed instanceof JsonArray array) || inner.length() < 2) {
-                throw new Unusable("gh api " + path + " returned a page that was not a JSON array");
+            JsonValue selected = parsed instanceof JsonObject obj && member.isPresent()
+                    ? obj.get(member.get())
+                    : parsed;
+            if (!(selected instanceof JsonArray array)) {
+                throw new Unusable("gh api " + path + " returned a page whose "
+                        + (member.isEmpty() ? "body" : member.get() + " member")
+                        + " was not a JSON array");
             }
-            if (page > 1) {
-                collected.append(',');
+            if (page == 1) {
+                firstPageFresh = answer.fresh();
             }
-            collected.append(inner, 1, inner.length() - 1);
+            entries.addAll(array.elements());
             if (array.elements().size() < PER_PAGE) {
-                break;
+                return entries;
             }
         }
-        return collected.append(']').toString();
+        LOG.log(Level.WARNING, "gh api " + path + " still returned full pages after " + MAX_PAGES
+                + " pages; the read is truncated at " + (MAX_PAGES * PER_PAGE) + " entries");
+        return entries;
     }
 
     /**
      * One conditional GET through {@code gh api --include}: a 200 returns
      * the fresh body (its ETag stored), a 304 the cached body the ETag
-     * affirms, anything else a {@link Unusable}. gh exits non-zero on a 304
+     * affirms, anything else an {@link Unusable}. gh exits non-zero on a 304
      * (it is not a 2xx) with the headers on stdout and no body -- the status
      * line, not the exit code, says which answer came back.
+     *
+     * <p>{@code forceFresh} sends no {@code If-None-Match}, so the server
+     * must answer the body in full; the answer's ETag is still stored, so
+     * the next unchanged poll is conditional again. A 200 whose answer
+     * carries no ETag still answers the read -- a proxy or an enterprise
+     * host that strips the header must not turn every poll into a failure --
+     * it just caches nothing, and every poll of that endpoint reads it in
+     * full.</p>
      */
-    private static String conditionalGet(Path gh, Path root, String path, Duration timeout,
-                                         Optional<String> host, Map<String, CachedResponse> etags) {
-        String key = root + "\n" + path;
-        CachedResponse cached = etags.get(key);
+    private static FetchedAnswer conditionalGet(Path gh, Path root, String path, Duration timeout,
+                                                Optional<String> host, boolean forceFresh,
+                                                Map<String, CachedResponse> etags) {
+        // The hostname rides the cache key: two hosts serving the same
+        // owner/repo path must never reuse each other's validators.
+        String key = root + "\n" + host.orElse("") + "\n" + path;
+        CachedResponse cached = forceFresh ? null : etags.get(key);
         List<String> command = new ArrayList<>(List.of(gh.toString(), "api", path, "--include"));
         host.ifPresent(value -> {
             command.add("--hostname");
@@ -405,16 +474,12 @@ public final class PrMonitorRead implements AutoCloseable {
             if (cached == null) {
                 throw new Unusable("gh api " + path + " answered 304 without a request ETag");
             }
-            return cached.body();
+            return new FetchedAnswer(cached.body(), false);
         }
         if (code == 200) {
             String body = bodyAfterHeaders(stdout);
-            String etag = etagOf(stdout).orElse("");
-            if (etag.isEmpty()) {
-                throw new Unusable("gh api " + path + " answered 200 without an ETag header");
-            }
-            etags.put(key, new CachedResponse(etag, body));
-            return body;
+            etagOf(stdout).ifPresent(etag -> etags.put(key, new CachedResponse(etag, body)));
+            return new FetchedAnswer(body, true);
         }
         String excerpt = ProcessRunner.excerpt(result.stderr());
         throw new Unusable(excerpt.isBlank()
@@ -492,16 +557,18 @@ public final class PrMonitorRead implements AutoCloseable {
     }
 
     /**
-     * The pure half of a {@code check-runs} page list: check runs to rollup
+     * The pure half of a {@code check-runs} answer: check runs to rollup
      * entries. REST carries no workflow name; entries that are not objects
-     * are skipped.
+     * are skipped; a malformed body is no checks.
      */
     static List<Check> parseCheckRuns(String body) {
-        if (!(parseArray(body) instanceof JsonArray array)) {
-            return List.of();
-        }
+        return parseCheckRunEntries(arrayEntries(body, Optional.of(CHECK_RUNS_MEMBER)));
+    }
+
+    /** The entries half of {@link #parseCheckRuns}: the paged read feeds these directly. */
+    static List<Check> parseCheckRunEntries(List<JsonValue> entries) {
         List<Check> checks = new ArrayList<>();
-        for (JsonValue entry : array.elements()) {
+        for (JsonValue entry : entries) {
             if (!(entry instanceof JsonObject run)) {
                 continue;
             }
@@ -519,11 +586,13 @@ public final class PrMonitorRead implements AutoCloseable {
      * as a context, with an empty state; a malformed body is no statuses.
      */
     static List<Check> parseLegacyStatuses(String body) {
-        if (!(parseArray(body, "statuses") instanceof JsonArray array)) {
-            return List.of();
-        }
+        return parseStatusEntries(arrayEntries(body, Optional.of("statuses")));
+    }
+
+    /** The entries half of {@link #parseLegacyStatuses}. */
+    private static List<Check> parseStatusEntries(List<JsonValue> entries) {
         List<Check> checks = new ArrayList<>();
-        for (JsonValue entry : array.elements()) {
+        for (JsonValue entry : entries) {
             if (!(entry instanceof JsonObject status)) {
                 continue;
             }
@@ -543,11 +612,19 @@ public final class PrMonitorRead implements AutoCloseable {
      * are skipped.
      */
     static List<Review> parseReviews(String body) {
-        if (!(parseArray(body) instanceof JsonArray array)) {
-            return List.of();
-        }
+        return parseReviewEntries(arrayEntries(body, Optional.empty()));
+    }
+
+    /**
+     * The entries half of {@link #parseReviews}, oldest order kept, capped
+     * at {@link #MAX_REVIEWS} LATEST ones: a monitor diffs review sets, so
+     * the ones it may drop are the oldest. Entries that are not objects, or
+     * whose state is not actionable (anything but {@code APPROVED},
+     * {@code CHANGES_REQUESTED} and {@code COMMENTED}), are skipped.
+     */
+    static List<Review> parseReviewEntries(List<JsonValue> entries) {
         List<Review> reviews = new ArrayList<>();
-        for (JsonValue entry : array.elements()) {
+        for (JsonValue entry : entries) {
             if (!(entry instanceof JsonObject review)) {
                 continue;
             }
@@ -563,22 +640,22 @@ public final class PrMonitorRead implements AutoCloseable {
     }
 
     /**
-     * A paged endpoint's collected pages: {@code gh api} page bodies are
-     * top-level JSON arrays, and the pages were concatenated between
-     * brackets as they were read.
+     * A page body's entries, leniently: an unparseable body, or one whose
+     * expected array (top-level, or inside {@code member}) is missing, is no
+     * entries. The paged read enforces the shape itself, with a failure;
+     * this lenient half serves the pure parse functions.
      */
-    private static JsonValue parseArray(String body) {
+    private static List<JsonValue> arrayEntries(String body, Optional<String> member) {
+        JsonValue parsed;
         try {
-            return JsonParser.parse(body);
+            parsed = JsonParser.parse(body.strip());
         } catch (JsonParseException | NumberFormatException e) {
-            return JsonNull.INSTANCE;
+            return List.of();
         }
-    }
-
-    /** The same, for an answer whose array rides a member ({@code statuses}). */
-    private static JsonValue parseArray(String body, String member) {
-        JsonValue parsed = parseArray(body);
-        return parsed instanceof JsonObject obj ? obj.get(member) : parsed;
+        JsonValue selected = parsed instanceof JsonObject obj && member.isPresent()
+                ? obj.get(member.get())
+                : parsed;
+        return selected instanceof JsonArray array ? array.elements() : List.of();
     }
 
     /** The positive run id in an Actions URL ({@code .../actions/runs/<id>/job/<id>}). */
