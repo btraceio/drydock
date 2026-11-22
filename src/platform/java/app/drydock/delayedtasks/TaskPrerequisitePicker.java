@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -196,7 +197,7 @@ public final class TaskPrerequisitePicker {
          */
         public List<String> refusals(List<String> after) {
             List<String> refs = after == null ? List.of() : List.copyOf(after);
-            if (refs.isEmpty() && edited == null) {
+            if (refs.isEmpty()) {
                 return List.of();
             }
             TaskDocument pending;
@@ -214,12 +215,13 @@ public final class TaskPrerequisitePicker {
             }
             TaskSnapshot extended = extend(snapshot, pending, edited != null);
             TaskGraph graph = TaskGraph.of(extended, slugs::get);
+            Optional<TaskGraph.TaskDiagnostics> diagnostics = graph.diagnosticsOf(pending.id());
             List<String> refusals = new ArrayList<>();
-            graph.diagnosticsOf(pending.id()).map(diagnostics -> diagnostics.broken().stream()
+            diagnostics.map(value -> value.broken().stream()
                     .map(broken -> "'" + broken.reference() + "': " + broken.reason()))
                     .orElse(Stream.empty()).forEach(refusals::add);
             if (edited != null) {
-                graph.diagnosticsOf(pending.id()).map(diagnostics -> diagnostics.cycles().stream()
+                diagnostics.map(value -> value.cycles().stream()
                         .map(cycle -> "this edit closes a prerequisite cycle: " + graph.titledPath(cycle)))
                         .orElse(Stream.empty()).forEach(refusals::add);
             }

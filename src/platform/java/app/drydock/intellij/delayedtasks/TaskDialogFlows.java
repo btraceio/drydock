@@ -53,15 +53,14 @@ import java.util.concurrent.TimeoutException;
  * zero-write); failures surface in a dialog and the background task ends on
  * every path, so no progress is stranded.
  *
- * <p>The attachment list the creation form offers is the dual registry the
- * task layer already names projects by
- * ({@link SharedProjectResolver#displayNames}): the shared list first, then
- * the install-catalog entries it does not know by root. An IDE project the
- * shared list does not carry yet rides along as an unregistered default
- * ({@code ProjectChoice} without an id, sorted in by name); its save
- * registers it, exactly as the create flow always has. The edit form offers
+ * <p>The registry-backed attachment choices are the dual registry the task
+ * layer already names projects by ({@link SharedProjectResolver#displayNames}):
+ * the shared list first, then install-catalog entries it does not know by root,
+ * sorted by display name. When the IDE project has no registry choice, {@code open()}
+ * supplies a separate id-less creation default as the prefill; the dialog adds
+ * that selection to its model, and saving registers it. The edit form offers
  * registered projects only: an edit moves a task that already HAS an id, so
- * every choice carries one.</p>
+ * every offered choice carries one.</p>
  */
 public final class TaskDialogFlows {
 
@@ -104,9 +103,7 @@ public final class TaskDialogFlows {
                     if (root == null || (editing != null && document == null)) {
                         return; // no document to edit: a vanished task opens no form
                     }
-                    List<ProjectChoice> choices = document != null
-                            ? projectChoices(plugin, false)
-                            : projectChoices(plugin, true);
+                    List<ProjectChoice> choices = projectChoices(plugin);
                     ProjectChoice attached = document != null
                             ? attachmentOf(document, choices, root)
                             : choices.stream().filter(choice -> choice.root().equals(root))
@@ -122,7 +119,7 @@ public final class TaskDialogFlows {
                     LOG.warn(editing == null ? "Could not open the New Task form"
                             : "Could not open the Edit Task form", e);
                     ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(from,
-                            "Drydock could not open the task form: " + e.getMessage(), "Drydock"),
+                            "Drydock could not open the task form: " + WorktreeErrors.visibleMessage(e), "Drydock"),
                             ModalityState.nonModal(), from.getDisposed());
                 }
             }
@@ -199,14 +196,12 @@ public final class TaskDialogFlows {
     }
 
     /**
-     * The attachment choices the picker offers: the shared list's projects, then the
-     * install-catalog entries the shared list does not know by root, one entry per id,
-     * sorted by display name. With {@code withUnregisteredDefault} (creation) an IDE
-     * project no registry knows yet rides along as an id-less choice -- the save
-     * registers it. Memory-only reads over the two registries, safe off the EDT.
+     * Registry-backed attachment choices: shared projects and install-catalog entries not
+     * known by root, one entry per id, sorted by display name. {@link #open} supplies the
+     * creation form's id-less default separately when the IDE root is absent. Memory-only
+     * reads over the two registries, safe off the EDT.
      */
-    static List<ProjectChoice> projectChoices(DrydockPluginService plugin,
-            boolean withUnregisteredDefault) {
+    static List<ProjectChoice> projectChoices(DrydockPluginService plugin) {
         Map<RepositoryId, ProjectChoice> choices = new LinkedHashMap<>();
         for (SharedProject shared : plugin.sharedProjects().projects()) {
             choices.put(shared.id(), ProjectChoice.of(shared.id(), shared.root(),

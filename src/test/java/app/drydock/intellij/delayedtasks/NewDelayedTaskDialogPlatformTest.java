@@ -245,16 +245,28 @@ public class NewDelayedTaskDialogPlatformTest extends BasePlatformTestCase {
     }
 
     public void testAnEmptyPickerBlocksOkWithAVisibleReason() {
-        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(index, List.of(),
-                Prefill.none(alphaChoice));
-        dialogs.add(dialog);
-        titleField(dialog).setText("No project offered");
-        List<ValidationInfo> refused = dialog.performValidateAll();
+        // The picker refusal fires only when nothing can be selected at all: with a
+        // prefill project the dialog now INSERTS that choice into the model
+        // (selectPrefill), so even an empty offered list stays usable.
+        NewDelayedTaskDialog noProject = new NewDelayedTaskDialog(index, List.of(),
+                Prefill.none(null));
+        dialogs.add(noProject);
+        titleField(noProject).setText("No project offered");
+        List<ValidationInfo> refused = noProject.performValidateAll();
         assertTrue("exactly the picker refusal, on the refusing control", refused.size() == 1
                 && "Pick the project the task belongs to.".equals(refused.get(0).message)
-                && refused.get(0).component == comboBox(dialog));
-        control(dialog, "Create task").doClick();
-        Assert.assertThrows(IllegalStateException.class, dialog::result);
+                && refused.get(0).component == comboBox(noProject));
+        control(noProject, "Create task").doClick();
+        Assert.assertThrows(IllegalStateException.class, noProject::result);
+        // A prefill missing from the offered list is inserted and selected, never dropped.
+        NewDelayedTaskDialog stranger = new NewDelayedTaskDialog(index, List.of(betaChoice),
+                Prefill.none(alphaChoice));
+        dialogs.add(stranger);
+        titleField(stranger).setText("Stranger prefill");
+        assertTrue("the missing prefill was inserted into the model",
+                comboBox(stranger).getItemCount() == 2
+                        && alphaChoice.equals(comboBox(stranger).getSelectedItem()));
+        assertTrue(stranger.performValidateAll().isEmpty());
     }
 
     // 7. The edit form: every field prefilled from the stored document, the edited task

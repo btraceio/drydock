@@ -1388,6 +1388,44 @@ class DelayedTaskServiceTest {
         }
     }
 
+    /** An edit that does NOT move the task must tolerate an inbound qualified reference
+      * from another task: the stranded-reference refusal exists for the move only, and
+      * running it unconditionally would refuse every ordinary edit of a referenced task. */
+    @Test
+    void editWithoutMovingToleratesInboundQualifiedReferences(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of,
+                List::of, () -> List.of(
+                        SharedProject.local(alpha, root.resolve("alpha"), "Alpha", Instant.EPOCH)))) {
+            await(service.initialize());
+            TaskId blocker = await(service.create("Clear the blocker", List.of(), alpha)).document().id();
+            await(service.create("Dependent work", List.of("alpha:" + blocker.text()), alpha));
+            TaskToolContext.Outcome edited = await(service.edit(new DelayedTaskService.TaskEdit(
+                    blocker, "Clear the blocker, renamed", DoneBy.HUMAN, List.of(), List.of(), alpha)));
+            assertFalse(edited.refused(), edited.refusal());
+            assertEquals("Clear the blocker, renamed", edited.document().title());
+        }
+    }
+
+    /** Blank lines in the edit body are skipped, never appended as notes: the store
+      * refuses blank notes, so an unchecked blank line would fail the whole edit. */
+    @Test
+    void editSkipsBlankBodyLines(@TempDir Path root) throws Exception {
+        RepositoryId alpha = RepositoryId.newId();
+        try (DelayedTaskService service = new DelayedTaskService(root, executor, List::of, List::of)) {
+            await(service.initialize());
+            TaskId task = await(service.create("Fix the login redirect", List.of(), alpha)).document().id();
+            TaskToolContext.Outcome edited = await(service.edit(new DelayedTaskService.TaskEdit(
+                    task, "Fix the login redirect", DoneBy.HUMAN, List.of(),
+                    List.of("real note", "   ", "another note"), alpha)));
+            assertFalse(edited.refused(), edited.refusal());
+            String body = Files.readString(committedFile(root, alpha, task));
+            assertTrue(body.contains("real note") && body.contains("another note"));
+            assertFalse(body.matches("(?s).*## Session notes\\s*\\n\\s*\\n.*"),
+                    "no blank paragraph was appended: " + body);
+        }
+    }
+
     private static <T> T await(CompletableFuture<T> future) throws Exception {
         return future.get(LIMIT.toMillis(), TimeUnit.MILLISECONDS);
     }

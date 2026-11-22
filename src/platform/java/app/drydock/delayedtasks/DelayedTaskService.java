@@ -1376,8 +1376,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             graph.diagnosticsOf(document.id()).orElseThrow().resolved().stream()
                     .filter(resolved -> resolved.reference().contains(":")
                             && resolved.target().id().equals(task))
-                    .findFirst()
-                    .ifPresent(stranded::add);
+                    .forEach(stranded::add);
         }
         return List.copyOf(stranded);
     }

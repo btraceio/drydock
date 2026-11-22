@@ -196,12 +196,34 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
             project.addItem(choice);
         }
         if (prefill.project() != null) {
-            project.setSelectedItem(prefill.project());
+            selectPrefill(prefill.project());
         }
         titleReason.setForeground(UIUtil.getErrorForeground());
         titleReason.setVisible(Result.titleRefusal(title.getText()).isPresent());
         policy.setForeground(UIUtil.getContextHelpForeground());
         refreshPolicy();
+    }
+
+    /** Selects the prefill from the live model, inserting a missing choice in display order. */
+    private void selectPrefill(ProjectChoice prefill) {
+        for (int i = 0; i < project.getItemCount(); i++) {
+            ProjectChoice offered = project.getItemAt(i);
+            boolean matches = prefill.id().isPresent()
+                    ? offered.id().equals(prefill.id())
+                    : offered.equals(prefill);
+            if (matches) {
+                project.setSelectedIndex(i);
+                return;
+            }
+        }
+        String name = prefill.name().toLowerCase();
+        int insertAt = 0;
+        while (insertAt < project.getItemCount()
+                && project.getItemAt(insertAt).name().toLowerCase().compareTo(name) <= 0) {
+            insertAt++;
+        }
+        project.insertItemAt(prefill, insertAt);
+        project.setSelectedIndex(insertAt);
     }
 
     @Override
