@@ -642,7 +642,12 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         if (trimmed.length() <= DESCRIPTION_HOVER_LIMIT) {
             return "\n\n" + trimmed;
         }
-        String cut = trimmed.substring(0, DESCRIPTION_HOVER_LIMIT);
+        int cutEnd = DESCRIPTION_HOVER_LIMIT;
+        if (Character.isHighSurrogate(trimmed.charAt(cutEnd - 1))
+                && Character.isLowSurrogate(trimmed.charAt(cutEnd))) {
+            cutEnd--;
+        }
+        String cut = trimmed.substring(0, cutEnd);
         int lastLine = cut.lastIndexOf('\n');
         if (lastLine > 0) {
             cut = cut.substring(0, lastLine);

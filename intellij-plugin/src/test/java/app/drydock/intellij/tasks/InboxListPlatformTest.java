@@ -218,7 +218,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         TaskItem item = (TaskItem) ((Row) list.entries().get(index)).item();
         assertEquals("alpha", item.row().project());
         assertEquals(List.of("Ready one", "#943", "alpha"), renderedLabels(index));
-        String tooltip = "Task ready-one (ready) · project alpha · Pull request #943 from dd/ready-one: PR";
+        String tooltip = "<html>Task ready-one (ready) · project alpha · Pull request #943 from dd/ready-one: PR</html>";
         assertEquals(tooltip, InboxList.tooltip(item, NOW));
 
         list.show(inbox(new Query(Optional.of(ALPHA), "")), true);
@@ -240,7 +240,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         list.show(new Inbox(List.of(new Group(GroupKind.READY, "Ready to start", List.of(item))), List.of(), 0),
                 false);
         assertEquals(List.of("Unknown project"), renderedLabels(indexOf("Unknown project")));
-        assertEquals("Task unknown-project (ready)", InboxList.tooltip(item, NOW));
+        assertEquals("<html>Task unknown-project (ready)</html>", InboxList.tooltip(item, NOW));
     }
 
     public void testATaskRowsHoverCarriesItsFullDescriptionAfterTheSummary() throws Exception {
@@ -251,9 +251,9 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 "\nFix the parser.\n\n## Session notes\nThe first pass cached too eagerly.");
         TaskItem item = new TaskItem(described, Optional.empty());
         String tooltip = InboxList.tooltip(item, NOW);
-        assertTrue("tooltip: " + tooltip, tooltip.startsWith("Task described-one (ready)"));
-        assertTrue("tooltip: " + tooltip,
-                tooltip.endsWith("\n\nFix the parser.\n\n## Session notes\nThe first pass cached too eagerly."));
+        assertTrue("tooltip: " + tooltip, tooltip.startsWith("<html>Task described-one (ready)"));
+        assertTrue("tooltip: " + tooltip, tooltip.endsWith(
+                "<br><br>Fix the parser.<br><br>## Session notes<br>The first pass cached too eagerly.</html>"));
     }
 
     public void testARunningSessionInAnotherWindowWearsTheWindowChip() throws Exception {
@@ -461,7 +461,12 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                     String baseDetail = item instanceof SessionItem
                             ? InboxList.tooltip(new SessionItem(plain, Optional.empty(), List.of()), NOW)
                             : "Task ready-one (ready)";
-                    assertTrue(combo + " keeps the base details: " + tooltip, tooltip.startsWith(baseDetail));
+                    // The HTML wrapper sits at the ends; the base details compose inside it.
+                    String baseInner = baseDetail.startsWith("<html>") && baseDetail.endsWith("</html>")
+                            ? baseDetail.substring("<html>".length(), baseDetail.length() - "</html>".length())
+                            : baseDetail;
+                    assertTrue(combo + " keeps the base details: " + tooltip,
+                            tooltip.startsWith("<html>" + baseInner) && tooltip.endsWith("</html>"));
 
                     int index = indexOf(title);
                     assertEquals(combo + " " + title, List.of(Hit.ELSEWHERE, Hit.PULL_REQUEST, Hit.ELSEWHERE,
@@ -535,9 +540,10 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertEquals(InboxList.BABYSIT_TEXT, InboxList.headerColor(GroupKind.BABYSITTING));
 
         String tooltip = InboxList.tooltip(itemOf("Watched"), NOW);
-        assertTrue(tooltip, tooltip.endsWith(" · PR #12 is babysat (escalated) · escalated: Needs a design call"));
+        assertTrue(tooltip, tooltip
+                .endsWith(" · PR #12 is babysat (escalated) · escalated: Needs a design call</html>"));
         assertTrue(InboxList.tooltip(itemOf("babysit PR #12"), NOW)
-                .endsWith(" · Babysitter of PR #12 (escalated) · escalated: Needs a design call"));
+                .endsWith(" · Babysitter of PR #12 (escalated) · escalated: Needs a design call</html>"));
     }
 
     /** A row icon's parts, one nesting level deep: a nested row icon becomes its own part list. */

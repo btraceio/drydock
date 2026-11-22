@@ -401,7 +401,21 @@ final class InboxList extends JBList<InboxList.Entry> {
                 text.append(TaskTreeRenderer.descriptionHover(row.body()));
             }
         }
-        return text.toString();
+        return htmlTooltip(text.toString());
+    }
+
+    /**
+     * Converts tooltip text into Swing's HTML tooltip format, escaping content
+     * before adding markup so user-authored task descriptions remain literal.
+     */
+    static String htmlTooltip(String text) {
+        String escaped = text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+        String lines = escaped.replace("\r\n", "\n").replace('\r', '\n').replace("\n", "<br>");
+        return "<html>" + lines + "</html>";
     }
 
     /**
