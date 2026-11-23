@@ -124,12 +124,6 @@ final class SessionPane {
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         this.host = Objects.requireNonNull(host, "host");
         this.strip = new AgentConsoleStrip(action -> host.onStripAction(this, action));
-        this.strip.setOnRenamed((name, pin) -> {
-            ManagedAgentSession current = AgentConsoleTabPresentation.sessionById(sessionId);
-            if (current != null && !disposed) {
-                SessionRename.apply(project, current, name, pin);
-            }
-        });
         root.add(strip, BorderLayout.NORTH);
         root.add(body, BorderLayout.CENTER);
         show(SessionPaneFacts.loading(), false);
@@ -358,7 +352,6 @@ final class SessionPane {
                             AgentExecutionService.getInstance(project).isRunning(sessionId)),
                     resumable, this::refreshLater);
             case TRANSFER -> SessionTransfer.show(project, current, this::refreshLater);
-            case RENAME -> SessionRename.show(project, current);
             case DONE -> SessionCommandHandlers.done(project, current);
             case SHOW_CHANGES -> SessionCommandHandlers.showChanges(project, current, facts.hostedFrom().isPresent());
             case OPEN_PROJECT_WINDOW -> SessionCommandHandlers.openOwnProject(project, current);
