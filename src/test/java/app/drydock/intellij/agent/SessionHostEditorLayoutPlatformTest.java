@@ -13,6 +13,7 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import com.intellij.terminal.JBTerminalWidget;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -86,6 +87,36 @@ public class SessionHostEditorLayoutPlatformTest extends BasePlatformTestCase {
         assertTrue(editor.primarySlot().isAncestorOf(editor.allSessionsSlot()));
         assertFalse(editor.getComponent().isAncestorOf(editor.heldSlot()));
         assertEquals(0, editor.allSessionsSlot().getComponentCount());
+    }
+
+    /**
+     * A Done flow that empties the shown slot with no session left names the
+     * fact in the placeholder; with a session remaining, the advance replaces
+     * the pane and the placeholder keeps its plain text.
+     */
+    public void testDoneAdvanceAndNoActiveSessionsPlaceholder() {
+        List<ManagedSessionId> remaining = new ArrayList<>(List.of(a));
+        SessionHostController controlled = new SessionHostController(getProject(), new SessionHostState(),
+                id -> { }, listener -> null, () -> List.copyOf(remaining));
+        Disposer.register(getTestRootDisposable(), controlled);
+        controlled.show(a);
+        SessionHostEditor editor = new SessionHostEditor(getProject(), controlled);
+        Disposer.register(getTestRootDisposable(), editor);
+        assertEquals("No session shown", editor.emptyStateLabel().getText());
+
+        remaining.clear();
+        controlled.sessionDone(a);
+
+        assertTrue("the emptied slot shows the placeholder",
+                editor.primarySlot().isAncestorOf(editor.emptyStateLabel()));
+        assertEquals("No active sessions", editor.emptyStateLabel().getText());
+
+        remaining.add(a);
+        controlled.revalidate(a);
+        controlled.show(a);
+        editor.refreshLayout();
+        assertEquals("a shown session restores the plain text", "No session shown",
+                editor.emptyStateLabel().getText());
     }
 
     public void testTwoSlotLayoutHostsPaneRootsAndMarksTheFocusedSlot() {

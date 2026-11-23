@@ -271,17 +271,20 @@ public final class SessionDone {
     /**
      * The forgotten session no longer has a useful editor, wherever it was
      * hosted. Each open window's host controller empties that session's pane
-     * (the shared host document stays open: a window hosts more than this
-     * task). The per-UUID legacy file is still closed as documented permanent
-     * legacy cleanup: legacy files stay resolvable and restorable, and inert
-     * placeholders may exist until migration closes them. EDT only. Also the
-     * bulk cleanup's tab close, once for every session it forgot.
+     * and, when the forgotten session was shown in a slot, picks up the next
+     * remaining catalog session (or, with none left, lets the emptied slot's
+     * placeholder say there are no active sessions). The shared host document
+     * stays open: a window hosts more than this task. The per-UUID legacy
+     * file is still closed as documented permanent legacy cleanup: legacy
+     * files stay resolvable and restorable, and inert placeholders may exist
+     * until migration closes them. EDT only. Also the bulk cleanup's tab
+     * close, once for every session it forgot.
      */
     static void closeConsoleTabs(ManagedAgentSession session) {
         AgentConsoleFile file = AgentConsoleFileSystem.getInstance().fileFor(session.id());
         for (Project open : ProjectManager.getInstance().getOpenProjects()) {
             if (!open.isDisposed()) {
-                SessionHostController.getInstance(open).invalidate(session.id());
+                SessionHostController.getInstance(open).sessionDone(session.id());
                 FileEditorManager.getInstance(open).closeFile(file);
             }
         }
