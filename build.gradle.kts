@@ -21,7 +21,13 @@ plugins {
 }
 
 group = "io.btrace"
-version = "0.1.0"
+// Release builds override via -Pversion (CI derives it from the pushed v* tag
+// so the artifact never has to be rebuilt to change its version); the
+// fallback keeps day-to-day local builds at a stable version.
+// gradleProperty (NOT findProperty): findProperty("version") also resolves
+// the project's intrinsic version property, which is still "unspecified" at
+// this line -- it turned every descriptor's <version> into nothing.
+version = providers.gradleProperty("version").getOrElse("0.1.0")
 
 java {
     toolchain {
@@ -185,6 +191,18 @@ dependencies {
 }
 
 intellijPlatform {
+    // Self-signed distribution signing (docs/PluginDistribution.md): the IDE
+    // verifies plugins from custom repositories against certificates the
+    // user trusts, not against JetBrains CA, so we sign with our own
+    // self-signed chain. The convention-named environment variables are what
+    // the plugin reads by default; an empty value (GitHub Actions materializes
+    // a missing secret as "") must mean "no credentials", not a signing
+    // failure, hence the blank filter.
+    signing {
+        certificateChain.set(providers.environmentVariable("CERTIFICATE_CHAIN").filter { it.isNotBlank() })
+        privateKey.set(providers.environmentVariable("PRIVATE_KEY").filter { it.isNotBlank() })
+        password.set(providers.environmentVariable("PRIVATE_KEY_PASSWORD").filter { it.isNotBlank() })
+    }
     pluginVerification {
         ides {
             recommended()
@@ -213,6 +231,71 @@ tasks {
             listOf("-Ddrydock.projectsFile=" + sandboxProjects.get().asFile.absolutePath,
                     "-Ddrydock.tasksDirectory=" + sandboxTasks.get().asFile.absolutePath)
         })
+    }
+}
+
+// The custom distribution channel (docs/PluginDistribution.md): the zip lives
+// as a GitHub Release asset, a gh-pages-hosted updatePlugins.xml points at it,
+// and the IDE polls that file to offer (and apply) updates. The entry is
+// generated from the PATCHED plugin.xml, not from build.gradle.kts: the
+// version and since-build the installed IDE compares against are whatever
+// patchPluginXml wrote into the descriptor that goes into the zip, and the
+// update site can only stay consistent with the artifact it points at if it
+// reads exactly that descriptor.
+val updatePluginsXml = tasks.register("updatePluginsXml") {
+    group = "intellij"
+    description = "Generates updatePlugins.xml for the GitHub-hosted plugin repository"
+    // patchPluginXml's own staging output (build/tmp/<task>/): the same file
+    // the task funnels into the sandbox/resources outputs. Reading the
+    // resources copy instead made this task race processResources and fail
+    // validation whenever it ran without the rest of the build chain.
+    val patchedPluginXml = layout.buildDirectory.file("tmp/patchPluginXml/plugin.xml")
+    val siteFile = layout.buildDirectory.file("updateSite/updatePlugins.xml")
+    dependsOn(tasks.patchPluginXml)
+    inputs.file(patchedPluginXml)
+    outputs.file(siteFile)
+    doLast {
+        val descriptor = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder()
+            .parse(patchedPluginXml.get().asFile)
+        fun requiredElement(tag: String): org.w3c.dom.Element =
+            descriptor.getElementsByTagName(tag).item(0) as? org.w3c.dom.Element
+                ?: throw GradleException("patched plugin.xml has no <$tag>")
+        fun requiredText(tag: String): String =
+            requiredElement(tag).textContent.trim().takeIf { it.isNotEmpty() }
+                ?: throw GradleException("patched plugin.xml has an empty <$tag>")
+        fun requiredAttribute(element: org.w3c.dom.Element, tag: String, attribute: String): String =
+            element.getAttributeNode(attribute)?.nodeValue?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw GradleException("patched plugin.xml has no non-empty '$attribute' attribute on <$tag>")
+
+        val pluginId = requiredText("id")
+        val version = requiredText("version")
+        val sinceBuild = requiredAttribute(requiredElement("idea-version"), "idea-version", "since-build")
+        // The artifact name the IDE will download must equal the zip the
+        // release job uploads; both derive from rootProject.name + version.
+        val zip = "${rootProject.name}-$version.zip"
+        val url = "https://github.com/btraceio/drydock/releases/download/v$version/$zip"
+        fun xmlEscape(value: String): String = buildString {
+            value.forEach { character ->
+                when (character) {
+                    '&' -> append("&amp;")
+                    '<' -> append("&lt;")
+                    '>' -> append("&gt;")
+                    '\"' -> append("&quot;")
+                    '\'' -> append("&apos;")
+                    else -> append(character)
+                }
+            }
+        }
+        siteFile.get().asFile.parentFile.mkdirs()
+        siteFile.get().asFile.writeText(
+            """<?xml version="1.0" encoding="UTF-8"?>
+            |<plugins>
+            |  <plugin id="${xmlEscape(pluginId)}" url="${xmlEscape(url)}" version="${xmlEscape(version)}">
+            |    <idea-version since-build="${xmlEscape(sinceBuild)}"/>
+            |  </plugin>
+            |</plugins>
+            |""".trimMargin()
+        )
     }
 }
 

@@ -3,6 +3,7 @@ name: IntelliJ plugin
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -18,7 +19,7 @@ jobs:
     name: intellij-plugin test + buildPlugin
     # The build has no native parts and no macOS-only tests, so a Linux
     # runner is enough and is cheaper. The IDE it compiles and tests against
-    # (IU 2025.3.3) is
+    # (IU 2026.3, see build.gradle.kts) is
     # resolved by the IntelliJ Platform Gradle Plugin, about 1.5 GB.
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -38,14 +39,30 @@ jobs:
       # verifyPlugin is deliberately not run here: with recommended() it
       # extracts ~4 GB per IDE version and exhausts the runner's disk. Run it
       # locally before a release (see intellij-plugin in the README).
+      # The release flow (docs/PluginDistribution.md): a pushed v* tag drives
+      # the artifact's version (-Pversion), so the same job that tests the
+      # plugin also produces the exact zip the release publishes. On non-tag
+      # builds TAG_VERSION is empty and Gradle keeps its default version.
       - name: Test and build
-        run: ./gradlew --no-daemon test buildPlugin
+        env:
+          TAG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          CERTIFICATE_CHAIN: ${{ secrets.PLUGIN_SIGNING_CERT_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PLUGIN_SIGNING_PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PLUGIN_SIGNING_KEY_PASSWORD }}
+        run: |
+          ARGS="test signPlugin buildPlugin updatePluginsXml"
+          if [ -n "$TAG_VERSION" ]; then
+            ARGS="$ARGS -Pversion=${TAG_VERSION#v}"
+          fi
+          ./gradlew --no-daemon $ARGS
 
       - name: Upload plugin zip
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: drydock-intellij-plugin
-          path: build/distributions/*.zip
+          path: |
+            build/distributions/*.zip
+            build/updateSite/updatePlugins.xml
           if-no-files-found: error
           retention-days: 30
 
@@ -58,3 +75,98 @@ jobs:
             build/reports/tests/test
             build/test-results/test
           retention-days: 7
+
+  # Publishes a v* tag build: the zip becomes a GitHub Release asset (the
+  # download URL the update site points at), and updatePlugins.xml is pushed
+  # to the gh-pages branch that backs https://btraceio.github.io/drydock/.
+  # The IDE polls that URL and applies the update on its own schedule.
+  release:
+    name: publish release + update site
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: plugin-release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Download plugin artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: drydock-intellij-plugin
+          path: plugin-artifacts
+
+      - name: Create GitHub release with the plugin zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG"
+          --generate-notes plugin-artifacts/*.zip
+
+      - name: Publish updatePlugins.xml to gh-pages
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config user.name "drydock-release-bot"
+          git config user.email "release@drydock.invalid"
+          if git fetch origin gh-pages 2>/dev/null; then
+            git switch -B gh-pages origin/gh-pages
+          else
+            git switch --orphan gh-pages
+          fi
+          if [ -f updatePlugins.xml ]; then
+            python3 - plugin-artifacts/updatePlugins.xml updatePlugins.xml <<'PY'
+          import re
+          import sys
+          import xml.etree.ElementTree as ET
+
+          def read_version(path):
+              plugin = ET.parse(path).getroot().find("plugin")
+              if plugin is None or not plugin.get("version"):
+                  raise SystemExit(f"No plugin version found in {path}")
+              return plugin.get("version")
+
+          def parse_version(value):
+              core, separator, suffix = value.partition("-")
+              components = core.split(".")
+              if not components or any(not component.isdigit() for component in components):
+                  raise SystemExit(f"Unsupported plugin version: {value}")
+              prerelease = re.split(r"[.-]", suffix.lower()) if separator else None
+              return [int(component) for component in components], prerelease
+
+          def compare_versions(left, right):
+              left_core, left_pre = parse_version(left)
+              right_core, right_pre = parse_version(right)
+              width = max(len(left_core), len(right_core))
+              left_core += [0] * (width - len(left_core))
+              right_core += [0] * (width - len(right_core))
+              if left_core != right_core:
+                  return (left_core > right_core) - (left_core < right_core)
+              if left_pre is None or right_pre is None:
+                  return (left_pre is None) - (right_pre is None)
+              for left_part, right_part in zip(left_pre, right_pre):
+                  left_key = (0, int(left_part)) if left_part.isdigit() else (1, left_part)
+                  right_key = (0, int(right_part)) if right_part.isdigit() else (1, right_part)
+                  if left_key != right_key:
+                      return (left_key > right_key) - (left_key < right_key)
+              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+          new_version = read_version(sys.argv[1])
+          current_version = read_version(sys.argv[2])
+          if compare_versions(new_version, current_version) <= 0:
+              raise SystemExit(f"Refusing to publish {new_version}: gh-pages already has {current_version}")
+          print(f"Publishing plugin version {new_version} over {current_version}")
+          PY
+          fi
+          cp plugin-artifacts/updatePlugins.xml .
+          git add updatePlugins.xml
+          git diff --cached --quiet && echo "update site unchanged" && exit 0
+          git commit -m "Update site for $TAG"
+          git push origin gh-pages
