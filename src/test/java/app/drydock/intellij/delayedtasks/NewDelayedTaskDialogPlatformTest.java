@@ -1,6 +1,8 @@
 package app.drydock.intellij.delayedtasks;
 
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
+import app.drydock.delayedtasks.NewDelayedTaskDialog.Prefill;
+import app.drydock.delayedtasks.NewDelayedTaskDialog.ProjectChoice;
 import app.drydock.delayedtasks.NewDelayedTaskDialog.Result;
 import app.drydock.delayedtasks.TaskPrerequisitePicker;
 import app.drydock.delayedtasks.TaskPrerequisitePicker.Index;
@@ -37,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -65,6 +68,7 @@ public class NewDelayedTaskDialogPlatformTest extends BasePlatformTestCase {
     private Index index;
     private RepositoryId alpha, beta, unnamed, alphaToo;
     private TaskId login, docs, ship, clash;
+    private ProjectChoice alphaChoice, betaChoice, unnamedChoice;
     private final List<NewDelayedTaskDialog> dialogs = new ArrayList<>();
 
     @Override
@@ -88,6 +92,9 @@ public class NewDelayedTaskDialogPlatformTest extends BasePlatformTestCase {
                 root.resolve(unnamed.toString()).resolve(clash.text() + ".md"));
         index = Index.of(TaskFiles.scan(root), repository -> alpha.equals(repository)
                 || alphaToo.equals(repository) ? "alpha" : beta.equals(repository) ? "beta" : null);
+        alphaChoice = ProjectChoice.of(alpha, Path.of("/checkouts/alpha"), "alpha");
+        betaChoice = ProjectChoice.of(beta, Path.of("/checkouts/beta"), "beta");
+        unnamedChoice = new ProjectChoice(Optional.empty(), Path.of("/checkouts/fresh"), "fresh");
     }
 
     @Override
@@ -146,11 +153,11 @@ public class NewDelayedTaskDialogPlatformTest extends BasePlatformTestCase {
 
     // 3. done_by defaults HUMAN; the immutable Result round-trips.
     public void testDoneByDefaultsHumanAndTheResultIsImmutable() {
-        Result defaulted = new Result(null, null, null, null);
+        Result defaulted = new Result(null, null, null, null, alphaChoice);
         assertTrue(defaulted.title().isEmpty() && defaulted.body().isEmpty()
                 && defaulted.after().isEmpty() && defaulted.doneBy() == DoneBy.HUMAN);
         List<String> source = new ArrayList<>(List.of("after-b"));
-        Result copied = new Result("  Round trip  ", "Body prose", source, DoneBy.AGENT);
+        Result copied = new Result("  Round trip  ", "Body prose", source, DoneBy.AGENT, betaChoice);
         source.add("after-c");
         assertTrue("the title is stripped and the refs defensively copied",
                 "Round trip".equals(copied.title()) && List.of("after-b").equals(copied.after()));
@@ -213,8 +220,99 @@ public class NewDelayedTaskDialogPlatformTest extends BasePlatformTestCase {
         assertEquals("the whole flow wrote nothing: the temp root is untouched", untouched, tree(root));
     }
 
+    // 6. The attachment picker: the registered projects, the unregistered default named,
+    //    the selection reaching the result, and an empty picker refusing OK.
+    public void testProjectPickerOffersRegisteredProjectsAndCarriesTheSelection() {
+        NewDelayedTaskDialog dialog = newDialog();
+        @SuppressWarnings("unchecked")
+        javax.swing.ComboBoxModel<ProjectChoice> model =
+                ((javax.swing.JComboBox<ProjectChoice>) comboBox(dialog)).getModel();
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < model.getSize(); i++) names.add(model.getElementAt(i).name());
+        assertEquals("one entry per offered project, sorted by name",
+                List.of("alpha", "beta", "fresh"), names);
+        assertEquals("the dialog's own project is the default selection", alphaChoice,
+                model.getSelectedItem());
+        // The unregistered default says what its save will do.
+        assertEquals("the unregistered default names its registration",
+                "fresh  (will be registered)", unnamedChoice.displayLabel());
+        assertEquals("alpha", alphaChoice.displayLabel());
+        // A changed selection rides the result.
+        comboBox(dialog).setSelectedItem(betaChoice);
+        titleField(dialog).setText("Picked project");
+        control(dialog, "Create task").doClick();
+        assertEquals(betaChoice, dialog.result().project());
+    }
+
+    public void testAnEmptyPickerBlocksOkWithAVisibleReason() {
+        // The picker refusal fires only when nothing can be selected at all: with a
+        // prefill project the dialog now INSERTS that choice into the model
+        // (selectPrefill), so even an empty offered list stays usable.
+        NewDelayedTaskDialog noProject = new NewDelayedTaskDialog(index, List.of(),
+                Prefill.none(null));
+        dialogs.add(noProject);
+        titleField(noProject).setText("No project offered");
+        List<ValidationInfo> refused = noProject.performValidateAll();
+        assertTrue("exactly the picker refusal, on the refusing control", refused.size() == 1
+                && "Pick the project the task belongs to.".equals(refused.get(0).message)
+                && refused.get(0).component == comboBox(noProject));
+        control(noProject, "Create task").doClick();
+        Assert.assertThrows(IllegalStateException.class, noProject::result);
+        // A prefill missing from the offered list is inserted and selected, never dropped.
+        NewDelayedTaskDialog stranger = new NewDelayedTaskDialog(index, List.of(betaChoice),
+                Prefill.none(alphaChoice));
+        dialogs.add(stranger);
+        titleField(stranger).setText("Stranger prefill");
+        assertTrue("the missing prefill was inserted into the model",
+                comboBox(stranger).getItemCount() == 2
+                        && alphaChoice.equals(comboBox(stranger).getSelectedItem()));
+        assertTrue(stranger.performValidateAll().isEmpty());
+    }
+
+    // 7. The edit form: every field prefilled from the stored document, the edited task
+    //    never its own candidate, a removed ref really gone, a cycle caught.
+    public void testEditPrefillExcludesSelfAndComposesOverTheTaskAsEdited() {
+        TaskDocument subject = doc(docs); // "Write user docs", beta, no refs, human
+        Index editIndex = Index.editing(index.snapshot(),
+                repository -> alpha.equals(repository) || alphaToo.equals(repository) ? "alpha"
+                        : beta.equals(repository) ? "beta" : null,
+                subject.id());
+        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(editIndex,
+                List.of(alphaChoice, betaChoice),
+                Prefill.edit(subject, betaChoice));
+        dialogs.add(dialog);
+        assertTrue("the edit form names itself", "Edit task".equals(dialog.getTitle()));
+        control(dialog, "Save changes"); // throws when the OK button did not rename
+        assertEquals("the stored title is prefilled", "Write user docs", titleField(dialog).getText());
+        assertTrue("the edited task is no search hit", editIndex.search("docs", 50).isEmpty()
+                && !index.search("docs", 50).isEmpty());
+        // The refusals compose over the task AS EDITED: a self-reference is a cycle,
+        // an unknown id still breaks, and empty refs are valid.
+        List<String> selfCycle = editIndex.refusals(List.of(subject.id().text()));
+        assertTrue("a self-reference is refused as a cycle: " + selfCycle,
+                selfCycle.size() == 1 && selfCycle.get(0).contains("cycle"));
+        assertTrue("an unknown id still breaks: " + editIndex.refusals(List.of("missing-id")),
+                editIndex.refusals(List.of("missing-id")).get(0)
+                        .contains("no task with id 'missing-id'"));
+        assertTrue("empty refs stay valid", editIndex.refusals(List.of()).isEmpty());
+        // The prefilled values reach the result untouched when the human just confirms.
+        control(dialog, "Save changes").doClick();
+        Result result = dialog.result();
+        assertEquals("Write user docs", result.title());
+        assertEquals("the prefilled policy reaches the result", DoneBy.HUMAN, result.doneBy());
+        assertEquals("the current attachment is the prefilled project", betaChoice,
+                result.project());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static javax.swing.JComboBox<ProjectChoice> comboBox(NewDelayedTaskDialog dialog) {
+        return (javax.swing.JComboBox<ProjectChoice>) components(dialog,
+                javax.swing.JComboBox.class).get(0);
+    }
+
     private NewDelayedTaskDialog newDialog() {
-        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(index);
+        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(index,
+                List.of(alphaChoice, betaChoice, unnamedChoice), Prefill.none(alphaChoice));
         dialogs.add(dialog);
         return dialog;
     }

@@ -32,6 +32,7 @@ import app.drydock.tasks.TaskFilePatch;
 import app.drydock.tasks.TaskFiles;
 import app.drydock.tasks.StackBranches;
 import app.drydock.tasks.StackUnits;
+import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskRun;
@@ -1252,6 +1253,157 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 return Outcome.refused(e.getMessage());
             }
         });
+    }
+
+    /**
+     * One Edit dialog's accepted values, applied through {@link #edit}: the
+     * task it edits, the rewritten title and done_by policy, the full
+     * prerequisite reference list (replacing the stored one -- the dialog
+     * prefills it), the full body text as lines (only the lines not already
+     * stored as note paragraphs are appended), and the repository the task
+     * is attached to (the current one when unchanged, the picked project's
+     * when the human moved it). Nullable lists default empty; a blank title
+     * is refused by the edit itself, mirroring the dialog's own validation.
+     */
+    public record TaskEdit(TaskId task, String title, DoneBy doneBy, List<String> after,
+                           List<String> body, RepositoryId repository) {
+
+        public TaskEdit {
+            title = title == null ? "" : title.strip();
+            after = after == null ? List.of() : List.copyOf(after);
+            body = body == null ? List.of() : List.copyOf(body);
+        }
+    }
+
+    /**
+     * The one seam that rewrites a task definition's human-owned fields
+     * (P5's dialog edit): title, done_by policy, prerequisite references and
+     * the project attachment. Deliberately NOT on {@link TaskToolContext}:
+     * P7 keeps an agent unable to edit relations, titles or done_by -- the
+     * MCP tools change status and append notes only, and a stored broken
+     * reference would block the task until a human fixes it.
+     *
+     * <p>The validation is the production resolution, never re-derived: the
+     * proposed {@code after} refs replace the task's own in a snapshot copy
+     * and {@link TaskGraph} reads both the broken references and the cycles
+     * back -- editing an existing task can close a cycle between two stored
+     * tasks, which a create-time broken-reference check alone would never
+     * see. A project change that would strand another task's qualified
+     * {@code <project>:<id>} reference (one resolving to THIS task through
+     * the OLD project's slug; bare ids survive any move) is refused with
+     * the referencing tasks named, so the move never stores a broken ref.
+     * The writes ride the store's single writer in one future: the
+     * front-matter update, then the move, then each new note -- a refusal
+     * before the first write commits nothing, a store failure after one
+     * leaves what committed (visible in the refusal/failure, retried by
+     * another Edit). The notes are the dialog's full body minus the already
+     * stored paragraphs (append-only: an edit never deletes stored text).
+     */
+    public CompletableFuture<Outcome> edit(TaskEdit edit) {
+        Objects.requireNonNull(edit, "edit");
+        Objects.requireNonNull(edit.task(), "task");
+        Objects.requireNonNull(edit.repository(), "repository");
+        return supply(store -> {
+            TaskSnapshot snapshot = scanFresh();
+            TaskDocument current = snapshot.byId().get(edit.task());
+            if (current == null) {
+                return Outcome.refused("No task with id '" + edit.task().text()
+                        + "' in the task store on " + root);
+            }
+            if (edit.title().isBlank()) {
+                return Outcome.refused("Give the task a title.");
+            }
+            Optional<String> refused = editRefusal(snapshot, edit, current);
+            if (refused.isPresent()) {
+                return Outcome.refused(refused.get());
+            }
+            TaskDocument task = store.update(edit.task(), new TaskFilePatch.Updates(
+                    edit.title(), null, edit.doneBy(), null, edit.after(), null));
+            if (!edit.repository().equals(current.repository())) {
+                task = store.move(edit.task(), edit.repository());
+            }
+            Set<String> stored = new LinkedHashSet<>(TaskFilePatch.noteParagraphs(current.rawBody()));
+            for (String line : edit.body()) {
+                String note = line.strip();
+                if (!note.isEmpty() && stored.add(note)) {
+                    task = store.appendNote(edit.task(), note);
+                }
+            }
+            return Outcome.committed(task);
+        });
+    }
+
+    /** The edit's graph refusal, composed over the production resolution: broken refs
+      * and cycles of the task AS EDITED (its own refs replaced in a snapshot copy), and
+      * the qualified references from other tasks the project move would strand. Empty
+      * when the edit may proceed. Pure. */
+    private Optional<String> editRefusal(TaskSnapshot snapshot, TaskEdit edit, TaskDocument current) {
+        TaskDocument edited = new TaskDocument(edit.task(), edit.repository(), edit.title(),
+                current.status(), edit.doneBy(), current.created(), edit.after(),
+                current.sessions(), current.mirrors(), "", "");
+        TaskSnapshot probed = replaceTask(withRepository(snapshot, edit.repository()), edited);
+        TaskGraph graph = TaskGraph.of(probed, this::slugOf);
+        TaskGraph.TaskDiagnostics diagnostics = graph.diagnosticsOf(edit.task()).orElseThrow();
+        List<String> reasons = new ArrayList<>();
+        diagnostics.broken().forEach(broken ->
+                reasons.add("'" + broken.reference() + "': " + broken.reason()));
+        diagnostics.cycles().forEach(cycle ->
+                reasons.add("this edit closes a prerequisite cycle: " + graph.titledPath(cycle)));
+        if (!edit.repository().equals(current.repository())) {
+            for (TaskGraph.ResolvedReference stranded : strandedRefs(snapshot, edit.task())) {
+                reasons.add("moving '" + edit.title() + "' to the picked project breaks the"
+                        + " prerequisite '" + stranded.reference() + "' of '"
+                        + stranded.source().title() + "' (" + stranded.source().id().text() + ")"
+                        + " -- fix or remove it first");
+            }
+        }
+        return reasons.isEmpty() ? Optional.empty() : Optional.of(String.join("  ", reasons));
+    }
+
+    /** The qualified references from OTHER tasks that resolve to this task -- the ones a
+      * project move would break, since the graph resolves a qualified ref only through
+      * the slug naming the target's CURRENT repository. Bare ids survive any move (D4:
+      * ids are unique across all projects). One graph over the snapshot; the slug
+      * mapping is the dual-registry one this service already applies everywhere. Pure
+      * apart from its memory-only reads. */
+    private List<TaskGraph.ResolvedReference> strandedRefs(TaskSnapshot snapshot, TaskId task) {
+        TaskGraph graph = TaskGraph.of(snapshot, this::slugOf);
+        List<TaskGraph.ResolvedReference> stranded = new ArrayList<>();
+        for (TaskDocument document : snapshot.documents()) {
+            if (document.id().equals(task)) {
+                continue;
+            }
+            graph.diagnosticsOf(document.id()).orElseThrow().resolved().stream()
+                    .filter(resolved -> resolved.reference().contains(":")
+                            && resolved.target().id().equals(task))
+                    .forEach(stranded::add);
+        }
+        return List.copyOf(stranded);
+    }
+
+    /** The snapshot with one document replaced by {@code edited} (same id); a snapshot
+      * that holds no such id is the caller's bug. Pure. */
+    private static TaskSnapshot replaceTask(TaskSnapshot snapshot, TaskDocument edited) {
+        Map<TaskId, TaskDocument> byId = new LinkedHashMap<>(snapshot.byId());
+        byId.put(edited.id(), edited);
+        List<TaskDocument> documents = new ArrayList<>();
+        for (TaskDocument document : snapshot.documents()) {
+            documents.add(document.id().equals(edited.id()) ? edited : document);
+        }
+        return new TaskSnapshot(documents, snapshot.repositories(), byId,
+                snapshot.bySessionReference(), snapshot.failures(), snapshot.idCollisions());
+    }
+
+    /** The snapshot with {@code repository} added to its repository list when absent.
+      * Pure. */
+    private static TaskSnapshot withRepository(TaskSnapshot snapshot, RepositoryId repository) {
+        if (snapshot.repositories().contains(repository)) {
+            return snapshot;
+        }
+        List<RepositoryId> repositories = new ArrayList<>(snapshot.repositories());
+        repositories.add(repository);
+        return new TaskSnapshot(snapshot.documents(), repositories, snapshot.byId(),
+                snapshot.bySessionReference(), snapshot.failures(), snapshot.idCollisions());
     }
 
     /** The repository id a created task stores: the caller's id unchanged when the shared

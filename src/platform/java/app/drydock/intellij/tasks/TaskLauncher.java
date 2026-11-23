@@ -1473,7 +1473,9 @@ n     * git scans (the placeholder root is not a local checkout, and every
      * session, creates a worktree or spawns an agent, and never touches the
      * agent registry, so it works with no agent installed.
      */
-    static void saveTask(Project from, app.drydock.tasks.NewTaskPlan saved) {
+    /** Public: the dialog flows ({@code TaskDialogFlows}) dispatch the create save
+      * through it from the delayedtasks package. */
+    public static void saveTask(Project from, app.drydock.tasks.NewTaskPlan saved) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Saving task \"" + saved.title() + "\"", true) {

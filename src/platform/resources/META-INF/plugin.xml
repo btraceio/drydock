@@ -286,9 +286,13 @@
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Cancel"
                 text="Cancel Plan"
                 description="Cancel this task's plan: future stages never start, started sessions keep running, unlaunched reservations are released"/>
+        <action id="Drydock.DelayedTask.EditDialog"
+                class="app.drydock.intellij.delayedtasks.DelayedTaskActions$EditDialog"
+                text="Edit…"
+                description="Edit the task's title, body, prerequisites, project and done_by in the dialog"/>
         <action id="Drydock.DelayedTask.Edit"
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Edit"
-                text="Edit"
+                text="Edit Source"
                 description="Open the task's file in the editor"/>
         <action id="Drydock.DelayedTask.Drop"
                 class="app.drydock.intellij.delayedtasks.DelayedTaskActions$Drop"

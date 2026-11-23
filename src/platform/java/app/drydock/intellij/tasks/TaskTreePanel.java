@@ -2,12 +2,11 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
-import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
 import app.drydock.delayedtasks.SharedProjectResolver;
-import app.drydock.delayedtasks.TaskPrerequisitePicker;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
+import app.drydock.intellij.delayedtasks.TaskDialogFlows;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
@@ -43,7 +42,6 @@ import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskState;
-import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.BrowserUtil;
@@ -64,7 +62,6 @@ import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
-import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
@@ -123,9 +120,6 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * The Drydock tool window: every registered project and its tasks, live.
@@ -1614,8 +1608,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * The registered project's display name, else the folder's -- the name
      * a saved task registers under (T19a's rule, D2). Lexical, never a
      * canonicalizing probe: the caller already canonicalized off the EDT.
+     * Public: the dialog flows ({@link TaskDialogFlows}) name the unregistered
+     * default choice with it.
      */
-    private static String repositoryDisplayName(DrydockPluginService plugin, Path root) {
+    public static String repositoryDisplayName(DrydockPluginService plugin, Path root) {
         return plugin.sharedProjects().byRoot(root).map(SharedProject::displayName)
                 .orElseGet(() -> String.valueOf(root.getFileName()));
     }
@@ -1662,8 +1658,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * through the production saveTask core. A canceled dialog answers no
      * accepted result, so NO plan is built and NOTHING is written (P5's
      * zero-write). Pure; the dialog's own behavior is the platform fixture's.
+     * Public: the dialog flows ({@link TaskDialogFlows}) dispatch through it.
      */
-    static Optional<app.drydock.tasks.NewTaskPlan> savedTaskPlan(
+    public static Optional<app.drydock.tasks.NewTaskPlan> savedTaskPlan(
             Optional<NewDelayedTaskDialog.Result> accepted, Path projectRoot, String projectName) {
         return accepted.map(result -> new app.drydock.tasks.NewTaskPlan(result.title(), result.body(),
                 result.after(), result.doneBy(), projectRoot, projectName));
@@ -1675,54 +1672,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * published, else the service's own async scan; never a render-thread
      * read. Immediate progress: the background task's own indicator; a
      * canceled dialog writes nothing; failures surface in a dialog and the
-     * task ends on every path, so no progress is stranded.
+     * task ends on every path, so no progress is stranded. The flow itself
+     * lives in {@link TaskDialogFlows}, shared with the Edit… form.
      */
     private void newDelayedTask(Project from) {
-        DrydockPluginService plugin = DrydockPluginService.getInstance();
-        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Reading tasks…", true) {
-            @Override
-            public void run(@NotNull ProgressIndicator indicator) {
-                try {
-                    DelayedTaskService service = plugin.taskService();
-                    WatchedSnapshot watched = service.watchedSnapshot();
-                    TaskSnapshot snapshot = watched != null ? watched.snapshot()
-                            : service.snapshot().get(60, TimeUnit.SECONDS);
-                    indicator.setText("Indexing tasks");
-                    TaskPrerequisitePicker.Index index =
-                            TaskPrerequisitePicker.Index.of(snapshot, taskSlugs(plugin));
-                    Path root = Optional.ofNullable(from.getBasePath()).map(Path::of)
-                            .map(RepositoryCatalog::canonicalize).orElse(null);
-                    if (root == null) {
-                        return;
-                    }
-                    String name = repositoryDisplayName(plugin, root);
-                    ApplicationManager.getApplication().invokeLater(
-                            () -> createTask(from, index, root, name),
-                            ModalityState.nonModal(), from.getDisposed());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } catch (ExecutionException | TimeoutException | RuntimeException e) {
-                    LOG.log(Level.WARNING, "Could not open the New Task form", e);
-                    ApplicationManager.getApplication().invokeLater(() -> Messages.showErrorDialog(from,
-                            "Drydock could not open the New Task form: " + e.getMessage(), "Drydock"),
-                            ModalityState.nonModal(), from.getDisposed());
-                }
-            }
-        });
-    }
-
-    /**
-     * EDT: the T18a form over one index. A confirmed OK saves through the
-     * production saveTask core (the service's create seam -- no worktree, no
-     * agent, P5); a canceled dialog writes nothing.
-     */
-    private void createTask(Project from, TaskPrerequisitePicker.Index index,
-                            Path canonicalRoot, String projectName) {
-        NewDelayedTaskDialog dialog = new NewDelayedTaskDialog(index);
-        // A canceled dialog carries no accepted result: no plan, no write (P5).
-        savedTaskPlan(dialog.showAndGet() ? Optional.of(dialog.result()) : Optional.empty(),
-                canonicalRoot, projectName)
-                .ifPresent(plan -> TaskLauncher.saveTask(from, plan));
+        TaskDialogFlows.newTask(from);
     }
 
     private AnAction repositorySettingsAction(Predicate<TaskNode> applies) {
@@ -2397,17 +2351,19 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
      * created tasks with the SHARED registry's id, so a mapping of the
      * install catalog alone leaves every MCP-created task unnamed.
      */
-    static Map<RepositoryId, String> displayNamesByRepository(DrydockPluginService plugin) {
+    public static Map<RepositoryId, String> displayNamesByRepository(DrydockPluginService plugin) {
         return SharedProjectResolver.displayNames(plugin.sharedProjects().projects(),
-                plugin.stateStore().state().repositories());
+                plugin.stateStore() == null ? List.of() : plugin.stateStore().state().repositories());
     }
 
     /**
      * The display-name slug (P2, T17a): the same projection the task
      * service and the goto-declaration handler apply (both private);
      * lowercase letters, digits and inner hyphens, capped at 60. Pure.
+     * Public: the dialog flows ({@link TaskDialogFlows}) build their
+     * prerequisite index's slug mapping with it.
      */
-    static String slugOf(String name) {
+    public static String slugOf(String name) {
         if (name == null || name.isBlank()) {
             return null;
         }
