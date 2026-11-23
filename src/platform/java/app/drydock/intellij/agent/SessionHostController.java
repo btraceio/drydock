@@ -7,13 +7,18 @@ import app.drydock.intellij.agent.SessionHostModel.Outcome;
 import app.drydock.intellij.agent.SessionHostModel.Slot;
 
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.application.ApplicationActivationListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.wm.IdeFocusManager;
+import com.intellij.openapi.wm.IdeFrame;
 import com.intellij.terminal.TerminalExecutionConsole;
+import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JComponent;
 import javax.swing.Timer;
 
 import java.util.HashMap;
@@ -195,9 +200,16 @@ public final class SessionHostController implements Disposable, SessionPane.Host
             catalogDirty.set(true);
             queueFlush();
         });
+        connection.subscribe(ApplicationActivationListener.TOPIC, new ApplicationActivationListener() {
+            @Override
+            public void applicationActivated(@NotNull IdeFrame frame) {
+                frameActivated(frame);
+            }
+        });
         connection.subscribe(SessionActivityListener.TOPIC,
                 (SessionActivityListener) (id, activity) -> mark(id));
         this.visibility = new SessionHostVisibility(project, this, this::layout, panes::get, this::closed);
+        this.focusRequest = target -> IdeFocusManager.getInstance(project).requestFocus(target, true);
     }
 
     /** Any thread: one session's pane needs a repaint. */
@@ -509,6 +521,67 @@ public final class SessionHostController implements Disposable, SessionPane.Host
             advance();
         }
         revoke();
+    }
+
+    /** Where an activation refocus asks for the keyboard; a test seam. */
+    private Consumer<JComponent> focusRequest;
+
+    void focusRequester(Consumer<JComponent> focusRequest) {
+        this.focusRequest = Objects.requireNonNull(focusRequest, "focusRequest");
+    }
+
+    /**
+     * The IDE frame came to the front. If it is this project's frame, the
+     * keyboard goes to the focused session's terminal one EDT hop later —
+     * after the platform's own focus restore has landed, so the terminal's
+     * request is the last word. This is the activation contract: returning
+     * to the IDE with the Sessions tab in front means typing to the agent,
+     * whatever the last focus owner inside the window was. Frames of other
+     * projects (and the welcome frame) are not this controller's concern.
+     * EDT only.
+     */
+    void frameActivated(IdeFrame frame) {
+        if (closed() || frame == null || frame.getProject() != project) {
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(
+                this::refocusFocusedSession, ModalityState.nonModal(), project.getDisposed());
+    }
+
+    /**
+     * The delayed step of {@link #frameActivated}: every fact is re-checked
+     * at the hop. A refocus fires only while a host editor holds the lease
+     * and the focused session's console is showing in an active window —
+     * {@link SessionHostVisibility#isViewed}, the one on-screen answer: the
+     * host tab is the active editor on screen exactly when its console is
+     * showing. A focused slot without a live console takes nothing. The
+     * request bypasses the show-intent permission epoch (and the
+     * {@code hidden} flag with it: a tab reopened without an intentional
+     * show still shows a live console and is a target): the activation is
+     * its own intent, and a stale one is cancelled by the re-checked facts,
+     * not by a token.
+     */
+    private void refocusFocusedSession() {
+        if (closed() || !(lease instanceof SessionHostEditor)) {
+            return;
+        }
+        Optional<ManagedSessionId> focused = focusedSessionId();
+        if (focused.isEmpty() || !visibility.isViewed(focused.get())) {
+            return;
+        }
+        focusedPane().flatMap(SessionPane::focusTarget).ifPresent(focusRequest);
+    }
+
+    /** The session in the focused slot, only while a lease is held and the host is alive. */
+    private Optional<ManagedSessionId> focusedSessionId() {
+        if (lease == null || closed()) {
+            return Optional.empty();
+        }
+        return switch (layout.focusedSlot()) {
+            case PRIMARY -> layout.primary();
+            case HELD -> layout.held();
+            case NONE -> Optional.empty();
+        };
     }
 
     /**

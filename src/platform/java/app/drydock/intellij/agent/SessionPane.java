@@ -160,6 +160,26 @@ final class SessionPane {
     }
 
     /**
+     * The component that can take the keyboard in what this pane shows: the
+     * terminal panel of the mounted live console. Empty for every other body
+     * — a placeholder takes no keyboard, and the dimmed stopped view's
+     * console is not a target (the running session is). The one answer
+     * behind the host editor's preferred focused component, so every
+     * platform-driven focus pass — tab selection, window activation restore
+     * — lands where {@link AgentConsoles#focusConsole} puts the keyboard,
+     * never back on the bare pane root.
+     */
+    Optional<JComponent> focusTarget() {
+        if (disposed || shown != Body.LIVE) {
+            return Optional.empty();
+        }
+        return AgentExecutionService.getInstance(project).execution(sessionId)
+                .flatMap(AgentExecution::console)
+                .filter(this::displays)
+                .map(AgentConsoles::focusTarget);
+    }
+
+    /**
      * Removes the root from whatever holds it, so a host can add it elsewhere.
      * Nothing is disposed and the body is untouched.
      */
