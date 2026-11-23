@@ -448,6 +448,16 @@ final class InboxList extends JBList<InboxList.Entry> {
     }
 
     /**
+     * A flagged session's chip when its group no longer says it: "flagged"
+     * on a row shown in Running. Empty otherwise -- the Flagged section's
+     * header already says it. Reads the carried row only.
+     */
+    static Optional<String> flaggedChip(Item item, GroupKind group) {
+        return group == GroupKind.RUNNING && item instanceof SessionItem session
+                && session.row().session().flagged() ? Optional.of("flagged") : Optional.empty();
+    }
+
+    /**
      * Whether the row is a watched session whose engagement needs the human:
      * it wears the Needs you background and the escalation badge. Only the
      * watched side -- that is where the human acts; the babysitter's row
@@ -558,6 +568,8 @@ final class InboxList extends JBList<InboxList.Entry> {
         private final JBLabel pullRequest = new JBLabel();
         private final JBLabel tag = new JBLabel();
         private final JBLabel windowTag = new JBLabel();
+        /** The flagged session's chip, for a row the Running section shows. */
+        private final JBLabel flagTag = new JBLabel();
         /** The babysitting engagement chip, in the editor's monospace so it reads as machine state. */
         private final JBLabel babysitTag = new JBLabel();
         private boolean pullRequestLink;
@@ -573,9 +585,11 @@ final class InboxList extends JBList<InboxList.Entry> {
             trailing.add(pullRequest, spaced);
             trailing.add(tag, spaced);
             trailing.add(windowTag, spaced);
+            trailing.add(flagTag, spaced);
             trailing.add(babysitTag, spaced);
             tag.setFont(JBUI.Fonts.smallFont());
             windowTag.setFont(JBUI.Fonts.smallFont());
+            flagTag.setFont(JBUI.Fonts.smallFont());
             // The small font's size is already scaled; only the family changes.
             babysitTag.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBUI.Fonts.smallFont().getSize()));
             panel.add(center, BorderLayout.CENTER);
@@ -651,6 +665,15 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
                                 JBUI.Borders.empty(0, 4)));
                     });
+                    Optional<String> flag = flaggedChip(item, row.group().kind());
+                    flagTag.setVisible(flag.isPresent());
+                    flag.ifPresent(text -> {
+                        flagTag.setText(text);
+                        flagTag.setForeground(selected ? foreground : NamedColorUtil.getInactiveTextColor());
+                        flagTag.setBorder(BorderFactory.createCompoundBorder(
+                                JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
+                                JBUI.Borders.empty(0, 4)));
+                    });
                     Optional<String> babysit = babysitChip(item);
                     babysitTag.setVisible(babysit.isPresent());
                     babysit.ifPresent(text -> {
@@ -663,7 +686,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.empty(0, 4)));
                     });
                     trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent()
-                            || babysit.isPresent());
+                            || flag.isPresent() || babysit.isPresent());
                     panel.setBorder(JBUI.Borders.empty(0, 30, 0, 12));
                 }
             }
