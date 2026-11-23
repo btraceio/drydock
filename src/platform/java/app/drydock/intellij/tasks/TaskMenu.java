@@ -116,6 +116,12 @@ final class TaskMenu {
         SHOW_SESSION,
         IMPLEMENT,
         TRIAGE,
+        /** Batch-triage every untriaged issue of the section; only an Issues node offers it. */
+        TRIAGE_ALL,
+        /** Pause a running batch triage of the section; the remainder stays resumable. */
+        CANCEL_TRIAGE,
+        /** Continue a paused batch triage of the section; only when one is stored. */
+        RESUME_TRIAGE,
         /** Per-project settings: Jira, GitHub, workspace box (while opted in) and agent identity, one dialog. */
         REPOSITORY_SETTINGS,
         /** Add a user-defined Jira group (name + JQL) to the Issues section. */
@@ -243,10 +249,14 @@ final class TaskMenu {
             case JiraGroupRow ignored -> nonEmpty(List.of(
                     List.of(Item.EDIT_JIRA_GROUP, Item.DELETE_JIRA_GROUP),
                     List.of(Item.REFRESH)));
-            case GitHubNode ignored -> List.of(List.of(Item.REFRESH, Item.REPOSITORY_SETTINGS));
+            case GitHubNode ignored -> List.of(
+                    List.of(Item.TRIAGE_ALL, Item.CANCEL_TRIAGE, Item.RESUME_TRIAGE),
+                    List.of(Item.REFRESH, Item.REPOSITORY_SETTINGS));
             // The Jira node is where its groups are added; its refresh loads
             // every group it shows.
-            case JiraNode ignored -> List.of(List.of(Item.REFRESH, Item.ADD_JIRA_GROUP, Item.REPOSITORY_SETTINGS));
+            case JiraNode ignored -> List.of(
+                    List.of(Item.TRIAGE_ALL, Item.CANCEL_TRIAGE, Item.RESUME_TRIAGE),
+                    List.of(Item.REFRESH, Item.ADD_JIRA_GROUP, Item.REPOSITORY_SETTINGS));
             case Ghost ghost -> List.of(List.of(Item.REPOSITORY_SETTINGS));
             case IdleWorktree idleWorktree -> nonEmpty(List.of(
                     List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
