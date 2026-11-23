@@ -7,6 +7,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.app.ApplicationStateStore;
 import app.drydock.domain.PullRequestTarget;
+import app.drydock.domain.PrState;
 import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.RepositorySettings;
@@ -63,6 +64,37 @@ class PullRequestAssociationServiceTest {
             assertEquals(changed.pr(), cleared.pr());
             store.flush();
             assertTrue(repositoryFile.load().sessions().getFirst().targetPullRequest().isEmpty());
+        }
+    }
+
+    @Test
+    void recordPullRequestMergedPersistsTheStateAndIsIdempotent(@TempDir Path base) throws Exception {
+        var repositoryFile = new JsonApplicationStateRepository(base.resolve("state.json"));
+        var store = ApplicationStateStore.forRepository(repositoryFile);
+        var repository = new Repository(RepositoryId.newId(), base, "repo", Instant.EPOCH, Instant.EPOCH,
+                RepositorySettings.DEFAULT);
+        store.update(state -> state.withRepositories(List.of(repository)));
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var provider = new DrydockSessionServiceTest.RecordingProvider(AgentKind.PI, SessionIdStrategy.PRESET,
+                    null, true, false, null, new CopyOnWriteArrayList<>());
+            var registry = new AgentRegistry(List.of(provider),
+                    new AgentContext(base, base.resolve("activity"), executor));
+            var consoles = new DrydockSessionServiceTest.FakeConsoleHost(new CopyOnWriteArrayList<>());
+            var service = new DrydockSessionService(CompletableFuture.completedFuture(null), () -> store,
+                    () -> registry, () -> new SessionActivityWatcher(base.resolve("activity"), executor),
+                    path -> CompletableFuture.completedFuture(repository.id()), consoles, executor,
+                    path -> List.of(), SessionMcpAccess.none(), new LaunchClaims(id -> false), null);
+            var launched = service.launchSession(
+                    service.prepareSession(base, AgentKind.PI, "merged session").get(5, TimeUnit.SECONDS))
+                    .get(5, TimeUnit.SECONDS);
+            var merged = service.recordPullRequestMerged(launched.id(), 898).get(5, TimeUnit.SECONDS);
+            assertEquals(PrState.MERGED, merged.prState());
+            assertEquals(Optional.of(898), merged.prNumber());
+            store.flush();
+            assertEquals(PrState.MERGED, repositoryFile.load().sessions().getFirst().prState());
+            // A re-observed merge changes nothing and returns the same state.
+            var again = service.recordPullRequestMerged(launched.id(), 898).get(5, TimeUnit.SECONDS);
+            assertEquals(merged.pr(), again.pr());
         }
     }
 }

@@ -1965,7 +1965,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             List<TaskNode> treeNodes = terms.isEmpty() && requestedFocus == null ? nodes
                     : TaskTreeModel.build(scoped);
             // A session whose pull request merged or closed is offered its
-            // Done flow once, by whichever window's pass sees it first.
+            // Done flow once, by whichever window's pass sees it first; the
+            // merge itself is persisted here, before the tree shows the
+            // Done link, so the dialog's merge check reads the same truth
+            // the badge renders.
+            PullRequestDoneOffers.persistMerged(project, gathered.sessions(), gathered.pullRequestsBySession());
             List<PullRequestDoneOffers.Offer> doneOffers =
                     PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(

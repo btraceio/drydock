@@ -110,6 +110,16 @@ class SessionDonePlanTest {
     }
 
     @Test
+    void aPersistedMergedPullRequestMakesASquashMergedBranchDone() {
+        // A squash-merged branch has commits "ahead" of the base; the persisted PR state decides.
+        assertTrue(SessionDonePlan.doneSession(worktree(false, false, false, false, false), true));
+        assertFalse(SessionDonePlan.doneSession(worktree(false, false, false, false, false), false));
+        // The persisted state never promotes the main checkout or a locked worktree.
+        assertFalse(SessionDonePlan.doneSession(worktree(true, false, false, false, false), true));
+        assertFalse(SessionDonePlan.doneSession(worktree(false, true, false, false, false), true));
+    }
+
+    @Test
     void theMainCheckoutAndALockedWorktreeAreNeverDone() {
         assertFalse(SessionDonePlan.doneSession(worktree(true, false, true, false, false)));
         assertFalse(SessionDonePlan.doneSession(worktree(false, true, true, false, false)));

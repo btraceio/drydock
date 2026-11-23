@@ -47,10 +47,11 @@ import java.util.stream.Collectors;
  *
  * <p>What a removal would lose is worked out before the dialog opens:
  * uncommitted and untracked files, and commits not merged. "Merged" counts
- * the branch's PR recorded as merged, not only ancestry, because a squash
- * or rebase merge leaves commits "ahead" of main that are merged all the
- * same. A status that cannot be read never reads as clean: it blocks the
- * removal instead.</p>
+ * the branch's PR recorded as merged in the session's persisted state --
+ * which the pull-request poll writes as it observes the merge -- not only
+ * ancestry, because a squash or rebase merge leaves commits "ahead" of main
+ * that are merged all the same. A status that cannot be read never reads as
+ * clean: it blocks the removal instead.</p>
  *
  * <p>The session's tasks are snapshotted before the dialog too, and on
  * acceptance their completions and run receipts commit BEFORE the session

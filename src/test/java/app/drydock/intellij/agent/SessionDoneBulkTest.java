@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -70,6 +71,17 @@ class SessionDoneBulkTest {
                 worktree(MAIN, "main", true, false, false, false, false),
                 worktree(FIX, "fix-allocation-profile", false, false, false, false, false));
         assertTrue(SessionDoneBulk.select(List.of(session(FIX)), unmerged, ignored -> false).isEmpty());
+    }
+
+    @Test
+    void aSessionWhosePersistedPullRequestIsMergedIsDoneEvenWhenAncestrySaysAhead() {
+        // A squash or rebase merge leaves the commits "ahead" of the base;
+        // the persisted MERGED state is what counts the work as landed.
+        ManagedAgentSession squashMerged = session(FIX).withPr(PrState.MERGED, Optional.of(7));
+        List<Worktree> unmerged = List.of(
+                worktree(MAIN, "main", true, false, false, false, false),
+                worktree(FIX, "fix-allocation-profile", false, false, false, false, false));
+        assertEquals(1, SessionDoneBulk.select(List.of(squashMerged), unmerged, ignored -> false).size());
     }
 
     @Test
