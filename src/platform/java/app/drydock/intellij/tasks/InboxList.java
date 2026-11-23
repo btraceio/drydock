@@ -52,10 +52,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * The Attention Inbox's list: one header per non-empty {@link Group}, its
@@ -125,6 +127,13 @@ final class InboxList extends JBList<InboxList.Entry> {
     private final Actions actions;
     private Inbox inbox;
     private boolean tagsHidden;
+    /**
+     * The shown Jira group listings' issue key → priority name, fed by the
+     * panel from its gather inputs; the priority badge of a mirrored task's
+     * row reads it at paint time. Map::of until the panel says — a lookup
+     * that answers nothing badges no row.
+     */
+    private volatile Supplier<Map<String, Optional<String>>> jiraPriorities = Map::of;
 
     InboxList(Actions actions) {
         this.actions = Objects.requireNonNull(actions, "actions");
@@ -193,6 +202,15 @@ final class InboxList extends JBList<InboxList.Entry> {
         inbox = next;
         tagsHidden = hideTags;
         rebuild(selectedKeys);
+    }
+
+    /**
+     * Feeds the priority-badge lookup: the panel's supplier over its gather
+     * inputs. Called once, at construction; the supplier is read at paint
+     * time, so each paint sees the listings the last gather answered.
+     */
+    void jiraPriorities(Supplier<Map<String, Optional<String>>> jiraPriorities) {
+        this.jiraPriorities = Objects.requireNonNull(jiraPriorities, "jiraPriorities");
     }
 
     /** The selected rows' items, in list order; headers and toggles select nothing. */
@@ -635,7 +653,14 @@ final class InboxList extends JBList<InboxList.Entry> {
                     if (!selected && needs) {
                         background = NEEDS_BACKGROUND;
                     }
-                    rowTitle.setIcon(icon(item));
+                    // The Jira priority badge rides a task row's own icon when one
+                    // of its mirrors names a Jira ticket with a known priority.
+                    Optional<TaskTreeRenderer.PriorityKind> jiraPriority =
+                            item instanceof TaskItem task
+                                    ? TaskTreeRenderer.jiraMirrorPriority(task.row().mirrors(),
+                                            jiraPriorities.get())
+                                    : Optional.empty();
+                    rowTitle.setIcon(TaskTreeRenderer.withPriorityBadge(icon(item), jiraPriority));
                     rowTitle.setText(item.title());
                     rowTitle.setForeground(foreground);
                     Optional<PullRequestLabel> pr = pullRequestLabel(item);

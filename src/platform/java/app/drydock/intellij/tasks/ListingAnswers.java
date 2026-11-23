@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -65,5 +66,15 @@ final class ListingAnswers {
     /** Forgets every shown answer. */
     void forgetAll() {
         shown.clear();
+    }
+
+    /**
+     * Every shown listing answer, whatever its source. The priority-badge
+     * fold in {@link TaskTreeInputs} walks these to collect the shown Jira
+     * group listings' issues; order is unspecified and irrelevant — two
+     * groups listing one ticket name it the same priority.
+     */
+    List<Object> shownListings() {
+        return List.copyOf(shown.values());
     }
 }

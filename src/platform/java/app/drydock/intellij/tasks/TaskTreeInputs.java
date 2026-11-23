@@ -311,6 +311,24 @@ final class TaskTreeInputs implements AutoCloseable {
         lateData = Objects.requireNonNull(callback, "callback");
     }
 
+    /**
+     * Every shown Jira group listing's issue key to its priority name, the
+     * badge lookup for a mirrored task's row. Pure memory: the listing
+     * answers are the cache the gather already fills, so the fold never
+     * fetches. A ticket whose group listing has not loaded yet — its group
+     * collapsed, or the ticket matches no group's JQL — is absent, and the
+     * row wears no badge until the listing that names it arrives.
+     */
+    Map<String, Optional<String>> jiraPriorities() {
+        Map<String, Optional<String>> byKey = new HashMap<>();
+        for (Object answer : listingAnswers.shownListings()) {
+            if (answer instanceof JiraIssueListing.Listed listed) {
+                listed.issues().forEach(issue -> byKey.put(issue.key(), issue.priority()));
+            }
+        }
+        return byKey;
+    }
+
     /** Forgets every cached Jira listing, so the next gather re-queries each project. */
     void invalidateJira() {
         jira.invalidate();

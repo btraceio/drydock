@@ -423,6 +423,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         tree.setCellRenderer(renderer);
         // A session's PR badge arrives after the gather that asked for it.
         inputs.onLateData(() -> requestRebuild(false));
+        // A task row's Jira priority badge reads the same gather's shown listings.
+        inbox.jiraPriorities(inputs::jiraPriorities);
         // The first read runs git once per project; a blank "Nothing to show"
         // meanwhile looked like a broken window.
         tree.getEmptyText().setText("Loading Drydock projects…");

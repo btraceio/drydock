@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="-2 -2 16 16">
+  <!-- Jira priority, high: a red arrow pointing down. -->
+  <path d="M6 10.5 9.5 4.5 H2.5 Z" fill="#F85149" stroke="#F85149" stroke-width="1" stroke-linejoin="round"/>
+</svg>
