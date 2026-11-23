@@ -113,11 +113,6 @@ public final class SessionDonePlan {
                 && (worktree.merged() || prMerged || worktree.prunable() || worktree.detached());
     }
 
-    /** The ancestry-and-worktree form alone: no pull-request state consulted. */
-    public static boolean doneSession(WorktreeService.Worktree worktree) {
-        return doneSession(worktree, false);
-    }
-
     /** Under the bulk dialog's "Forget task only". */
     public static String bulkForgetDetail() {
         return "Removes the tasks from Drydock. Worktrees and branches stay.";

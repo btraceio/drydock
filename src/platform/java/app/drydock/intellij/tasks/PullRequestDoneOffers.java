@@ -13,6 +13,7 @@ import com.intellij.notification.Notification;
 import com.intellij.notification.NotificationAction;
 import com.intellij.notification.NotificationGroupManager;
 import com.intellij.notification.NotificationType;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.text.StringUtil;
 
@@ -39,6 +40,8 @@ import java.util.concurrent.ConcurrentHashMap;
 final class PullRequestDoneOffers {
 
     static final String GROUP = "Drydock pull requests";
+
+    private static final Logger LOG = Logger.getInstance(PullRequestDoneOffers.class);
 
     /** One pending offer: the session, and its finished pull request. */
     record Offer(ManagedSessionId sessionId, String displayName, int number, boolean merged) {
@@ -134,19 +137,29 @@ final class PullRequestDoneOffers {
             if (pullRequest != null && pullRequest.state() == PrLifecycle.MERGED
                     && session.prState() != PrState.MERGED) {
                 DrydockStartupActivity.sessions(project)
-                        .recordPullRequestMerged(session.id(), pullRequest.number());
+                        .recordPullRequestMerged(session.id(), pullRequest.number())
+                        .whenComplete((updated, failure) -> {
+                            if (failure != null) {
+                                LOG.debug("PR-merge persist failed for " + session.id(), failure);
+                            }
+                        });
             }
         }
+    }
+
+    /** Applies the freshest poll result to the session passed to the Done dialog. */
+    static ManagedAgentSession sessionForDone(ManagedAgentSession session, Offer offer) {
+        return offer.merged() ? session.withPr(PrState.MERGED, Optional.of(offer.number())) : session;
     }
 
     /**
      * EDT. Opens the Done flow for the session as it is now, from the
      * balloon or the row's {@code Done…} link; a session
-     * already gone does nothing. The dialog reads the session's persisted PR
-     * state, which {@link #persistMerged} keeps current as the poll observes
-     * the merge, so a squash or rebase merge, whose commits git still counts
-     * as ahead, is not warned about as unmerged work. A closed PR keeps that
-     * warning.
+     * already gone does nothing. A freshly polled merged offer carries its
+     * PR state into the dialog while {@link #persistMerged} completes the
+     * state-store update asynchronously, so a squash or rebase merge, whose
+     * commits git still counts as ahead, is not warned about as unmerged work.
+     * A closed PR keeps that warning.
      */
     static void done(Project project, Offer offer) {
         if (project.isDisposed()) {
@@ -156,6 +169,6 @@ final class PullRequestDoneOffers {
                 .stream()
                 .filter(session -> session.id().equals(offer.sessionId()))
                 .findFirst()
-                .ifPresent(session -> SessionCommandHandlers.done(project, session));
+                .ifPresent(session -> SessionCommandHandlers.done(project, sessionForDone(session, offer)));
     }
 }

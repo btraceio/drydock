@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -20,6 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class PullRequestDoneOffersTest {
 
@@ -47,6 +49,23 @@ class PullRequestDoneOffersTest {
                 Set.of());
         assertEquals(List.of(new PullRequestDoneOffers.Offer(merged.id(), "merged", 3, true),
                 new PullRequestDoneOffers.Offer(closed.id(), "closed", 4, false)), due);
+    }
+
+    @Test
+    void theDoneDialogUsesTheFreshlyPolledMergedStateBeforePersistence() {
+        ManagedAgentSession session = session("merged");
+        PullRequestDoneOffers.Offer offer = new PullRequestDoneOffers.Offer(session.id(), "merged", 17, true);
+
+        assertEquals(session.withPr(PrState.MERGED, Optional.of(17)),
+                PullRequestDoneOffers.sessionForDone(session, offer));
+    }
+
+    @Test
+    void anUnmergedDoneOfferKeepsTheStoredSessionUnchanged() {
+        ManagedAgentSession session = session("closed");
+        PullRequestDoneOffers.Offer offer = new PullRequestDoneOffers.Offer(session.id(), "closed", 18, false);
+
+        assertSame(session, PullRequestDoneOffers.sessionForDone(session, offer));
     }
 
     @Test

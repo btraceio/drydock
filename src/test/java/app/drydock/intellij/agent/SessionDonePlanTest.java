@@ -102,11 +102,11 @@ class SessionDonePlanTest {
 
     @Test
     void aDoneSessionIsOneWhoseWorktreeWorkHasLanded() {
-        assertTrue(SessionDonePlan.doneSession(worktree(false, false, true, false, false)));
-        assertTrue(SessionDonePlan.doneSession(worktree(false, false, false, true, false)));
-        assertTrue(SessionDonePlan.doneSession(worktree(false, false, false, false, true)));
+        assertTrue(SessionDonePlan.doneSession(worktree(false, false, true, false, false), false));
+        assertTrue(SessionDonePlan.doneSession(worktree(false, false, false, true, false), false));
+        assertTrue(SessionDonePlan.doneSession(worktree(false, false, false, false, true), false));
         // A merely idle session on an unmerged branch is not done.
-        assertFalse(SessionDonePlan.doneSession(worktree(false, false, false, false, false)));
+        assertFalse(SessionDonePlan.doneSession(worktree(false, false, false, false, false), false));
     }
 
     @Test
@@ -121,8 +121,8 @@ class SessionDonePlanTest {
 
     @Test
     void theMainCheckoutAndALockedWorktreeAreNeverDone() {
-        assertFalse(SessionDonePlan.doneSession(worktree(true, false, true, false, false)));
-        assertFalse(SessionDonePlan.doneSession(worktree(false, true, true, false, false)));
+        assertFalse(SessionDonePlan.doneSession(worktree(true, false, true, false, false), false));
+        assertFalse(SessionDonePlan.doneSession(worktree(false, true, true, false, false), false));
     }
 
     @Test
