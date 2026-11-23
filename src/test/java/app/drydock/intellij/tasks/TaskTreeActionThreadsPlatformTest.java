@@ -220,14 +220,25 @@ public class TaskTreeActionThreadsPlatformTest extends BasePlatformTestCase {
         AnAction newDelayed = stub("New Delayed");
         AnAction refreshTasks = stub("Refresh Tasks");
         AnAction addRemote = stub("Add Remote Repository…");
+        AnAction startGraph = stub("Start Graph");
         List<Path> jiraQueries = new ArrayList<>();
         TaskTreePanel.TreeMenu menu = new TaskTreePanel.TreeMenu(actions, addRemote, delayed, newDelayed,
                 refreshTasks,
                 root -> {
             jiraQueries.add(root);
             return false;
-        }, () -> List.<TaskNode>of(), () -> TaskTreePanel.TaskLayer.EMPTY, () -> null);
+        }, () -> List.<TaskNode>of(), () -> TaskTreePanel.TaskLayer.EMPTY, () -> null, startGraph);
         assertEquals(ActionUpdateThread.BGT, menu.getActionUpdateThread());
+
+        // A selected graph header offers Start Graph alone; one of its tasks offers it ahead of its own actions.
+        InboxModel.Graph graph = new InboxModel.Graph("g", List.of(), List.of(), 0, false);
+        AnActionEvent graphHeader = event(SimpleDataContext.builder().add(GraphActions.SELECTED_GRAPH, graph));
+        assertEquals(List.of(startGraph), List.of(offEdt(() -> menu.getChildren(graphHeader))));
+        AnActionEvent graphTask = event(SimpleDataContext.builder().add(GraphActions.SELECTED_GRAPH, graph)
+                .add(DelayedTaskActions.SELECTED_TASK, delayedRow()));
+        AnAction[] withGraph = offEdt(() -> menu.getChildren(graphTask));
+        assertSame(startGraph, withGraph[0]);
+        assertEquals(delayed.length + 1, withGraph.length);
 
         // A delayed-task row carries its own layer's actions.
         AnActionEvent delayedRow = event(SimpleDataContext.builder()

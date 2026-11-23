@@ -57,6 +57,7 @@ import java.util.Objects;
 import java.util.function.ToIntFunction;
 import java.util.function.Function;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -220,13 +221,14 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 issue.issue().url().ifPresent(this::paintMirroredTask);
             }
             case TaskNode.JiraIssueRow jira -> {
-                setIcon(JIRA_ICON);
+                setIcon(jiraRowIcon(jira.issue()));
                 append(issueText(jira.issue()));
                 if (!jira.issue().labels().isEmpty()) {
                     append("  " + String.join(", ", jira.issue().labels()),
                             SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 }
-                setToolTipText("Jira issue " + jira.issue().key());
+                setToolTipText("Jira issue " + jira.issue().key()
+                        + jira.issue().priority().map(name -> " · priority " + name).orElse(""));
                 paintMirroredTask(jira.issue().url());
             }
             case PullRequestRow pullRequest -> paintPullRequest(pullRequest.pullRequest(),
@@ -258,6 +260,74 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
     /** Pure. A Jira row's text: {@code <KEY> <summary>}. */
     static String issueText(JiraIssue issue) {
         return issue.key() + " " + issue.summary();
+    }
+
+    /** How a priority name maps to a badge colour. */
+    enum PriorityKind { HIGH, MEDIUM, LOW, NEUTRAL }
+
+    static final Icon PRIORITY_HIGH_ICON = IconLoader.getIcon("/icons/priorityHigh.svg", TaskTreeRenderer.class);
+    static final Icon PRIORITY_MEDIUM_ICON = IconLoader.getIcon("/icons/priorityMedium.svg", TaskTreeRenderer.class);
+    static final Icon PRIORITY_LOW_ICON = IconLoader.getIcon("/icons/priorityLow.svg", TaskTreeRenderer.class);
+    static final Icon PRIORITY_NEUTRAL_ICON = IconLoader.getIcon("/icons/priorityNeutral.svg", TaskTreeRenderer.class);
+
+    /**
+     * Pure. The badge colour of a Jira priority name: Jira's five default
+     * names map to their colour (red for Highest/High, amber for Medium,
+     * green for Low/Lowest) and any other name — sites define custom
+     * priorities with arbitrary names — gets the neutral mark. Empty only
+     * for a blank name; an issue without a priority is decided by the
+     * caller, which composes no badge at all.
+     */
+    static Optional<PriorityKind> priorityKind(String priority) {
+        return switch (priority.strip().toLowerCase(Locale.ROOT)) {
+            case "highest", "high" -> Optional.of(PriorityKind.HIGH);
+            case "medium", "middle" -> Optional.of(PriorityKind.MEDIUM);
+            case "low", "lowest" -> Optional.of(PriorityKind.LOW);
+            case "" -> Optional.empty();
+            default -> Optional.of(PriorityKind.NEUTRAL);
+        };
+    }
+
+    /** The badge glyph of one priority class; dark variants: {@code priority*_dark.svg}. */
+    static Icon priorityBadge(PriorityKind kind) {
+        return switch (kind) {
+            case HIGH -> PRIORITY_HIGH_ICON;
+            case MEDIUM -> PRIORITY_MEDIUM_ICON;
+            case LOW -> PRIORITY_LOW_ICON;
+            case NEUTRAL -> PRIORITY_NEUTRAL_ICON;
+        };
+    }
+
+    /**
+     * Pure over the static glyphs. {@code base} with the priority badge
+     * composed after it; {@code base} itself when the row carries no
+     * priority — an unbadged row keeps exactly the icon it had.
+     */
+    static Icon withPriorityBadge(Icon base, Optional<PriorityKind> priority) {
+        return priority.map(kind -> rowIcon(base, priorityBadge(kind))).orElse(base);
+    }
+
+    /** Pure. A Jira issue row's icon: the ticket mark, badged with its priority when it names one. */
+    static Icon jiraRowIcon(JiraIssue issue) {
+        return withPriorityBadge(JIRA_ICON, issue.priority().flatMap(TaskTreeRenderer::priorityKind));
+    }
+
+    /**
+     * Pure. The priority badge of a mirrored task's row: the first Jira
+     * ticket in {@code mirrors} whose priority a shown group listing has
+     * answered. Empty when no mirror is a Jira address, or its ticket's
+     * listing has not loaded — the badge waits for the listing rather
+     * than fetching.
+     */
+    static Optional<PriorityKind> jiraMirrorPriority(List<String> mirrors,
+            Map<String, Optional<String>> jiraPriorities) {
+        return mirrors.stream()
+                .map(TaskMirror::jiraKeyOf)
+                .flatMap(Optional::stream)
+                .findFirst()
+                .map(jiraPriorities::get)
+                .orElse(Optional.empty())
+                .flatMap(TaskTreeRenderer::priorityKind);
     }
 
     /**

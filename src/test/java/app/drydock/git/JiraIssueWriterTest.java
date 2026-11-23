@@ -1,6 +1,7 @@
 package app.drydock.git;
 
 import app.drydock.state.json.JsonParser;
+import app.drydock.state.json.JsonValue.JsonArray;
 import app.drydock.state.json.JsonValue.JsonObject;
 import app.drydock.state.json.JsonValue.JsonString;
 
@@ -349,6 +350,48 @@ class JiraIssueWriterTest {
         } finally {
             other.stop(0);
         }
+    }
+
+    @Test
+    void addsALabelWithoutTouchingTheExistingOnes() {
+        answerAll(204, "");
+
+        assertInstanceOf(JiraIssueWriter.Labeled.class,
+                writer.addLabel(dataCenter(), SECRET, "PROJ-7", "triaged"));
+
+        assertEquals(1, requests.size());
+        Captured put = requests.get(0);
+        assertEquals("PUT", put.method());
+        assertEquals("/rest/api/2/issue/PROJ-7", put.path());
+        assertEquals("Bearer " + SECRET, put.authorization());
+        // Jira's edit shape: update is an OBJECT keyed by field name; add
+        // holds the plain label string. There is no /labels sub-resource.
+        JsonObject root = (JsonObject) JsonParser.parse(put.body());
+        JsonObject update = (JsonObject) root.get("update");
+        JsonArray ops = (JsonArray) update.get("labels");
+        assertEquals(new JsonString("triaged"), ((JsonObject) ops.elements().get(0)).get("add"));
+    }
+
+    @Test
+    void aRefusedLabelCarriesJirasOwnReasonsAndNeverTheSecret() {
+        answerAll(403, "{\"errorMessages\":[\"no permission to edit " + SECRET + "\"]}");
+
+        JiraIssueWriter.LabelFailed failed = assertInstanceOf(JiraIssueWriter.LabelFailed.class,
+                writer.addLabel(dataCenter(), SECRET, "PROJ-7", "triaged"));
+
+        assertTrue(failed.message().startsWith("Jira refused the request"), failed.message());
+        assertFalse(failed.message().contains(SECRET), failed.message());
+    }
+
+    @Test
+    void badLabelInputIsRefusedBeforeAnyRequest() {
+        answerAll(204, "");
+
+        assertInstanceOf(JiraIssueWriter.LabelFailed.class,
+                writer.addLabel(dataCenter(), SECRET, "", "triaged"), "a blank issue key is refused");
+        assertInstanceOf(JiraIssueWriter.LabelFailed.class,
+                writer.addLabel(dataCenter(), SECRET, "PROJ-7", " "), "a blank label is refused");
+        assertEquals(0, requests.size());
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {

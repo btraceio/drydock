@@ -56,6 +56,15 @@
         <projectService
                 serviceImplementation="app.drydock.intellij.tasks.InboxViewState"/>
 
+        <!-- The batch triage behind the Issues nodes' Triage Untriaged action:
+             the per-project queue of triage sessions and the in-flight
+             identity sets that keep a second run from double-queueing an
+             issue. Declarative because its only constructor argument is the
+             project; disposing it on project close drops the queue (the
+             launched sessions are ordinary sessions and survive). -->
+        <projectService
+                serviceImplementation="app.drydock.intellij.tasks.BatchTriageService"/>
+
         <!-- The session host's remembered selection: the last intentionally
              shown session id only, in the workspace file. -->
         <projectService

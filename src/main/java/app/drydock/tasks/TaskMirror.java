@@ -179,6 +179,19 @@ public final class TaskMirror {
     }
 
     /**
+     * The Jira ticket key a mirror address points at ({@code PROJ-123}),
+     * or empty for anything else — a GitHub mirror, a plain URL, or a
+     * malformed address. The key joins a task's mirror to the Jira
+     * listings' per-issue data.
+     */
+    public static Optional<String> jiraKeyOf(String url) {
+        return path(url).flatMap(path -> {
+            Matcher jira = JIRA_BROWSE.matcher(path);
+            return jira.matches() ? Optional.of(jira.group(1)) : Optional.empty();
+        });
+    }
+
+    /**
      * Every recorded mirror address, normalized, to the task that records
      * it: the issue-to-task half of the link. Should two tasks record the
      * same address, the first in snapshot order keeps it.

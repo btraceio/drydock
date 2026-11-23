@@ -27,15 +27,19 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
- * Creates the Jira ticket a Drydock task is mirrored into, and stores the
- * task's metadata on it as an issue property. The only Jira write in the
+ * Creates the Jira ticket a Drydock task is mirrored into, stores the
+ * task's metadata on it as an issue property, adds Blocks links between
+ * tickets, and adds a label to an issue. The only Jira write in the
  * app; {@link JiraService} stays read-only. It shares that class's rules:
  * https only, the secret only in the {@code Authorization} header, every
  * message redacted, redirects never followed, every request bounded.
  *
- * <p>Both deployments are served by the v2 issue API
- * ({@code POST /rest/api/2/issue} and
- * {@code PUT /rest/api/2/issue/<key>/properties/<property>}), which takes a
+ * <p>Both deployments are served by the v2 issue API: ticket creation
+ * ({@code POST /rest/api/2/issue}), the metadata property
+ * ({@code PUT /rest/api/2/issue/<key>/properties/<property>}), issue links
+ * ({@code POST /rest/api/2/issueLink}) and the label edit
+ * ({@code PUT /rest/api/2/issue/<key>} with an {@code update.labels} {@code
+ * add} operation -- there is no {@code /labels} sub-resource), which takes a
  * wiki-markup description string on Cloud and Data Center alike. Blocking:
  * the caller runs it off the EDT.</p>
  */
@@ -141,6 +145,28 @@ public final class JiraIssueWriter implements AutoCloseable {
     /** The request was sent but whether the link exists is unknown; never retried. */
     public record LinkUncertain(String message) implements LinkOutcome {
         public LinkUncertain {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** What adding one label to an issue resolved to. */
+    public sealed interface LabelOutcome permits Labeled, LabelFailed, LabelUncertain {
+    }
+
+    /** Jira accepted the label (or it was already present: the add is idempotent). */
+    public record Labeled() implements LabelOutcome {
+    }
+
+    /** Jira confirmed it did not add the label (or it was refused before sending). */
+    public record LabelFailed(String message) implements LabelOutcome {
+        public LabelFailed {
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** The request was sent but whether the label now exists is unknown; never retried here. */
+    public record LabelUncertain(String message) implements LabelOutcome {
+        public LabelUncertain {
             Objects.requireNonNull(message, "message");
         }
     }
@@ -332,6 +358,67 @@ public final class JiraIssueWriter implements AutoCloseable {
         }
         LOG.log(Level.WARNING, "Jira issue link at " + baseUrl + " answered HTTP " + response.statusCode());
         return new LinkFailed(JiraService.redact(linkFailure(response.statusCode(), response.body()), secret, auth));
+    }
+
+    /**
+     * Adds {@code label} to {@code issueKey} on the site {@code connection}
+     * addresses, once, without retry: {@code PUT
+     * /rest/api/2/issue/<key>} with an {@code update.labels} {@code add}
+     * operation, which leaves the issue's other labels untouched and is idempotent for a
+     * label already present. A 403 or any other status is a confirmed
+     * failure; a timeout or interrupt after sending is uncertain.
+     */
+    public LabelOutcome addLabel(JiraConnection connection, String secret, String issueKey, String label) {
+        Optional<String> refusal = writeRefusal(connection, secret);
+        if (refusal.isPresent()) {
+            return new LabelFailed(refusal.get());
+        }
+        if (issueKey == null || issueKey.isBlank()) {
+            return new LabelFailed("Name the Jira issue to label");
+        }
+        if (label == null || label.isBlank()) {
+            return new LabelFailed("Name the label to add");
+        }
+        String baseUrl = connection.baseUrl();
+        String auth = JiraService.authorization(connection, secret);
+        String payload = JsonWriter.write(JsonObject.empty().put("update", JsonObject.empty()
+                .put("labels", JsonArray.of(List.of(JsonObject.empty().put("add", new JsonString(label)))))));
+        HttpResponse<String> response;
+        try {
+            response = client().send(request(baseUrl + "/rest/api/2/issue/"
+                            + URLEncoder.encode(issueKey, StandardCharsets.UTF_8), auth)
+                    .PUT(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+        } catch (HttpTimeoutException e) {
+            log("label", baseUrl, e, secret, auth);
+            return new LabelUncertain("Jira did not answer within " + timeoutSeconds() + "s; whether " + issueKey
+                    + " now carries the label " + label + " is unknown -- check the issue before retrying");
+        } catch (IOException e) {
+            log("label", baseUrl, e, secret, auth);
+            return new LabelFailed(JiraService.redact("Could not reach Jira at " + baseUrl + " ("
+                    + e.getClass().getSimpleName() + ")", secret, auth));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new LabelUncertain("Labeling " + issueKey + " was interrupted; whether the label " + label
+                    + " was added is unknown -- check the issue before retrying");
+        }
+        if (response.statusCode() == 204 || response.statusCode() == 200) {
+            return new Labeled();
+        }
+        LOG.log(Level.WARNING, "Jira issue label at " + baseUrl + " answered HTTP " + response.statusCode());
+        return new LabelFailed(JiraService.redact(labelFailure(response.statusCode(), response.body(), label),
+                secret, auth));
+    }
+
+    private static String labelFailure(int status, String body, String label) {
+        return switch (status) {
+            case 400 -> JiraSearchResponse.errorMessages(body)
+                    .map(messages -> "Jira refused the label " + label + ": " + messages)
+                    .orElse("Jira refused the label " + label + " (HTTP 400)");
+            case 403 -> "Jira refused the request (HTTP 403); the account may not edit this issue";
+            case 404 -> "Jira did not find the issue (HTTP 404)";
+            default -> createFailure(status, body);
+        };
     }
 
     /**

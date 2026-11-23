@@ -57,11 +57,13 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.function.Supplier;
 
 /**
  * The Attention Inbox's list: one header per non-empty {@link Group}, its
@@ -154,6 +156,14 @@ final class InboxList extends JBList<InboxList.Entry> {
     private boolean tagsHidden;
     /** Whether dependency graphs sit under "Ready to start" and leave the state groups the tasks that belong to one. */
     private boolean graphView = true;
+
+    /**
+     * The shown Jira group listings' issue key → priority name, fed by the
+     * panel from its gather inputs; the priority badge of a mirrored task's
+     * row reads it at paint time. Map::of until the panel says — a lookup
+     * that answers nothing badges no row.
+     */
+    private volatile Supplier<Map<String, Optional<String>>> jiraPriorities = Map::of;
 
     InboxList(Actions actions) {
         this.actions = Objects.requireNonNull(actions, "actions");
@@ -263,6 +273,15 @@ final class InboxList extends JBList<InboxList.Entry> {
             collapsedGraphTasks.addAll(members);
         }
         rebuild(selectedItems().stream().map(InboxList::key).toList());
+    }
+
+    /**
+     * Feeds the priority-badge lookup: the panel's supplier over its gather
+     * inputs. Called once, at construction; the supplier is read at paint
+     * time, so each paint sees the listings the last gather answered.
+     */
+    void jiraPriorities(Supplier<Map<String, Optional<String>>> jiraPriorities) {
+        this.jiraPriorities = Objects.requireNonNull(jiraPriorities, "jiraPriorities");
     }
 
     /** The selected rows' items, in list order; headers and toggles select nothing. */
@@ -596,6 +615,16 @@ final class InboxList extends JBList<InboxList.Entry> {
     }
 
     /**
+     * A flagged session's chip when its group no longer says it: "flagged"
+     * on a row shown in Running. Empty otherwise -- the Flagged section's
+     * header already says it. Reads the carried row only.
+     */
+    static Optional<String> flaggedChip(Item item, GroupKind group) {
+        return group == GroupKind.RUNNING && item instanceof SessionItem session
+                && session.row().session().flagged() ? Optional.of("flagged") : Optional.empty();
+    }
+
+    /**
      * Whether the row is a watched session whose engagement needs the human:
      * it wears the Needs you background and the escalation badge. Only the
      * watched side -- that is where the human acts; the babysitter's row
@@ -706,6 +735,8 @@ final class InboxList extends JBList<InboxList.Entry> {
         private final JBLabel pullRequest = new JBLabel();
         private final JBLabel tag = new JBLabel();
         private final JBLabel windowTag = new JBLabel();
+        /** The flagged session's chip, for a row the Running section shows. */
+        private final JBLabel flagTag = new JBLabel();
         /** The babysitting engagement chip, in the editor's monospace so it reads as machine state. */
         private final JBLabel babysitTag = new JBLabel();
         /** A graph task's dependency chip. */
@@ -725,6 +756,7 @@ final class InboxList extends JBList<InboxList.Entry> {
             trailing.add(pullRequest, spaced);
             trailing.add(tag, spaced);
             trailing.add(windowTag, spaced);
+            trailing.add(flagTag, spaced);
             trailing.add(babysitTag, spaced);
             trailing.add(graphChip, spaced);
             trailing.add(startGraph, spaced);
@@ -732,6 +764,7 @@ final class InboxList extends JBList<InboxList.Entry> {
             startGraph.setFont(JBUI.Fonts.smallFont());
             tag.setFont(JBUI.Fonts.smallFont());
             windowTag.setFont(JBUI.Fonts.smallFont());
+            flagTag.setFont(JBUI.Fonts.smallFont());
             // The small font's size is already scaled; only the family changes.
             babysitTag.setFont(new Font(Font.MONOSPACED, Font.PLAIN, JBUI.Fonts.smallFont().getSize()));
             panel.add(center, BorderLayout.CENTER);
@@ -806,7 +839,14 @@ final class InboxList extends JBList<InboxList.Entry> {
                     if (!selected && needs) {
                         background = NEEDS_BACKGROUND;
                     }
-                    rowTitle.setIcon(icon(item));
+                    // The Jira priority badge rides a task row's own icon when one
+                    // of its mirrors names a Jira ticket with a known priority.
+                    Optional<TaskTreeRenderer.PriorityKind> jiraPriority =
+                            item instanceof TaskItem task
+                                    ? TaskTreeRenderer.jiraMirrorPriority(task.row().mirrors(),
+                                            jiraPriorities.get())
+                                    : Optional.empty();
+                    rowTitle.setIcon(TaskTreeRenderer.withPriorityBadge(icon(item), jiraPriority));
                     rowTitle.setText(item.title());
                     rowTitle.setForeground(foreground);
                     Optional<PullRequestLabel> pr = pullRequestLabel(item);
@@ -838,6 +878,15 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
                                 JBUI.Borders.empty(0, 4)));
                     });
+                    Optional<String> flag = row.group() == null ? Optional.empty() : flaggedChip(item, row.group().kind());
+                    flagTag.setVisible(flag.isPresent());
+                    flag.ifPresent(text -> {
+                        flagTag.setText(text);
+                        flagTag.setForeground(selected ? foreground : NamedColorUtil.getInactiveTextColor());
+                        flagTag.setBorder(BorderFactory.createCompoundBorder(
+                                JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : TAG_BORDER, 1),
+                                JBUI.Borders.empty(0, 4)));
+                    });
                     Optional<String> babysit = babysitChip(item);
                     babysitTag.setVisible(babysit.isPresent());
                     babysit.ifPresent(text -> {
@@ -857,7 +906,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 ? JBUI.CurrentTheme.Link.Foreground.ENABLED : NamedColorUtil.getInactiveTextColor());
                     });
                     trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent()
-                            || babysit.isPresent() || chip.isPresent());
+                            || flag.isPresent() || babysit.isPresent() || chip.isPresent());
                     panel.setBorder(JBUI.Borders.empty(0, row.node() == null ? 30 : 48 + 14 * row.node().depth(),
                             0, 12));
                 }

@@ -40,8 +40,9 @@ import java.util.Set;
  * <p>A session goes to the first group that takes it: Babysitting (a
  * babysitter whose engagement is active), Needs you
  * ({@link DelayedTaskRows#needsYou(TaskRow)}: a running session waiting
- * for the user, or a watched session its babysitter escalated), Flagged,
- * Running, else Idle. An assigned task in review
+ * for the user, or a watched session its babysitter escalated), Flagged
+ * (a flagged session that is not running -- a flagged one that runs goes
+ * to Running, its row wearing a flagged chip), Running, else Idle. An assigned task in review
  * does not pin its session here -- the task shows as its own row under
  * In review, and the session's group follows its dot alone. A task goes
  * by its presentation: Blocked, In review, Ready to start
@@ -383,7 +384,7 @@ final class InboxModel {
 
         Map<GroupKind, List<Item>> grouped = new EnumMap<>(GroupKind.class);
         for (Placed one : placed) {
-            if (!only.isEmpty() && !only.contains(one.kind())) {
+            if (!only.isEmpty() && !only.contains(one.kind()) && !matchesFlagTerm(only, one)) {
                 continue;
             }
             if (query.project().isPresent() && !one.item().project().map(ProjectRef::root)
@@ -586,6 +587,16 @@ final class InboxModel {
         return Optional.empty();
     }
 
+    /**
+     * Whether an item outside the group an {@code is:} term names still
+     * matches it: {@code is:flagged} admits a flagged session wherever it
+     * sits, since the flag follows the session and not the section.
+     */
+    private static boolean matchesFlagTerm(Set<GroupKind> only, Placed one) {
+        return only.contains(GroupKind.FLAGGED)
+                && one.item() instanceof SessionItem session && session.row().session().flagged();
+    }
+
     /** Every item in its group, in group order and then each group's own order. */
     private static List<Placed> place(Inputs in, boolean matchReferences) {
         Map<String, SessionAt> sessions = new LinkedHashMap<>();
@@ -635,7 +646,9 @@ final class InboxModel {
      * Babysitting before any other check, so it never mixes into the regular
      * groups whatever its dot says; a watched session whose engagement needs
      * the human (escalated) goes to Needs you -- an escalation is the
-     * babysitter asking for the human.
+     * babysitter asking for the human. Flagged takes a session only while it
+     * is not running: a running flagged one shows in Running (its row wears
+     * the flagged chip, the group header no longer says it).
      */
     static GroupKind sessionKind(TaskRow row) {
         if (row.babysit().filter(part -> part.role() == SessionBabysit.Role.BABYSITTER
@@ -645,7 +658,7 @@ final class InboxModel {
         if (DelayedTaskRows.needsYou(row) || row.babysit().filter(SessionBabysit::needsHuman).isPresent()) {
             return GroupKind.NEEDS_YOU;
         }
-        if (row.session().flagged()) {
+        if (row.session().flagged() && !row.running()) {
             return GroupKind.FLAGGED;
         }
         return row.running() ? GroupKind.RUNNING : GroupKind.IDLE;

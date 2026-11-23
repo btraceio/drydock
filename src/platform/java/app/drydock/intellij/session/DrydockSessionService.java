@@ -28,6 +28,7 @@ import app.drydock.delayedtasks.TaskLaunchResources;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.PrState;
 import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
@@ -2179,6 +2180,44 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         .toList());
             });
             DrydockSessionsListener.publishChanged();
+            return updated[0];
+        }, executor);
+    }
+
+    /**
+     * Records that the session's pull request merged, as one state transform
+     * on the plugin's background executor. The persisted {@code MERGED} state
+     * is what the Done flow and the bulk cleanup read as "the PR is merged";
+     * a squash or rebase merge leaves commits git still counts as ahead of
+     * the base, so without it those flows would warn about merged work. A
+     * no-op that skips the republish when the state is already MERGED, so
+     * the poll passes that re-observe the merge every gather cannot buy
+     * endless task-tree rebuilds. Completes exceptionally when the session
+     * no longer exists.
+     */
+    public CompletableFuture<ManagedAgentSession> recordPullRequestMerged(ManagedSessionId sessionId, int number) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return initialization.thenApplyAsync(unused -> {
+            ManagedAgentSession[] updated = new ManagedAgentSession[1];
+            boolean[] changed = new boolean[1];
+            stateStore.get().update(state -> {
+                ManagedAgentSession existing = state.sessions().stream()
+                        .filter(candidate -> candidate.id().equals(sessionId))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("The session no longer exists"));
+                if (existing.prState() == PrState.MERGED) {
+                    updated[0] = existing;
+                    return state;
+                }
+                updated[0] = existing.withPr(PrState.MERGED, Optional.of(number));
+                changed[0] = true;
+                return state.withSessions(state.sessions().stream()
+                        .map(candidate -> candidate.id().equals(sessionId) ? updated[0] : candidate)
+                        .toList());
+            });
+            if (changed[0]) {
+                DrydockSessionsListener.publishChanged();
+            }
             return updated[0];
         }, executor);
     }

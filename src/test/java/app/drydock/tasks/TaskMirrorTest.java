@@ -93,6 +93,10 @@ class TaskMirrorTest {
         assertEquals("PROJ-7", TaskMirror.label(jira));
         assertEquals("OPS_2-41", TaskMirror.label(dataCenter));
         assertEquals("elsewhere", TaskMirror.label("elsewhere"));
+        assertEquals(Optional.empty(), TaskMirror.jiraKeyOf(github));
+        assertEquals(Optional.of("PROJ-7"), TaskMirror.jiraKeyOf(jira));
+        assertEquals(Optional.of("OPS_2-41"), TaskMirror.jiraKeyOf(dataCenter));
+        assertEquals(Optional.empty(), TaskMirror.jiraKeyOf("not a url"));
         assertTrue(TaskMirror.hasMirror(List.of(github), TaskMirror.Kind.GITHUB));
         assertFalse(TaskMirror.hasMirror(List.of(github), TaskMirror.Kind.JIRA));
     }

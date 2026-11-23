@@ -10,6 +10,7 @@ import com.intellij.openapi.fileEditor.FileEditorProvider;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.testFramework.PlatformTestUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
+import com.intellij.terminal.JBTerminalWidget;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -108,6 +109,29 @@ public class SessionHostEditorLayoutPlatformTest extends BasePlatformTestCase {
         editor.refreshLayout();
         assertFalse(editor.primarySlot().getBorder().equals(editor.heldSlot().getBorder()));
         assertSame(pa.root(), editor.getPreferredFocusedComponent());
+    }
+
+    /**
+     * The platform fact the activation fix stands on: when the focused pane
+     * shows a live console, the editor's preferred focused component is the
+     * terminal panel — the one focusable keyboard target — and never the
+     * bare pane root a platform focus pass would otherwise steer into.
+     */
+    public void testPreferredFocusOfALiveConsoleIsTheTerminalPanel() throws Exception {
+        var started = registry.startArgv(a, Path.of(System.getProperty("java.io.tmpdir")),
+                List.of("/bin/sh", "-c", "sleep 30"), getProject(), owner);
+        waitFor(started::isDone);
+        var console = started.get(1, TimeUnit.SECONDS).console().orElseThrow();
+        controller.show(a);
+        SessionHostEditor editor = editor();
+        SessionPane pa = controller.paneFor(a);
+        pa.show(new SessionPaneFacts(SessionPaneFacts.State.KNOWN, "", Optional.empty(), false,
+                Optional.empty(), false, false), false);
+
+        JBTerminalWidget widget = console.getTerminalWidget();
+        assertNotNull(widget);
+        assertSame("the keyboard target is the terminal panel, not the pane root",
+                widget.getTerminalPanel(), editor.getPreferredFocusedComponent());
     }
 
     public void testReopenReattachesTheSamePanesAndRestoresTheFocusedSlot() {

@@ -3,7 +3,6 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
-import app.drydock.delayedtasks.DelayedTaskStart;
 import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
@@ -57,7 +56,6 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DataKey;
 import com.intellij.openapi.actionSystem.DataSink;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
-import com.intellij.openapi.actionSystem.ToggleAction;
 import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -67,14 +65,12 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.ui.Messages;
-import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.openapi.util.Disposer;
 
 import com.intellij.ui.JBColor;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SimpleColoredComponent;
-import com.intellij.ui.SimpleListCellRenderer;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.components.ActionLink;
@@ -149,9 +145,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The registered project the selected row belongs to; tree selections only. */
     public static final DataKey<SharedProject> SELECTED_PROJECT = DataKey.create("drydock.task.project");
 
-    /** The dependency graph the inbox selection is, or a task of. */
-    static final DataKey<InboxModel.Graph> SELECTED_GRAPH = DataKey.create("drydock.selectedGraph");
-
     /** The selected Tasks section (T20a), for its New Task action and the context menu. */
     static final DataKey<TasksSection> SELECTED_TASKS_SECTION =
             DataKey.create("drydock.task.tasksSection");
@@ -224,7 +217,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         @Override
         public void startGraph(InboxModel.Graph graph) {
-            TaskTreePanel.this.startGraph(graph);
+            GraphActions.start(project, graph, inbox);
         }
 
         @Override
@@ -232,46 +225,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             viewState().setToggles(inbox.toggles());
         }
     });
-    /**
-     * Starts a graph: its one open outcome, or the one the user picks from a popup. Nothing happens for a
-     * graph with no open outcome (a stuck graph has none); the start flow itself shows progress and refusals.
-     */
-    private void startGraph(InboxModel.Graph graph) {
-        List<InboxModel.TaskItem> targets = graph.startTargets();
-        if (targets.size() == 1) {
-            DelayedTaskStart.start(project, targets.get(0).row());
-        } else if (!targets.isEmpty()) {
-            JBPopupFactory.getInstance().createPopupChooserBuilder(targets)
-                    .setTitle("Start the plan for which task?")
-                    .setRenderer(SimpleListCellRenderer.create("", InboxModel.TaskItem::title))
-                    .setItemChosenCallback(target -> DelayedTaskStart.start(project, target.row()))
-                    .createPopup().showInCenterOf(inbox);
-        }
-    }
-
-    /** The context-menu entry that starts the selected graph, offered whenever a graph or one of its tasks is selected. */
-    private final AnAction startGraphAction = new DumbAwareAction("Start Graph",
-            "Plan and start the whole graph through its outcome task", AllIcons.Actions.Execute) {
-        @Override
-        public @NotNull ActionUpdateThread getActionUpdateThread() {
-            return ActionUpdateThread.BGT;
-        }
-
-        @Override
-        public void update(@NotNull AnActionEvent event) {
-            InboxModel.Graph graph = event.getData(SELECTED_GRAPH);
-            event.getPresentation().setEnabled(graph != null && !graph.startTargets().isEmpty());
-        }
-
-        @Override
-        public void actionPerformed(@NotNull AnActionEvent event) {
-            InboxModel.Graph graph = event.getData(SELECTED_GRAPH);
-            if (graph != null) {
-                startGraph(graph);
-            }
-        }
-    };
-
     /** "Add open project" under the header while this window's project is not registered. */
     private final AddProjectBanner banner = new AddProjectBanner(new AddProjectBanner.Actions() {
         @Override
@@ -476,6 +429,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         tree.setCellRenderer(renderer);
         // A session's PR badge arrives after the gather that asked for it.
         inputs.onLateData(() -> requestRebuild(false));
+        // A task row's Jira priority badge reads the same gather's shown listings.
+        inbox.jiraPriorities(inputs::jiraPriorities);
         // The first read runs git once per project; a blank "Nothing to show"
         // meanwhile looked like a broken window.
         tree.getEmptyText().setText("Loading Drydock projects…");
@@ -883,6 +838,104 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
+        AnAction triageAll = new DumbAwareAction("Triage Untriaged…",
+                "Run the triage skill on every issue here that is not labeled 'triaged', N sessions at a time",
+                AllIcons.Actions.Execute) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                TaskActions.present(e, node instanceof GitHubNode || node instanceof JiraNode);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (selected == null || root == null || selected.isRemote()) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.triageGitHub(project, selected, root);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.triageJira(project, selected, root);
+                }
+            }
+        };
+        AnAction cancelTriage = new DumbAwareAction("Cancel Triage Batch",
+                "Stop launching triage sessions; the queued issues stay resumable",
+                AllIcons.Actions.Suspend) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                BatchTriageService service =
+                        e.getProject() == null ? null : e.getProject().getService(BatchTriageService.class);
+                TaskNode node = e.getData(SELECTED_NODE);
+                boolean active = service != null
+                        && (node instanceof GitHubNode && service.activeGitHub()
+                                || node instanceof JiraNode && service.activeJira());
+                TaskActions.present(e, active);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                if (selected == null) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.cancelGitHub(project, selected);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.cancelJira(project, selected);
+                }
+            }
+        };
+        AnAction resumeTriage = new DumbAwareAction("Resume Triage Batch…",
+                "Continue the paused batch triage from its stored queue",
+                AllIcons.Actions.Restart) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                TaskNode node = e.getData(SELECTED_NODE);
+                BatchTriageService service =
+                        e.getProject() == null ? null : e.getProject().getService(BatchTriageService.class);
+                boolean resumable = selected != null && service != null
+                        && (node instanceof GitHubNode
+                                && !service.activeGitHub()
+                                && BatchTriageService.hasPaused(selected.id(), "github")
+                                || node instanceof JiraNode
+                                        && !service.activeJira()
+                                        && BatchTriageService.hasPaused(selected.id(), "jira"));
+                TaskActions.present(e, resumable);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (selected == null || root == null || selected.isRemote()) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.resumeGitHub(project, selected, root);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.resumeJira(project, selected, root);
+                }
+            }
+        };
         // One repository-settings action for every row that offers it — an
         // issue, a project, a listings section, or a ghost node: it opens the
         // single sectioned dialog (Jira, GitHub, workspace box, agent
@@ -967,6 +1020,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
         menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
+        menuActions.put(TaskMenu.Item.TRIAGE_ALL, triageAll);
+        menuActions.put(TaskMenu.Item.CANCEL_TRIAGE, cancelTriage);
+        menuActions.put(TaskMenu.Item.RESUME_TRIAGE, resumeTriage);
         menuActions.put(TaskMenu.Item.REPOSITORY_SETTINGS, repositorySettings);
         menuActions.put(TaskMenu.Item.OPEN_IN_JIRA, JiraTreeActions.openInJira());
         menuActions.put(TaskMenu.Item.OPEN_MIRRORED_TASK, openMirroredTask);
@@ -993,7 +1049,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         AnAction addRemoteRepository = addRemoteRepositoryAction();
         TreeMenu treeMenu = new TreeMenu(menuActions, addRemoteRepository, delayedTaskActions,
                 newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
-                () -> displayedTasks, TaskTreePanel::watchedSnapshot, startGraphAction);
+                () -> displayedTasks, TaskTreePanel::watchedSnapshot, GraphActions.startAction(project, inbox));
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
         Disposer.register(this, popups);
         popups.register(tree, treeScroll.getViewport());
@@ -1014,25 +1070,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // button (TaskActions.toolbarActions).
         toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
-        toolbarActions.add(new ToggleAction("Group Tasks by Dependency Graph",
-                "Show tasks that depend on each other as one graph, with Start graph; off lists them by state",
-                AllIcons.Hierarchy.Subtypes) {
-            @Override
-            public boolean isSelected(@NotNull AnActionEvent event) {
-                return inbox.graphView();
-            }
-
-            @Override
-            public void setSelected(@NotNull AnActionEvent event, boolean state) {
-                inbox.setGraphView(state);
-                viewState().setByState(!state);
-            }
-
-            @Override
-            public @NotNull ActionUpdateThread getActionUpdateThread() {
-                return ActionUpdateThread.EDT;
-            }
-        });
+        toolbarActions.add(GraphActions.viewToggle(inbox, this::viewState));
         toolbarActions.add(windowFocusAction());
         toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
@@ -1357,15 +1395,6 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                  AnAction[] delayedTaskActions,
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
-                 Supplier<WatchedSnapshot> watched) {
-            this(actions, addRemoteRepository, delayedTaskActions, newDelayedTask, refreshTasksAction, jiraEnabled,
-                    displayed, tasks, watched, null);
-        }
-
-        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
-                 AnAction[] delayedTaskActions,
-                 AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
-                 Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched, @Nullable AnAction startGraph) {
             this.startGraph = startGraph;
             this.actions = actions;
@@ -1398,18 +1427,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // actions, and the Tasks node offers New Task over the T18a
             // form and the task store's fresh re-read -- everything else
             // keeps the session-layer menu it had.
-            boolean inGraph = startGraph != null && e.getData(SELECTED_GRAPH) != null;
-            if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
-                if (!inGraph) {
-                    return delayedTaskActions;
-                }
-                AnAction[] withGraph = new AnAction[delayedTaskActions.length + 1];
-                withGraph[0] = startGraph;
-                System.arraycopy(delayedTaskActions, 0, withGraph, 1, delayedTaskActions.length);
-                return withGraph;
+            AnAction[] graphMenu = GraphActions.menu(e, startGraph, delayedTaskActions);
+            if (graphMenu != null) {
+                return graphMenu;
             }
-            if (inGraph && e.getData(SELECTED_NODE) == null) {
-                return new AnAction[] {startGraph};
+            if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
+                return delayedTaskActions;
             }
             if (e.getData(SELECTED_TASKS_SECTION) != null) {
                 return new AnAction[] { newDelayedTask, refreshTasksAction };
@@ -1437,9 +1460,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
         // T20a: a task node is its own selection data -- the task-node
         // actions key on it; selected() answers only session-layer rows.
-        if (!browsing) {
-            inbox.selectedGraph().ifPresent(graph -> sink.set(SELECTED_GRAPH, graph));
-        }
+        inbox.selectedGraph().filter(graph -> !browsing).ifPresent(graph -> sink.set(GraphActions.SELECTED_GRAPH, graph));
         Object value = selectedValue();
         if (value instanceof DelayedTaskRow task) {
             sink.set(DelayedTaskActions.SELECTED_TASK, task);
@@ -2063,7 +2084,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             List<TaskNode> treeNodes = terms.isEmpty() && requestedFocus == null ? nodes
                     : TaskTreeModel.build(scoped);
             // A session whose pull request merged or closed is offered its
-            // Done flow once, by whichever window's pass sees it first.
+            // Done flow once, by whichever window's pass sees it first; the
+            // merge itself is persisted here, before the tree shows the
+            // Done link, so the dialog's merge check reads the same truth
+            // the badge renders.
+            PullRequestDoneOffers.persistMerged(project, gathered.sessions(), gathered.pullRequestsBySession());
             List<PullRequestDoneOffers.Offer> doneOffers =
                     PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(

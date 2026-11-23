@@ -99,15 +99,18 @@ public final class SessionDonePlan {
     /**
      * Pure: whether a session is done -- its worktree is a non-main,
      * non-locked linked worktree whose work has already landed: the branch
-     * merged (ancestry, or its pull request recorded as merged), or the
+     * merged (ancestry, or its pull request recorded as merged, or
+     * {@code prMerged} -- the session's persisted PR state, which the
+     * pull-request poll keeps current: a squash or rebase merge leaves
+     * commits "ahead" of the base that are merged all the same), or the
      * worktree prunable (its directory already gone) or detached, applied to
      * the worktree a session sits on. A merely idle
      * session on an unmerged branch is not done and is never touched by the
      * bulk cleanup; a main-checkout or locked worktree never counts either.
      */
-    public static boolean doneSession(WorktreeService.Worktree worktree) {
+    public static boolean doneSession(WorktreeService.Worktree worktree, boolean prMerged) {
         return !worktree.mainCheckout() && !worktree.locked()
-                && (worktree.merged() || worktree.prunable() || worktree.detached());
+                && (worktree.merged() || prMerged || worktree.prunable() || worktree.detached());
     }
 
     /** Under the bulk dialog's "Forget task only". */

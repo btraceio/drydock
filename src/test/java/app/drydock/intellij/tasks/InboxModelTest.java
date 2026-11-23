@@ -409,6 +409,40 @@ class InboxModelTest {
         assertEquals("Done today", inbox.groups().getLast().label());
     }
 
+    /** Flagged splits by the dot: running flagged sessions show in Running, stopped ones in Flagged. */
+    @Test
+    void aFlaggedSessionShowsInFlaggedOnlyWhileItIsNotRunning() {
+        alphaRows.add(session("Flagged running", true, Optional.of(SessionActivity.BUSY), true, NOW));
+        alphaRows.add(session("Flagged stopped", false, Optional.empty(), true, NOW));
+        alphaRows.add(session("Flagged waiting", true, Optional.of(SessionActivity.NEEDS_ATTENTION), true, NOW));
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(List.of(GroupKind.NEEDS_YOU, GroupKind.FLAGGED, GroupKind.RUNNING), kinds(inbox),
+                "only the stopped flagged session keeps the Flagged group");
+        assertEquals(List.of("Flagged waiting"), titles(inbox, GroupKind.NEEDS_YOU),
+                "Needs you still takes a running flagged session waiting for the user");
+        assertEquals(List.of("Flagged running"), titles(inbox, GroupKind.RUNNING));
+    }
+
+    /** {@code is:flagged} follows the session wherever its dot put it. */
+    @Test
+    void isFlaggedMatchesAFlaggedSessionWhateverItsGroup() {
+        alphaRows.add(session("Flagged running", true, Optional.of(SessionActivity.BUSY), true, NOW));
+        alphaRows.add(session("Flagged stopped", false, Optional.empty(), true, NOW));
+        alphaRows.add(running("Plain running", NOW));
+
+        Inbox flagged = inbox(new Query(Optional.empty(), "is:flagged"));
+        assertEquals(List.of(GroupKind.FLAGGED, GroupKind.RUNNING), kinds(flagged));
+        assertEquals(List.of("Flagged running"), titles(flagged, GroupKind.RUNNING));
+        assertEquals(List.of("Flagged stopped"), titles(flagged, GroupKind.FLAGGED));
+
+        assertEquals(List.of(GroupKind.RUNNING), kinds(inbox(new Query(Optional.empty(), "is:running"))),
+                "a flagged running session is a running one: is:running shows it");
+        assertEquals(List.of("Flagged running", "Plain running"),
+                titles(inbox(new Query(Optional.empty(), "is:running")), GroupKind.RUNNING));
+    }
+
     /** A review task is its own In-review row and leaves its session's group to the dot. */
     @Test
     void aStartedTaskRidesOnItsSessionAndAReviewTaskDoesNotPinIt() {

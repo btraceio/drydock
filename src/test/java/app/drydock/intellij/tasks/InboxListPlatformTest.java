@@ -555,6 +555,46 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 .endsWith(" · Babysitter of PR #12 (escalated) · escalated: Needs a design call</html>"));
     }
 
+    public void testARunningFlaggedSessionWearsTheFlaggedChipItsStoppedSiblingDoesNot() throws Exception {
+        DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
+        TaskRow flaggedRunning = withFlaggedSession(running("Flagged run", NOW), true);
+        TaskRow flaggedStopped = withFlaggedSession(stopped("Flagged stopped", NOW.minusSeconds(60)), true);
+        TaskRow plain = running("Plain", NOW.minusSeconds(120));
+        list.show(InboxModel.build(new InboxModel.Inputs(
+                List.of(new ProjectRow(ALPHA_PROJECT, false, false,
+                        List.<TaskNode>of(flaggedRunning, flaggedStopped, plain), List.of(), 3)),
+                List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE),
+                false);
+
+        assertEquals(List.of("v Flagged", "  Flagged stopped", "v Running", "  Flagged run", "  Plain"),
+                describe(list.entries()));
+        assertEquals("the flagged chip follows the project tag on the Running row",
+                List.of("Flagged run", "alpha", "flagged"), renderedLabels(indexOf("Flagged run")));
+        assertEquals("the Flagged section's header already says it", List.of("Flagged stopped", "alpha"),
+                renderedLabels(indexOf("Flagged stopped")));
+        assertEquals("a plain running row has no chip", List.of("Plain", "alpha"),
+                renderedLabels(indexOf("Plain")));
+    }
+
+    /** A running session's row with its flag set: the session carries it, the row is otherwise plain. */
+    private static TaskRow withFlaggedSession(TaskRow row, boolean flagged) {
+        return new TaskRow(row.session().withFlagged(flagged), row.activity(), row.running(), row.branch(),
+                row.placement(), row.readOnly(), row.folderMissing(), row.resumable());
+    }
+
+    /** A stopped, idle session's row: the running helper's counterpart. */
+    private static TaskRow stopped(String name, Instant opened) {
+        ManagedAgentSession session = new ManagedAgentSession(ManagedSessionId.newId(), RepositoryId.newId(), name,
+                AgentBinding.unlaunched(AgentKind.CLAUDE), new SessionWorkspace(
+                        Path.of("/tmp", "inbox-list-" + name.replace(' ', '-')).toAbsolutePath(), Optional.empty(),
+                        false),
+                SessionStatus.INACTIVE, opened, opened, Optional.empty(), PrLink.none(), false, Optional.empty(),
+                false);
+        return new TaskRow(session, Optional.empty(), false, Optional.empty(),
+                TaskPlacement.of(false, Optional.empty(), Optional.empty(), session.workingDirectory(),
+                        Optional.empty()), false, false, false);
+    }
+
     /** A row icon's parts, one nesting level deep: a nested row icon becomes its own part list. */
     private static List<Object> iconParts(Icon icon) {
         List<Object> parts = new ArrayList<>();

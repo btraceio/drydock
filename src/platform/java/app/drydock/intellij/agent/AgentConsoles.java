@@ -195,7 +195,7 @@ public final class AgentConsoles {
      * terminal panel. The widget {@code getPreferredFocusableComponent}
      * returns is not focusable — see {@link #focusConsole}.
      */
-    private static JComponent focusTarget(TerminalExecutionConsole console) {
+    static JComponent focusTarget(TerminalExecutionConsole console) {
         JBTerminalWidget widget = console.getTerminalWidget();
         return widget != null ? widget.getTerminalPanel() : console.getPreferredFocusableComponent();
     }

@@ -57,7 +57,8 @@ public final class JiraService implements AutoCloseable {
     public static final int MAX_RESULTS = GhCliService.ISSUE_LIST_LIMIT;
 
     /** What a 200 response asks for: the row the tree renders, and nothing more. */
-    private static final String FIELDS = "summary,labels,updated";
+    /** The issue fields one search asks for. Priority feeds the row's priority badge. */
+    private static final String FIELDS = "summary,labels,updated,priority";
 
     /** The mask every secret-bearing value is replaced with before reuse. */
     private static final String REDACTED = "***";
