@@ -49,6 +49,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -150,6 +151,47 @@ class TaskTreeRendererTest {
     @Test
     void aJiraIssueRowSaysKeyAndSummary() {
         assertEquals("PROJ-123 Fix allocation accounting", TaskTreeRenderer.issueText(jiraProj123()));
+    }
+
+    @Test
+    void jiraPriorityNamesMapToBadgeKindsAndCustomOnesStayNeutral() {
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.HIGH), TaskTreeRenderer.priorityKind("Highest"));
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.HIGH), TaskTreeRenderer.priorityKind("high"));
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.MEDIUM), TaskTreeRenderer.priorityKind("Medium"));
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.LOW), TaskTreeRenderer.priorityKind("Lowest"));
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.NEUTRAL), TaskTreeRenderer.priorityKind("Critical"),
+                "a site's custom priority wears the neutral mark, labelled as reported");
+        assertEquals(Optional.empty(), TaskTreeRenderer.priorityKind("   "));
+    }
+
+    @Test
+    void aJiraRowBadgesItsTicketMarkWithItsPriorityAndAnUnprioritizedOneKeepsItAlone() {
+        Icon badged = TaskTreeRenderer.jiraRowIcon(new JiraIssue("PROJ-1", "Fix allocation accounting",
+                "https://acme.atlassian.net/browse/PROJ-1", List.of(), Optional.empty(), Optional.of("High")));
+        Icon plain = TaskTreeRenderer.jiraRowIcon(jiraProj123());
+
+        assertSame(TaskTreeRenderer.JIRA_ICON, plain,
+                "an issue without a priority keeps exactly the ticket mark");
+        assertNotEquals(TaskTreeRenderer.JIRA_ICON, badged);
+    }
+
+    @Test
+    void aMirroredTaskWearsThePriorityItsJiraListingAnswered() {
+        Map<String, Optional<String>> priorities = Map.of(
+                "PROJ-7", Optional.of("Highest"),
+                "OPS_2-41", Optional.empty());
+
+        assertEquals(Optional.of(TaskTreeRenderer.PriorityKind.HIGH), TaskTreeRenderer.jiraMirrorPriority(
+                List.of("https://acme.atlassian.net/browse/PROJ-7"), priorities));
+        assertEquals(Optional.empty(), TaskTreeRenderer.jiraMirrorPriority(
+                List.of("https://github.com/o/r/issues/12"), priorities),
+                "a GitHub mirror names no Jira ticket");
+        assertEquals(Optional.empty(), TaskTreeRenderer.jiraMirrorPriority(
+                List.of("https://jira.example.com/browse/OPS_2-41"), priorities),
+                "a listed ticket without a priority badges nothing");
+        assertEquals(Optional.empty(), TaskTreeRenderer.jiraMirrorPriority(
+                List.of("https://acme.atlassian.net/browse/MISS-1"), priorities),
+                "a ticket no shown listing answered badges nothing");
     }
 
     private static final JiraGroup SPRINT = new JiraGroup("g1", "Sprint", "project = DRY");

@@ -64,13 +64,28 @@ public final class JiraSearchResponse {
                 }
                 issues.add(new JiraIssue(key.value(), summary.value(),
                         JiraConnection.normalizeBaseUrl(baseUrl) + "/browse/" + key.value(),
-                        labels(fields.get("labels")), parseUpdated(string(fields.get("updated")))));
+                        labels(fields.get("labels")), parseUpdated(string(fields.get("updated"))),
+                        priority(fields.get("priority"))));
             }
             return new JiraIssueListing.Listed(issues);
         } catch (JsonParseException | NumberFormatException e) {
             LOG.log(Level.DEBUG, "Unparseable Jira search response", e);
             return new JiraIssueListing.Failed("Jira returned a response that could not be parsed");
         }
+    }
+
+    /**
+     * The issue's priority name, or empty when Jira did not name one: the
+     * priority field is optional per site, and a missing name leaves the
+     * row unbadged rather than guessing one.
+     */
+    static Optional<String> priority(JsonValue priority) {
+        if (!(priority instanceof JsonObject object)
+                || !(object.get("name") instanceof JsonString name)
+                || name.value().isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.of(name.value());
     }
 
     /**

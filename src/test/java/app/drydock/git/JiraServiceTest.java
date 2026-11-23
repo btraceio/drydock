@@ -57,7 +57,8 @@ class JiraServiceTest {
                          "self": "http://127.0.0.1/rest/api/3/issue/10001",
                          "fields": {"summary": "Fix allocation accounting",
                                     "labels": ["profiling", "bug"],
-                                    "updated": "2026-10-20T10:15:30.000+0000"}}],
+                                    "updated": "2026-10-20T10:15:30.000+0000",
+                                    "priority": {"name": "High"}}}],
              "nextPageToken": "1", "isLast": true}
             """;
 
@@ -120,12 +121,13 @@ class JiraServiceTest {
         assertEquals(JiraConnection.DEFAULT_JQL, query.get("jql").getFirst());
         assertEquals("100", query.get("maxResults").getFirst());
         String fields = query.get("fields").getFirst();
-        assertTrue(fields.contains("summary") && fields.contains("labels") && fields.contains("updated"),
-                "fields must ask for summary, labels and updated: " + fields);
+        assertTrue(fields.contains("summary") && fields.contains("labels") && fields.contains("updated")
+                        && fields.contains("priority"),
+                "fields must ask for summary, labels, updated and priority: " + fields);
         JiraIssueListing.Listed listed = assertInstanceOf(JiraIssueListing.Listed.class, listing);
         assertEquals(List.of(new JiraIssue("PROJ-123", "Fix allocation accounting",
                         base() + "/browse/PROJ-123", List.of("profiling", "bug"),
-                        Optional.of(Instant.parse("2026-10-20T10:15:30Z")))),
+                        Optional.of(Instant.parse("2026-10-20T10:15:30Z")), Optional.of("High"))),
                 listed.issues());
     }
 
