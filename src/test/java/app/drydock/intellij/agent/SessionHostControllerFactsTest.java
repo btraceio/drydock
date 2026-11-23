@@ -337,7 +337,15 @@ public class SessionHostControllerFactsTest extends BasePlatformTestCase {
         Disposer.register(getTestRootDisposable(), production);
         SessionPane pane = production.paneFor(a);
 
-        assertEquals(Body.LOADING, pane.shown());
+        // An empty catalog makes the probe settle in microseconds, and the
+        // loader's virtual thread can win the race to settle request.terminal
+        // before select() re-reads it -- paneFor then returns already showing
+        // UNKNOWN. Synchronous settlement is the intended contract (a
+        // readiness failure must paint FAILED before paneFor returns), so a
+        // fast UNKNOWN is legitimate; only assert the pane never shows
+        // something else, and let the wait prove the answer is reached.
+        assertTrue("LOADING or an already-settled answer, never FAILED",
+                pane.shown() == Body.LOADING || pane.shown() == Body.UNKNOWN);
         waitFor(() -> pane.shown() == Body.UNKNOWN);
         assertEquals(State.UNKNOWN, production.facts(a).orElseThrow().state());
     }
