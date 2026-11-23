@@ -3,11 +3,7 @@ name: IntelliJ plugin
 on:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/intellij-plugin.yml
   pull_request:
-    paths:
-      - .github/workflows/intellij-plugin.yml
   workflow_dispatch:
 
 permissions:
