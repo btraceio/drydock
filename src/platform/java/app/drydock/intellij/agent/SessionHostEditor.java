@@ -175,7 +175,13 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
         if (!leased || disposed) {
             return null;
         }
-        return controller.focusedPane().map(SessionPane::root).orElse(primarySlot);
+        // The focused session's terminal panel, when one can take the
+        // keyboard: a bare pane root is a focusable JPanel, so every
+        // platform-driven focus pass that asks the editor where the keyboard
+        // goes (tab selection, window activation restore, openFile) would
+        // otherwise land there and silently eat the keystrokes.
+        return controller.focusedPane().flatMap(SessionPane::focusTarget)
+                .orElseGet(() -> controller.focusedPane().map(SessionPane::root).orElse(primarySlot));
     }
 
     @Override
