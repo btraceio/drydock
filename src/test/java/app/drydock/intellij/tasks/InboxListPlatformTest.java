@@ -161,6 +161,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private static List<String> describe(List<Entry> entries) {
         return entries.stream().map(entry -> switch (entry) {
             case Header header -> (header.collapsed() ? "> " : "v ") + header.group().label();
+            case InboxList.GraphHeader header -> (header.collapsed() ? "> " : "v ") + "graph " + header.graph().key();
             case Row row -> "  " + row.item().title();
             case More more -> more.showingAll() ? "  Show less" : "  + " + more.hidden() + " more";
         }).toList();

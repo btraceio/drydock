@@ -152,6 +152,14 @@ public final class TaskGraph {
         return dependents;
     }
 
+    /** Each task and the ids of the tasks its resolved {@code after} references name, in reference order; broken references are no edge. */
+    public Map<TaskId, List<TaskId>> prerequisites() {
+        Map<TaskId, List<TaskId>> out = new LinkedHashMap<>();
+        diagnostics.forEach((id, task) -> out.put(id, task.resolved().stream()
+                .map(reference -> reference.target().id()).toList()));
+        return Collections.unmodifiableMap(out);
+    }
+
     /** Every broken reference in the snapshot, in document order. */
     public List<BrokenReference> brokenReferences() {
         return diagnostics.values().stream().flatMap(task -> task.broken().stream()).toList();

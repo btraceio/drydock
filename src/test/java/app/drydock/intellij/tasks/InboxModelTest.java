@@ -38,6 +38,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +68,7 @@ class InboxModelTest {
     private final List<TaskNode> topRows = new ArrayList<>();
     private final List<DelayedTaskRow> tasks = new ArrayList<>();
     private final Map<TaskId, TaskDocument> documents = new HashMap<>();
+    private final Map<TaskId, List<TaskId>> prerequisites = new HashMap<>();
 
     private static SharedProject project(Path root, String name) {
         return new SharedProject(RepositoryId.newId(), root, name, NOW, Optional.empty());
@@ -110,7 +112,109 @@ class InboxModelTest {
         nodes.add(new ProjectRow(BETA_PROJECT, false, false, betaRows, List.of(), 0));
         nodes.add(new ProjectRow(QUIET_PROJECT, false, false, List.of(), List.of(), 0));
         return InboxModel.build(new Inputs(nodes, List.of(ALPHA_PROJECT, BETA_PROJECT, QUIET_PROJECT), tasks,
-                documents, Map.of(ALPHA_TASKS, ALPHA), NOW, ZONE), query);
+                documents, Map.of(ALPHA_TASKS, ALPHA), NOW, ZONE, prerequisites), query);
+    }
+
+    /** {@code task} waits on each of {@code prerequisiteRows}. */
+    private void after(DelayedTaskRow task, DelayedTaskRow... prerequisiteRows) {
+        prerequisites.put(task.id(), Arrays.stream(prerequisiteRows).map(DelayedTaskRow::id).toList());
+    }
+
+    private static List<String> graphTitles(InboxModel.Graph graph) {
+        return graph.nodes().stream().map(node -> node.item().title()).toList();
+    }
+
+    @Test
+    void aChainOfTasksIsOneGraphOrderedFromItsRootToItsOutcome() {
+        DelayedTaskRow measure = task("Measure", Presentation.READY);
+        DelayedTaskRow tune = task("Tune", Presentation.BLOCKED);
+        DelayedTaskRow record = task("Record", Presentation.BLOCKED);
+        task("Standalone", Presentation.READY);
+        after(tune, measure);
+        after(record, tune, measure);
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(1, inbox.graphs().size());
+        InboxModel.Graph graph = inbox.graphs().get(0);
+        assertEquals(List.of("Measure", "Tune", "Record"), graphTitles(graph));
+        assertEquals(List.of(0, 1, 2), graph.nodes().stream().map(InboxModel.GraphNode::depth).toList());
+        assertEquals(List.of("Record"), graph.sinks().stream().map(Item::title).toList());
+        assertEquals(List.of("Tune", "Measure"), graph.nodes().get(2).waitsOn());
+        assertEquals(2, graph.nodes().get(0).unblocks());
+        assertEquals(List.of("Record"), graph.startTargets().stream().map(Item::title).toList());
+    }
+
+    @Test
+    void graphedTakesTheGraphsTasksOutOfTheStateGroupsAndLeavesTheRest() {
+        DelayedTaskRow first = task("First", Presentation.READY);
+        DelayedTaskRow second = task("Second", Presentation.BLOCKED);
+        task("Alone", Presentation.READY);
+        after(second, first);
+
+        Inbox graphed = inbox(Query.NONE).graphed();
+
+        assertEquals(List.of("Alone"), titles(graphed, GroupKind.READY));
+        assertEquals(List.of(), titles(graphed, GroupKind.BLOCKED));
+        assertEquals(1, graphed.graphs().size());
+    }
+
+    @Test
+    void aDiamondShowsEachTaskOnceAfterAllItsPrerequisites() {
+        DelayedTaskRow top = task("Top", Presentation.READY);
+        DelayedTaskRow left = task("Left", Presentation.BLOCKED);
+        DelayedTaskRow right = task("Right", Presentation.BLOCKED);
+        DelayedTaskRow bottom = task("Bottom", Presentation.BLOCKED);
+        after(left, top);
+        after(right, top);
+        after(bottom, left, right);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of("Top", "Left", "Right", "Bottom"), graphTitles(graph));
+        assertEquals(2, graph.nodes().get(3).depth());
+        assertEquals(List.of("Bottom"), graph.sinks().stream().map(Item::title).toList());
+    }
+
+    @Test
+    void aFinishedPrerequisiteCountsAsDoneAndAloneMakesNoGraph() {
+        DelayedTaskRow finished = task("Finished", Presentation.TERMINAL, TaskStatus.DONE,
+                Optional.empty(), List.of());
+        DelayedTaskRow next = task("Next", Presentation.READY);
+        after(next, finished);
+        assertEquals(List.of(), inbox(Query.NONE).graphs());
+
+        DelayedTaskRow last = task("Last", Presentation.BLOCKED);
+        after(last, next, finished);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+        assertEquals(1, graph.done());
+        assertEquals(3, graph.total());
+    }
+
+    @Test
+    void aDependencyCycleStillProducesAGraph() {
+        DelayedTaskRow one = task("One", Presentation.BLOCKED);
+        DelayedTaskRow two = task("Two", Presentation.BLOCKED);
+        after(one, two);
+        after(two, one);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of("One", "Two"), graphTitles(graph));
+        assertEquals(List.of(), graph.sinks());
+        assertEquals(List.of(), graph.startTargets());
+    }
+
+    @Test
+    void searchTermsOtherThanPlainTextShowNoGraphs() {
+        DelayedTaskRow first = task("First", Presentation.READY);
+        DelayedTaskRow second = task("Second", Presentation.BLOCKED);
+        after(second, first);
+
+        assertEquals(1, inbox(new Query(Optional.empty(), "first")).graphs().size());
+        assertEquals(List.of(), inbox(new Query(Optional.empty(), "is:blocked")).graphs());
+        assertEquals(List.of(), inbox(new Query(Optional.empty(), "nothing")).graphs());
     }
 
     private static List<String> titles(Inbox inbox, GroupKind kind) {

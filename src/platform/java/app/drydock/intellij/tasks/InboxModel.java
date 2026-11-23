@@ -18,9 +18,11 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -205,10 +207,12 @@ final class InboxModel {
      * @param taskRoots  each task repository's project main checkout, where it resolves to one
      * @param now        the clock reading "today" is measured against
      * @param zone       the zone "today" is a day in
+     * @param prerequisites each task's resolved prerequisite ids ({@code TaskGraph#prerequisites}); the
+     *                   edges the dependency graphs are drawn from
      */
     record Inputs(List<TaskNode> nodes, List<SharedProject> projects, List<DelayedTaskRow> tasks,
                   Map<TaskId, TaskDocument> documents, Map<RepositoryId, Path> taskRoots, Instant now,
-                  ZoneId zone) {
+                  ZoneId zone, Map<TaskId, List<TaskId>> prerequisites) {
         Inputs {
             nodes = List.copyOf(nodes);
             projects = List.copyOf(projects);
@@ -217,6 +221,54 @@ final class InboxModel {
             taskRoots = Map.copyOf(taskRoots);
             Objects.requireNonNull(now, "now");
             Objects.requireNonNull(zone, "zone");
+            prerequisites = Map.copyOf(prerequisites);
+        }
+
+        /** The shape without dependency edges: no task graphs. */
+        Inputs(List<TaskNode> nodes, List<SharedProject> projects, List<DelayedTaskRow> tasks,
+               Map<TaskId, TaskDocument> documents, Map<RepositoryId, Path> taskRoots, Instant now,
+               ZoneId zone) {
+            this(nodes, projects, tasks, documents, taskRoots, now, zone, Map.of());
+        }
+    }
+
+    /**
+     * One task of a dependency {@link Graph}: its row, its depth below the graph's roots, the titles of
+     * the unfinished tasks it waits on, and how many unfinished tasks wait on it.
+     */
+    record GraphNode(TaskItem item, int depth, List<String> waitsOn, int unblocks) {
+        GraphNode {
+            Objects.requireNonNull(item, "item");
+            waitsOn = List.copyOf(waitsOn);
+        }
+    }
+
+    /**
+     * A connected set of at least two unfinished tasks joined by {@code after} references. {@code nodes}
+     * are in display order (a task before the tasks that wait on it, each task once); {@code sinks} are the
+     * unfinished tasks nothing unfinished waits on, the targets whose start plan covers the whole graph;
+     * {@code done} counts the finished prerequisites the graph's tasks name.
+     */
+    record Graph(String key, List<GraphNode> nodes, List<TaskItem> sinks, int done) {
+        Graph {
+            Objects.requireNonNull(key, "key");
+            nodes = List.copyOf(nodes);
+            sinks = List.copyOf(sinks);
+        }
+
+        /** Finished plus unfinished tasks. */
+        int total() {
+            return done + nodes.size();
+        }
+
+        /** The sinks that can still be started: open tasks, ready or blocked. */
+        List<TaskItem> startTargets() {
+            return sinks.stream().filter(sink -> sink.row().presentation() == TaskState.Presentation.READY
+                    || sink.row().presentation() == TaskState.Presentation.BLOCKED).toList();
+        }
+
+        boolean contains(TaskId id) {
+            return nodes.stream().anyMatch(node -> node.item().row().id().equals(id));
         }
     }
 
@@ -225,10 +277,30 @@ final class InboxModel {
      * projects with their active-item counts (ignoring the query), and how
      * many of them have no active item at all.
      */
-    record Inbox(List<Group> groups, List<Suggestion> projects, int quietProjects) {
+    record Inbox(List<Group> groups, List<Suggestion> projects, int quietProjects, List<Graph> graphs) {
         Inbox {
             groups = List.copyOf(groups);
             projects = List.copyOf(projects);
+            graphs = List.copyOf(graphs);
+        }
+
+        Inbox(List<Group> groups, List<Suggestion> projects, int quietProjects) {
+            this(groups, projects, quietProjects, List.of());
+        }
+
+        /** This inbox with the tasks of its graphs taken out of the state groups, which then show only what no graph shows. */
+        Inbox graphed() {
+            List<Group> kept = new ArrayList<>();
+            for (Group group : groups) {
+                List<Item> rest = group.items().stream()
+                        .filter(item -> !(item instanceof TaskItem task)
+                                || graphs.stream().noneMatch(graph -> graph.contains(task.row().id())))
+                        .toList();
+                if (!rest.isEmpty()) {
+                    kept.add(new Group(group.kind(), group.label(), rest));
+                }
+            }
+            return new Inbox(kept, projects, quietProjects, graphs);
         }
 
         boolean isEmpty() {
@@ -337,7 +409,143 @@ final class InboxModel {
         List<Group> groups = new ArrayList<>();
         grouped.forEach((kind, items) -> groups.add(new Group(kind,
                 kind == GroupKind.DONE && only.contains(GroupKind.DONE) ? "Done" : kind.label(), items)));
-        return new Inbox(groups, projects, quiet);
+        boolean plain = only.isEmpty() && !matchReferences;
+        return new Inbox(groups, projects, quiet,
+                plain ? graphs(in).stream().filter(graph -> graph.nodes().stream().anyMatch(node ->
+                        (query.project().isEmpty() || node.item().project().map(ProjectRef::root)
+                                .equals(query.project()))
+                                && (needle.isEmpty() || node.item().title().toLowerCase(Locale.ROOT)
+                                .contains(needle)))).toList() : List.of());
+    }
+
+    /**
+     * The dependency graphs of the unfinished tasks: connected components of two or more tasks over the
+     * resolved {@code after} edges, ordered by their first task in {@link DelayedTaskRows#sorted} order.
+     * Finished tasks are no members and join nothing; a dependency cycle never loops the ordering (its
+     * tasks follow the rest, at depth 0).
+     */
+    static List<Graph> graphs(Inputs in) {
+        Map<TaskId, DelayedTaskRow> unfinished = new LinkedHashMap<>();
+        for (DelayedTaskRow row : DelayedTaskRows.sorted(in.tasks())) {
+            if (!row.terminal()) {
+                unfinished.put(row.id(), row);
+            }
+        }
+        Map<TaskId, List<TaskId>> waitsOn = new LinkedHashMap<>();
+        Map<TaskId, List<TaskId>> dependents = new LinkedHashMap<>();
+        for (TaskId id : unfinished.keySet()) {
+            waitsOn.put(id, new ArrayList<>());
+            dependents.put(id, new ArrayList<>());
+        }
+        for (TaskId id : unfinished.keySet()) {
+            for (TaskId prerequisite : in.prerequisites().getOrDefault(id, List.of())) {
+                if (unfinished.containsKey(prerequisite) && !prerequisite.equals(id)
+                        && !waitsOn.get(id).contains(prerequisite)) {
+                    waitsOn.get(id).add(prerequisite);
+                    dependents.get(prerequisite).add(id);
+                }
+            }
+        }
+        List<Graph> graphs = new ArrayList<>();
+        Set<TaskId> seen = new HashSet<>();
+        for (TaskId start : unfinished.keySet()) {
+            if (!seen.add(start)) {
+                continue;
+            }
+            List<TaskId> component = new ArrayList<>();
+            ArrayDeque<TaskId> queue = new ArrayDeque<>(List.of(start));
+            while (!queue.isEmpty()) {
+                TaskId at = queue.poll();
+                component.add(at);
+                for (TaskId next : concat(waitsOn.get(at), dependents.get(at))) {
+                    if (seen.add(next)) {
+                        queue.add(next);
+                    }
+                }
+            }
+            if (component.size() >= 2) {
+                graphs.add(graphOf(in, unfinished, waitsOn, dependents, component));
+            }
+        }
+        return graphs;
+    }
+
+    private static List<TaskId> concat(List<TaskId> first, List<TaskId> second) {
+        List<TaskId> both = new ArrayList<>(first);
+        both.addAll(second);
+        return both;
+    }
+
+    private static Graph graphOf(Inputs in, Map<TaskId, DelayedTaskRow> unfinished,
+                                 Map<TaskId, List<TaskId>> waitsOn, Map<TaskId, List<TaskId>> dependents,
+                                 List<TaskId> component) {
+        // Component order is by discovery; display order is by the global sorted order.
+        List<TaskId> members = unfinished.keySet().stream().filter(component::contains).toList();
+        Map<TaskId, Integer> depth = new LinkedHashMap<>();
+        Map<TaskId, Integer> pending = new LinkedHashMap<>();
+        ArrayDeque<TaskId> ready = new ArrayDeque<>();
+        for (TaskId id : members) {
+            pending.put(id, waitsOn.get(id).size());
+            if (waitsOn.get(id).isEmpty()) {
+                depth.put(id, 0);
+                ready.add(id);
+            }
+        }
+        while (!ready.isEmpty()) {
+            TaskId at = ready.poll();
+            for (TaskId next : dependents.get(at)) {
+                depth.merge(next, depth.get(at) + 1, Math::max);
+                if (pending.merge(next, -1, Integer::sum) == 0) {
+                    ready.add(next);
+                }
+            }
+        }
+        List<TaskId> order = new ArrayList<>();
+        Set<TaskId> placed = new HashSet<>();
+        ArrayDeque<TaskId> stack = new ArrayDeque<>();
+        for (TaskId root : members) {
+            if (!waitsOn.get(root).isEmpty()) {
+                continue;
+            }
+            stack.push(root);
+            while (!stack.isEmpty()) {
+                TaskId at = stack.pop();
+                // Placed only once everything it waits on is: it is pushed again by its last prerequisite.
+                if (placed.contains(at) || !placed.containsAll(waitsOn.get(at))) {
+                    continue;
+                }
+                placed.add(at);
+                order.add(at);
+                List<TaskId> below = dependents.get(at);
+                for (int i = below.size() - 1; i >= 0; i--) {
+                    stack.push(below.get(i));
+                }
+            }
+        }
+        for (TaskId id : members) {
+            if (placed.add(id)) {
+                order.add(id);
+            }
+        }
+        List<GraphNode> nodes = new ArrayList<>();
+        List<TaskItem> sinks = new ArrayList<>();
+        Set<TaskId> finished = new HashSet<>();
+        for (TaskId id : order) {
+            DelayedTaskRow row = unfinished.get(id);
+            TaskItem item = new TaskItem(row, projectOf(in, row));
+            nodes.add(new GraphNode(item, depth.getOrDefault(id, 0),
+                    waitsOn.get(id).stream().map(prerequisite -> unfinished.get(prerequisite).title()).toList(),
+                    dependents.get(id).size()));
+            if (dependents.get(id).isEmpty()) {
+                sinks.add(item);
+            }
+            for (TaskId prerequisite : in.prerequisites().getOrDefault(id, List.of())) {
+                if (!unfinished.containsKey(prerequisite) && in.documents().containsKey(prerequisite)) {
+                    finished.add(prerequisite);
+                }
+            }
+        }
+        return new Graph(order.get(0).text(), nodes, sinks, finished.size());
     }
 
     static Optional<GroupKind> kindOf(String token) {

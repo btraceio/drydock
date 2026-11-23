@@ -2,6 +2,8 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.SessionStatus;
 import app.drydock.intellij.DrydockPluginService;
+import app.drydock.intellij.tasks.InboxModel.Graph;
+import app.drydock.intellij.tasks.InboxModel.GraphNode;
 import app.drydock.intellij.tasks.InboxModel.Group;
 import app.drydock.intellij.tasks.InboxModel.GroupKind;
 import app.drydock.intellij.tasks.InboxModel.Inbox;
@@ -51,6 +53,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -74,11 +77,23 @@ final class InboxList extends JBList<InboxList.Entry> {
     }
 
     /** A group's header line. */
-    record Header(Group group, boolean collapsed) implements Entry {
+    record Header(Group group, boolean collapsed, int count) implements Entry {
+        Header(Group group, boolean collapsed) {
+            this(group, collapsed, group.items().size());
+        }
     }
 
-    /** One item of a group. */
-    record Row(Group group, Item item) implements Entry {
+    /**
+     * One item of a group, or (with {@code group} null and {@code node} set) one task of a dependency graph.
+     */
+    record Row(Group group, Item item, GraphNode node) implements Entry {
+        Row(Group group, Item item) {
+            this(group, item, null);
+        }
+    }
+
+    /** A dependency graph's header line. */
+    record GraphHeader(Graph graph, boolean collapsed) implements Entry {
     }
 
     /** The toggle under a truncating group: {@code hidden} rows behind "+N more", or "Show less". */
@@ -96,13 +111,17 @@ final class InboxList extends JBList<InboxList.Entry> {
         /** A click on a row's project tag. */
         void pickProject(ProjectRef project);
 
+        /** A click on a graph header's "Start graph". */
+        default void startGraph(Graph graph) {
+        }
+
         /** A group was collapsed, expanded, or switched between "+N more" and all rows. */
         default void togglesChanged() {
         }
     }
 
     /** Where a click on a row landed. */
-    enum Hit { PULL_REQUEST, TAG, ELSEWHERE }
+    enum Hit { PULL_REQUEST, TAG, START_GRAPH, ELSEWHERE }
 
     static final JBColor NEEDS_TEXT = new JBColor(0xA64B0A, 0xE5925B);
     static final JBColor NEEDS_BACKGROUND = new JBColor(0xFFF4EB, 0x3B2F25);
@@ -121,10 +140,14 @@ final class InboxList extends JBList<InboxList.Entry> {
     private final Set<GroupKind> collapsed = EnumSet.noneOf(GroupKind.class);
     private final Set<GroupKind> expanded = EnumSet.noneOf(GroupKind.class);
     private final Set<GroupKind> showingAll = EnumSet.noneOf(GroupKind.class);
+    /** The keys of the graphs the user collapsed; not persisted. */
+    private final Set<String> collapsedGraphs = new HashSet<>();
     private final Renderer renderer = new Renderer();
     private final Actions actions;
     private Inbox inbox;
     private boolean tagsHidden;
+    /** Whether dependency graphs sit under "Ready to start" and leave the state groups the tasks that belong to one. */
+    private boolean graphView = true;
 
     InboxList(Actions actions) {
         this.actions = Objects.requireNonNull(actions, "actions");
@@ -155,6 +178,13 @@ final class InboxList extends JBList<InboxList.Entry> {
                 Entry entry = entries.get(index);
                 switch (entry) {
                     case Header header when event.getClickCount() == 1 -> toggleCollapsed(header.group().kind());
+                    case GraphHeader header when event.getClickCount() == 1 -> {
+                        if (hit(index, event.getPoint()) == Hit.START_GRAPH) {
+                            actions.startGraph(header.graph());
+                        } else {
+                            toggleGraph(header.graph().key());
+                        }
+                    }
                     case More more when event.getClickCount() == 1 -> toggleShowAll(more.group().kind());
                     case Row row -> {
                         Hit hit = hit(index, event.getPoint());
@@ -179,6 +209,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                 }
                 switch (getSelectedValue()) {
                     case Header header -> toggleCollapsed(header.group().kind());
+                    case GraphHeader header -> toggleGraph(header.graph().key());
                     case More more -> toggleShowAll(more.group().kind());
                     case Row row -> actions.activate(row.item());
                 }
@@ -193,6 +224,25 @@ final class InboxList extends JBList<InboxList.Entry> {
         inbox = next;
         tagsHidden = hideTags;
         rebuild(selectedKeys);
+    }
+
+    /** Switches between the dependency-graph view and the plain state groups. */
+    void setGraphView(boolean graphs) {
+        if (graphView != graphs) {
+            graphView = graphs;
+            rebuild(selectedItems().stream().map(InboxList::key).toList());
+        }
+    }
+
+    boolean graphView() {
+        return graphView;
+    }
+
+    void toggleGraph(String key) {
+        if (!collapsedGraphs.remove(key)) {
+            collapsedGraphs.add(key);
+        }
+        rebuild(selectedItems().stream().map(InboxList::key).toList());
     }
 
     /** The selected rows' items, in list order; headers and toggles select nothing. */
@@ -284,11 +334,27 @@ final class InboxList extends JBList<InboxList.Entry> {
         if (inbox == null) {
             return;
         }
-        for (Group group : inbox.groups()) {
+        Inbox shown = graphView ? inbox.graphed() : inbox;
+        List<Group> groups = new ArrayList<>(shown.groups());
+        // The graphs live under "Ready to start", which therefore exists whenever there is a graph.
+        boolean withGraphs = graphView && !shown.graphs().isEmpty();
+        if (withGraphs && groups.stream().noneMatch(group -> group.kind() == GroupKind.READY)) {
+            int at = 0;
+            while (at < groups.size() && groups.get(at).kind().compareTo(GroupKind.READY) < 0) {
+                at++;
+            }
+            groups.add(at, new Group(GroupKind.READY, GroupKind.READY.label(), List.of()));
+        }
+        for (Group group : groups) {
             boolean isCollapsed = isCollapsed(group.kind());
-            entries.addElement(new Header(group, isCollapsed));
+            boolean hasGraphs = withGraphs && group.kind() == GroupKind.READY;
+            entries.addElement(new Header(group, isCollapsed, group.items().size()
+                    + (hasGraphs ? shown.graphs().stream().mapToInt(graph -> graph.nodes().size()).sum() : 0)));
             if (isCollapsed) {
                 continue;
+            }
+            if (hasGraphs) {
+                addGraphs(shown);
             }
             boolean all = showingAll.contains(group.kind());
             for (Item item : group.shown(all)) {
@@ -313,6 +379,32 @@ final class InboxList extends JBList<InboxList.Entry> {
         setSelectedIndices(indices.stream().mapToInt(Integer::intValue).toArray());
     }
 
+    private void addGraphs(Inbox shown) {
+        for (Graph graph : shown.graphs()) {
+            boolean isCollapsed = collapsedGraphs.contains(graph.key());
+            entries.addElement(new GraphHeader(graph, isCollapsed));
+            if (!isCollapsed) {
+                for (GraphNode node : graph.nodes()) {
+                    entries.addElement(new Row(null, node.item(), node));
+                }
+            }
+        }
+    }
+
+    /** The header text of a graph: its one outcome's title, or its first task's title and how many more it has. */
+    static String graphLabel(Graph graph) {
+        return graph.sinks().size() == 1 ? graph.sinks().get(0).title()
+                : graph.nodes().get(0).item().title() + " (+" + (graph.nodes().size() - 1) + " more)";
+    }
+
+    /** The chip a graph task wears: how many tasks it waits on (their titles are in its tooltip), else how many wait on it; empty for neither. */
+    static Optional<String> graphChip(GraphNode node) {
+        if (!node.waitsOn().isEmpty()) {
+            return Optional.of(node.waitsOn().size() == 1 ? "waits on 1" : "waits on " + node.waitsOn().size());
+        }
+        return node.unblocks() > 0 ? Optional.of("unblocks " + node.unblocks()) : Optional.empty();
+    }
+
     /** Where {@code point} (list coordinates) lands within the row at {@code index}. */
     Hit hit(int index, Point point) {
         Rectangle cell = getCellBounds(index, index);
@@ -323,6 +415,9 @@ final class InboxList extends JBList<InboxList.Entry> {
         if (at == renderer.pullRequest && renderer.pullRequest.isVisible()
                 && renderer.pullRequestLink) {
             return Hit.PULL_REQUEST;
+        }
+        if (at == renderer.startGraph && renderer.startGraph.isVisible()) {
+            return Hit.START_GRAPH;
         }
         if (at == renderer.tag && renderer.tag.isVisible()) {
             return Hit.TAG;
@@ -346,7 +441,13 @@ final class InboxList extends JBList<InboxList.Entry> {
                 || !(entries.get(index) instanceof Row row)) {
             return null;
         }
-        return tooltip(row.item(), Instant.now());
+        String text = tooltip(row.item(), Instant.now());
+        if (row.node() == null || row.node().waitsOn().isEmpty()) {
+            return text;
+        }
+        return text.replace("</html>", "<br>Waits on: " + String.join(", ", row.node().waitsOn().stream()
+                .map(title -> title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")).toList())
+                + "</html>");
     }
 
     /**
@@ -560,6 +661,10 @@ final class InboxList extends JBList<InboxList.Entry> {
         private final JBLabel windowTag = new JBLabel();
         /** The babysitting engagement chip, in the editor's monospace so it reads as machine state. */
         private final JBLabel babysitTag = new JBLabel();
+        /** A graph task's dependency chip. */
+        private final JBLabel graphChip = new JBLabel();
+        /** A graph header's action. */
+        private final JBLabel startGraph = new JBLabel("Start graph");
         private boolean pullRequestLink;
 
         Renderer() {
@@ -574,6 +679,10 @@ final class InboxList extends JBList<InboxList.Entry> {
             trailing.add(tag, spaced);
             trailing.add(windowTag, spaced);
             trailing.add(babysitTag, spaced);
+            trailing.add(graphChip, spaced);
+            trailing.add(startGraph, spaced);
+            graphChip.setFont(JBUI.Fonts.smallFont());
+            startGraph.setFont(JBUI.Fonts.smallFont());
             tag.setFont(JBUI.Fonts.smallFont());
             windowTag.setFont(JBUI.Fonts.smallFont());
             // The small font's size is already scaled; only the family changes.
@@ -589,6 +698,8 @@ final class InboxList extends JBList<InboxList.Entry> {
             center.removeAll();
             center.add(entry instanceof Row ? rowTitle : title, BorderLayout.CENTER);
             trailing.setVisible(false);
+            graphChip.setVisible(false);
+            startGraph.setVisible(false);
             pullRequestLink = false;
             boolean focus = list.hasFocus();
             Color background = selected ? UIUtil.getListSelectionBackground(focus) : list.getBackground();
@@ -600,12 +711,37 @@ final class InboxList extends JBList<InboxList.Entry> {
                     title.setIcon(header.collapsed() ? AllIcons.General.ArrowRight : AllIcons.General.ArrowDown);
                     title.append(header.group().label(), new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD,
                             selected ? foreground : headerColor(kind)));
-                    title.append(" · " + header.group().items().size(), new SimpleTextAttributes(
+                    title.append(" · " + header.count(), new SimpleTextAttributes(
                             SimpleTextAttributes.STYLE_PLAIN, selected ? foreground
                             : NamedColorUtil.getInactiveTextColor()));
                     boolean first = index == 0;
                     panel.setBorder(JBUI.Borders.empty(first ? 4 : 12, 12, 0, 12));
                     height = JBUI.scale(first ? 26 : 34);
+                }
+                case GraphHeader header -> {
+                    Graph graph = header.graph();
+                    title.setIcon(header.collapsed() ? AllIcons.General.ArrowRight : AllIcons.General.ArrowDown);
+                    title.append(graphLabel(graph), new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD,
+                            selected ? foreground : UIUtil.getLabelForeground()));
+                    title.append(" · " + graph.done() + "/" + graph.total() + " done", new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN,
+                            selected ? foreground : NamedColorUtil.getInactiveTextColor()));
+                    startGraph.setVisible(!graph.startTargets().isEmpty());
+                    startGraph.setForeground(selected ? foreground : JBUI.CurrentTheme.Link.Foreground.ENABLED);
+                    Optional<ProjectRef> graphProject = tagsHidden ? Optional.empty()
+                            : graph.nodes().get(0).item().project();
+                    tag.setVisible(graphProject.isPresent());
+                    graphProject.ifPresent(ref -> {
+                        tag.setText(ref.name());
+                        tag.setForeground(selected ? foreground : NamedColorUtil.getInactiveTextColor());
+                        tag.setBorder(BorderFactory.createCompoundBorder(
+                                JBUI.Borders.customLine(TAG_BORDER, 1), JBUI.Borders.empty(0, 4)));
+                    });
+                    pullRequest.setVisible(false);
+                    windowTag.setVisible(false);
+                    babysitTag.setVisible(false);
+                    trailing.setVisible(startGraph.isVisible() || tag.isVisible());
+                    panel.setBorder(JBUI.Borders.empty(6, 30, 0, 12));
+                    height = JBUI.scale(28);
                 }
                 case More more -> {
                     title.setIcon(null);
@@ -617,7 +753,8 @@ final class InboxList extends JBList<InboxList.Entry> {
                 }
                 case Row row -> {
                     Item item = row.item();
-                    boolean needs = row.group().kind() == GroupKind.NEEDS_YOU || escalated(item);
+                    boolean needs = row.group() != null && row.group().kind() == GroupKind.NEEDS_YOU
+                            || escalated(item);
                     if (!selected && needs) {
                         background = NEEDS_BACKGROUND;
                     }
@@ -633,7 +770,8 @@ final class InboxList extends JBList<InboxList.Entry> {
                         pullRequest.setForeground(selected ? foreground : label.link()
                                 ? JBUI.CurrentTheme.Link.Foreground.ENABLED : NamedColorUtil.getInactiveTextColor());
                     });
-                    Optional<ProjectRef> project = tagsHidden ? Optional.empty() : item.project();
+                    Optional<ProjectRef> project = tagsHidden || row.node() != null ? Optional.empty()
+                            : item.project();
                     tag.setVisible(project.isPresent());
                     project.ifPresent(ref -> {
                         tag.setText(ref.name());
@@ -662,9 +800,17 @@ final class InboxList extends JBList<InboxList.Entry> {
                                 JBUI.Borders.customLine(needs ? NEEDS_TAG_BORDER : BABYSIT_TAG_BORDER, 1),
                                 JBUI.Borders.empty(0, 4)));
                     });
+                    Optional<String> chip = row.node() == null ? Optional.empty() : graphChip(row.node());
+                    graphChip.setVisible(chip.isPresent());
+                    chip.ifPresent(text -> {
+                        graphChip.setText(text);
+                        graphChip.setForeground(selected ? foreground : row.node().waitsOn().isEmpty()
+                                ? JBUI.CurrentTheme.Link.Foreground.ENABLED : NamedColorUtil.getInactiveTextColor());
+                    });
                     trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent()
-                            || babysit.isPresent());
-                    panel.setBorder(JBUI.Borders.empty(0, 30, 0, 12));
+                            || babysit.isPresent() || chip.isPresent());
+                    panel.setBorder(JBUI.Borders.empty(0, row.node() == null ? 30 : 48 + 14 * row.node().depth(),
+                            0, 12));
                 }
             }
             title.setIconTextGap(JBUI.scale(6));

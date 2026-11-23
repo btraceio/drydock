@@ -3,6 +3,7 @@ package app.drydock.intellij.tasks;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.NewDelayedTaskDialog;
+import app.drydock.delayedtasks.DelayedTaskStart;
 import app.drydock.delayedtasks.SharedProjectResolver;
 import app.drydock.delayedtasks.TaskStoreWatcher.WatchedSnapshot;
 import app.drydock.intellij.delayedtasks.DelayedTaskActions;
@@ -39,6 +40,7 @@ import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
 import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskState;
@@ -55,6 +57,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.DataKey;
 import com.intellij.openapi.actionSystem.DataSink;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.actionSystem.ToggleAction;
 import com.intellij.openapi.actionSystem.UiDataProvider;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
@@ -64,12 +67,14 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.openapi.util.Disposer;
 
 import com.intellij.ui.JBColor;
 import com.intellij.ui.ScrollPaneFactory;
 import com.intellij.ui.SimpleColoredComponent;
+import com.intellij.ui.SimpleListCellRenderer;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.components.ActionLink;
@@ -212,6 +217,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void pickProject(InboxModel.ProjectRef picked) {
             setFocus(new Focus(picked.root(), picked.name()));
+        }
+
+        @Override
+        public void startGraph(InboxModel.Graph graph) {
+            List<InboxModel.TaskItem> targets = graph.startTargets();
+            if (targets.size() == 1) {
+                DelayedTaskStart.start(project, targets.get(0).row());
+            } else if (!targets.isEmpty()) {
+                JBPopupFactory.getInstance().createPopupChooserBuilder(targets)
+                        .setTitle("Start the plan for which task?")
+                        .setRenderer(SimpleListCellRenderer.create("", InboxModel.TaskItem::title))
+                        .setItemChosenCallback(target -> DelayedTaskStart.start(project, target.row()))
+                        .createPopup().showInCenterOf(inbox);
+            }
         }
 
         @Override
@@ -431,6 +450,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // a dismissed add offer. The first rebuild applies the filter.
         InboxViewState saved = viewState();
         inbox.restore(saved.toggles());
+        inbox.setGraphView(!saved.byState());
         bannerDismissed = saved.bannerDismissed();
         saved.filter().ifPresent(ref -> {
             focus = new Focus(ref.root(), ref.name());
@@ -960,6 +980,25 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // button (TaskActions.toolbarActions).
         toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
+        toolbarActions.add(new ToggleAction("Group Tasks by Dependency Graph",
+                "Show tasks that depend on each other as one graph, with Start graph; off lists them by state",
+                AllIcons.Hierarchy.Subtypes) {
+            @Override
+            public boolean isSelected(@NotNull AnActionEvent event) {
+                return inbox.graphView();
+            }
+
+            @Override
+            public void setSelected(@NotNull AnActionEvent event, boolean state) {
+                inbox.setGraphView(state);
+                viewState().setByState(!state);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+        });
         toolbarActions.add(windowFocusAction());
         toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
@@ -1929,7 +1968,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             Map<RepositoryId, Path> taskRoots = taskProjectRoots(roots, gathered.mainRootOf());
             InboxModel.Inputs inboxInputs = new InboxModel.Inputs(nodes, gathered.projects(), linkedRows,
                     watched.map(snapshot -> snapshot.snapshot().byId()).orElse(Map.of()),
-                    taskRoots, now, ZoneId.systemDefault());
+                    taskRoots, now, ZoneId.systemDefault(),
+                    watched.map(snapshot -> TaskGraph.of(snapshot.snapshot(), displayNames::get).prerequisites())
+                            .orElse(Map.of()));
             InboxModel.Inbox builtInbox = InboxModel.build(inboxInputs,
                     new InboxModel.Query(Optional.ofNullable(requestedFocus).map(Focus::root), requestedFilter));
 

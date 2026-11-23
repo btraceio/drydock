@@ -35,6 +35,8 @@ public final class InboxViewState implements PersistentStateComponent<InboxViewS
         public String filterRoot;
         public String filterName;
         public boolean bannerDismissed;
+        /** True when the user switched the inbox from dependency graphs back to plain state groups. */
+        public boolean byState;
     }
 
     /** The list's group toggles: collapsed (of the open-by-default), expanded (of the closed-by-default), all rows. */
@@ -93,6 +95,14 @@ public final class InboxViewState implements PersistentStateComponent<InboxViewS
     void setFilter(Optional<ProjectRef> filter) {
         stored.filterRoot = filter.map(ref -> ref.root().toString()).orElse(null);
         stored.filterName = filter.map(ProjectRef::name).orElse(null);
+    }
+
+    boolean byState() {
+        return stored.byState;
+    }
+
+    void setByState(boolean byState) {
+        stored.byState = byState;
     }
 
     boolean bannerDismissed() {
