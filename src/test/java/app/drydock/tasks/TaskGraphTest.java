@@ -238,6 +238,18 @@ class TaskGraphTest {
         }
     }
 
+    @Test
+    void prerequisitesListResolvedReferencesInReferenceOrderAndSkipBrokenOnes() {
+        Store store = new Store();
+        store.add("alpha", "pr-a");
+        store.add("alpha", "pr-b", "pr-a");
+        store.add("alpha", "pr-c", "pr-b", "ghost:pr-a", "pr-a");
+        TaskGraph graph = TaskGraph.of(store.snapshot(), store.slugs("alpha", "alpha"));
+        assertEquals(List.of(), graph.prerequisites().get(id("pr-a")));
+        assertEquals(List.of(id("pr-a")), graph.prerequisites().get(id("pr-b")));
+        assertEquals(List.of(id("pr-b"), id("pr-a")), graph.prerequisites().get(id("pr-c")));
+    }
+
     // Matrix 5: inverse follow-ups from resolved edges only, in snapshot order.
 
     @Test

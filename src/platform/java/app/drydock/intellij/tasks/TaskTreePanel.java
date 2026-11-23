@@ -39,6 +39,7 @@ import app.drydock.intellij.tasks.TaskLinks;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 
 import app.drydock.tasks.DelayedTaskRows;
+import app.drydock.tasks.TaskGraph;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskNode.TasksSection;
 import app.drydock.tasks.TaskState;
@@ -212,6 +213,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void pickProject(InboxModel.ProjectRef picked) {
             setFocus(new Focus(picked.root(), picked.name()));
+        }
+
+        @Override
+        public void startGraph(InboxModel.Graph graph) {
+            GraphActions.start(project, graph, inbox);
         }
 
         @Override
@@ -433,6 +439,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // a dismissed add offer. The first rebuild applies the filter.
         InboxViewState saved = viewState();
         inbox.restore(saved.toggles());
+        inbox.setGraphView(!saved.byState());
         bannerDismissed = saved.bannerDismissed();
         saved.filter().ifPresent(ref -> {
             focus = new Focus(ref.root(), ref.name());
@@ -1042,7 +1049,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         AnAction addRemoteRepository = addRemoteRepositoryAction();
         TreeMenu treeMenu = new TreeMenu(menuActions, addRemoteRepository, delayedTaskActions,
                 newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
-                () -> displayedTasks, TaskTreePanel::watchedSnapshot);
+                () -> displayedTasks, TaskTreePanel::watchedSnapshot, GraphActions.startAction(project, inbox));
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
         Disposer.register(this, popups);
         popups.register(tree, treeScroll.getViewport());
@@ -1063,6 +1070,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // button (TaskActions.toolbarActions).
         toolbarActions.addAll(TaskActions.toolbarActions(taskActions));
         toolbarActions.addSeparator();
+        toolbarActions.add(GraphActions.viewToggle(inbox, this::viewState));
         toolbarActions.add(windowFocusAction());
         toolbarActions.add(refresh);
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar("Drydock.TaskTree", toolbarActions, true);
@@ -1380,12 +1388,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Supplier<List<TaskNode>> displayed;
         private final Supplier<TaskLayer> tasks;
         private final Supplier<WatchedSnapshot> watched;
+        /** The "Start Graph" entry, offered when a graph or one of its tasks is selected; null offers none. */
+        private final AnAction startGraph;
 
         TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
                  AnAction[] delayedTaskActions,
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
-                 Supplier<WatchedSnapshot> watched) {
+                 Supplier<WatchedSnapshot> watched, @Nullable AnAction startGraph) {
+            this.startGraph = startGraph;
             this.actions = actions;
             this.addRemoteRepository = addRemoteRepository;
             this.delayedTaskActions = delayedTaskActions;
@@ -1416,6 +1427,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // actions, and the Tasks node offers New Task over the T18a
             // form and the task store's fresh re-read -- everything else
             // keeps the session-layer menu it had.
+            AnAction[] graphMenu = GraphActions.menu(e, startGraph, delayedTaskActions);
+            if (graphMenu != null) {
+                return graphMenu;
+            }
             if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
                 return delayedTaskActions;
             }
@@ -1445,6 +1460,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
         // T20a: a task node is its own selection data -- the task-node
         // actions key on it; selected() answers only session-layer rows.
+        inbox.selectedGraph().filter(graph -> !browsing).ifPresent(graph -> sink.set(GraphActions.SELECTED_GRAPH, graph));
         Object value = selectedValue();
         if (value instanceof DelayedTaskRow task) {
             sink.set(DelayedTaskActions.SELECTED_TASK, task);
@@ -2032,7 +2048,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             Map<RepositoryId, Path> taskRoots = taskProjectRoots(roots, gathered.mainRootOf());
             InboxModel.Inputs inboxInputs = new InboxModel.Inputs(nodes, gathered.projects(), linkedRows,
                     watched.map(snapshot -> snapshot.snapshot().byId()).orElse(Map.of()),
-                    taskRoots, now, ZoneId.systemDefault());
+                    taskRoots, now, ZoneId.systemDefault(),
+                    watched.map(snapshot -> TaskGraph.of(snapshot.snapshot(), displayNames::get).prerequisites())
+                            .orElse(Map.of()));
             InboxModel.Inbox builtInbox = InboxModel.build(inboxInputs,
                     new InboxModel.Query(Optional.ofNullable(requestedFocus).map(Focus::root), requestedFilter));
 

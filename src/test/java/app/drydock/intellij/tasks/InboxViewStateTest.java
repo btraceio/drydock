@@ -38,6 +38,20 @@ class InboxViewStateTest {
     }
 
     @Test
+    void theGraphViewIsOnUntilTheUserSwitchesItOffAndThatSurvivesAReload() {
+        InboxViewState state = new InboxViewState();
+        assertFalse(state.byState(), "a fresh state shows dependency graphs");
+
+        state.setByState(true);
+        InboxViewState reloaded = new InboxViewState();
+        reloaded.loadState(state.getState());
+        assertTrue(reloaded.byState());
+
+        reloaded.setByState(false);
+        assertFalse(reloaded.byState());
+    }
+
+    @Test
     void theBabysittingGroupsTogglesRoundTripByName() {
         InboxViewState state = new InboxViewState();
         state.setToggles(new InboxViewState.Toggles(Set.of(GroupKind.BABYSITTING), Set.of(),

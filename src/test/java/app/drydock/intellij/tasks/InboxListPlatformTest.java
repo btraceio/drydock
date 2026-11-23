@@ -55,6 +55,8 @@ import java.awt.Container;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
 import java.awt.event.MouseEvent;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -84,6 +86,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private final List<Item> activated = new ArrayList<>();
     private final List<Item> pullRequests = new ArrayList<>();
     private final List<ProjectRef> picked = new ArrayList<>();
+    private final List<InboxModel.Graph> startedGraphs = new ArrayList<>();
     private int toggleReports;
     private InboxList list;
     /** The six running sessions, the same rows (and ids) in every inbox a test builds. */
@@ -107,6 +110,11 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
             @Override
             public void pickProject(ProjectRef project) {
                 picked.add(project);
+            }
+
+            @Override
+            public void startGraph(InboxModel.Graph graph) {
+                startedGraphs.add(graph);
             }
 
             @Override
@@ -161,6 +169,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private static List<String> describe(List<Entry> entries) {
         return entries.stream().map(entry -> switch (entry) {
             case Header header -> (header.collapsed() ? "> " : "v ") + header.group().label();
+            case InboxList.GraphHeader header -> (header.collapsed() ? "> " : "v ") + "graph " + header.graph().key();
             case Row row -> "  " + row.item().title();
             case More more -> more.showingAll() ? "  Show less" : "  + " + more.hidden() + " more";
         }).toList();
@@ -598,5 +607,170 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private Color renderedBackground(int index) {
         return list.getCellRenderer().getListCellRendererComponent(list, list.entries().get(index), index, false,
                 false).getBackground();
+    }
+
+    private Inbox graphInbox() {
+        return graphInbox(false);
+    }
+
+    /**
+     * One graph (first, then second which waits on it) and one standalone ready task, no sessions;
+     * {@code earlyRoot} adds a ready task the second also waits on, which sorts before the first.
+     */
+    private Inbox graphInbox(boolean earlyRoot) {
+        TaskId firstId = TaskId.of("first-task");
+        TaskId secondId = TaskId.of("second-task");
+        TaskId aloneId = TaskId.of("alone-task");
+        DelayedTaskRow first = new DelayedTaskRow(new TaskView(firstId, Presentation.READY, List.of(), List.of()),
+                "First task", TASKS, List.of());
+        DelayedTaskRow second = new DelayedTaskRow(new TaskView(secondId, Presentation.BLOCKED,
+                List.of("blocked by 'First task' (open)"), List.of()), "Second task", TASKS, List.of());
+        DelayedTaskRow alone = new DelayedTaskRow(new TaskView(aloneId, Presentation.READY, List.of(), List.of()),
+                "Alone task", TASKS, List.of());
+        TaskId earlyId = TaskId.of("early-task");
+        DelayedTaskRow early = new DelayedTaskRow(new TaskView(earlyId, Presentation.READY, List.of(), List.of()),
+                "Early task", TASKS, List.of());
+        List<DelayedTaskRow> rows = earlyRoot ? List.of(first, second, alone, early) : List.of(first, second, alone);
+        Map<TaskId, TaskDocument> documents = new HashMap<>();
+        for (DelayedTaskRow row : rows) {
+            documents.put(row.id(), new TaskDocument(row.id(), TASKS, row.title(), TaskStatus.OPEN, DoneBy.HUMAN,
+                    Optional.empty(), List.of(), List.of(), "", ""));
+        }
+        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT), rows, documents,
+                Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
+                Map.of(secondId, earlyRoot ? List.of(firstId, earlyId) : List.of(firstId))), Query.NONE);
+    }
+
+    public void testGraphsSitUnderReadyToStartAheadOfItsStandaloneTasks() {
+        list.show(graphInbox(), false);
+
+        assertEquals(List.of("v Ready to start", "v graph first-task", "  First task", "  Second task",
+                "  Alone task"), describe(list.entries()));
+        assertEquals("the header counts what is ready: the graph's first task and the standalone one", 2,
+                ((InboxList.Header) list.entries().get(0)).count());
+        assertEquals(Optional.of("unblocks 1"), InboxList.graphChip(
+                ((InboxList.Row) list.entries().get(2)).node()));
+        assertEquals(Optional.of("waits on 1"), InboxList.graphChip(
+                ((InboxList.Row) list.entries().get(3)).node()));
+        assertEquals("a graph with one outcome is labelled by it", "Second task",
+                InboxList.graphLabel(((InboxList.GraphHeader) list.entries().get(1)).graph()));
+    }
+
+    public void testStartGraphIsAHitOnTheGraphHeaderAndReportsItsGraph() {
+        list.show(graphInbox(), false);
+
+        assertTrue(hitsAcross(1).contains(Hit.START_GRAPH));
+        click(1, Hit.START_GRAPH, 1);
+
+        assertEquals(1, startedGraphs.size());
+        assertEquals("first-task", startedGraphs.get(0).key());
+        assertEquals("a Start graph click does not collapse the graph", 5, list.entries().size());
+    }
+
+    /** A graph of two tasks that wait on each other: stuck, so with no outcome to start. */
+    private Inbox stuckGraphInbox() {
+        TaskId oneId = TaskId.of("one-task");
+        TaskId twoId = TaskId.of("two-task");
+        DelayedTaskRow one = new DelayedTaskRow(new TaskView(oneId, Presentation.BLOCKED, List.of(), List.of()),
+                "One task", TASKS, List.of());
+        DelayedTaskRow two = new DelayedTaskRow(new TaskView(twoId, Presentation.BLOCKED, List.of(), List.of()),
+                "Two <b> task", TASKS, List.of());
+        Map<TaskId, TaskDocument> documents = new HashMap<>();
+        for (DelayedTaskRow row : List.of(one, two)) {
+            documents.put(row.id(), new TaskDocument(row.id(), TASKS, row.title(), TaskStatus.OPEN, DoneBy.HUMAN,
+                    Optional.empty(), List.of(), List.of(), "", ""));
+        }
+        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT), List.of(one, two),
+                documents, Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
+                Map.of(oneId, List.of(twoId), twoId, List.of(oneId))), Query.NONE);
+    }
+
+    public void testAStuckGraphHasNoStartGraphLinkAndStillGetsAReadyGroup() {
+        list.show(stuckGraphInbox(), false);
+
+        assertEquals(List.of("v Ready to start", "v graph one-task", "  One task", "  Two <b> task"),
+                describe(list.entries()));
+        assertFalse(hitsAcross(1).contains(Hit.START_GRAPH));
+        assertEquals("nothing in it is ready", 0, ((InboxList.Header) list.entries().get(0)).count());
+    }
+
+    public void testTheTooltipOfAGraphTaskEscapesTheTitlesItWaitsOn() {
+        list.show(stuckGraphInbox(), false);
+
+        String tooltip = list.getToolTipText(new MouseEvent(list, MouseEvent.MOUSE_MOVED, 0, 0,
+                list.getCellBounds(2, 2).x + 2, list.getCellBounds(2, 2).y + 2, 0, false));
+
+        assertTrue(tooltip, tooltip.contains("Waits on: Two &lt;b&gt; task"));
+        assertFalse(tooltip, tooltip.contains("<b>"));
+    }
+
+    public void testACollapsedGraphStaysCollapsedWhenItsFirstTaskChanges() {
+        list.show(graphInbox(), false);
+        list.toggleGraph(((InboxList.GraphHeader) list.entries().get(1)).graph());
+
+        list.show(graphInbox(true), false);
+
+        InboxList.GraphHeader header = (InboxList.GraphHeader) list.entries().get(1);
+        assertEquals("the first task changed", "early-task", header.graph().key());
+        assertTrue(header.collapsed());
+    }
+
+    /** Delivers Ctrl+Enter straight to the list's key listeners: a headless list has no focus to route it. */
+    private void pressCtrlEnter() {
+        KeyEvent event = new KeyEvent(list, KeyEvent.KEY_PRESSED, 0, InputEvent.CTRL_DOWN_MASK,
+                KeyEvent.VK_ENTER, '\n');
+        for (KeyListener listener : list.getKeyListeners()) {
+            listener.keyPressed(event);
+        }
+    }
+
+    public void testCtrlEnterStartsTheSelectedGraphFromItsHeaderOrOneOfItsTasks() {
+        list.show(graphInbox(), false);
+
+        list.setSelectedIndex(1);
+        pressCtrlEnter();
+        list.setSelectedIndex(3);
+        pressCtrlEnter();
+        list.setSelectedIndex(4);
+        pressCtrlEnter();
+
+        assertEquals("the standalone task is no graph", 2, startedGraphs.size());
+        assertEquals("on the standalone task it is a plain Enter: it opens the task", 1, activated.size());
+    }
+
+    public void testTheGraphHeaderNamesItsProjectAndAClickOnItPicksTheProject() {
+        list.show(graphInbox(), false);
+
+        click(1, Hit.TAG, 1);
+
+        assertEquals(1, picked.size());
+        assertEquals("alpha", picked.get(0).name());
+        assertEquals("the click did not collapse the graph", 5, list.entries().size());
+    }
+
+    public void testASelectedGraphHeaderStaysSelectedAcrossARebuildAndAnotherInbox() {
+        list.show(graphInbox(), false);
+        list.setSelectedIndex(1);
+
+        list.toggleGraph(((InboxList.GraphHeader) list.entries().get(1)).graph());
+        assertTrue(list.getSelectedValue() instanceof InboxList.GraphHeader);
+
+        list.show(graphInbox(), false);
+        assertTrue(list.getSelectedValue() instanceof InboxList.GraphHeader);
+    }
+
+    public void testClickingAGraphHeaderElsewhereCollapsesItAndTheViewToggleRestoresStateGroups() {
+        list.show(graphInbox(), false);
+
+        Rectangle cell = list.getCellBounds(1, 1);
+        list.dispatchEvent(new MouseEvent(list, MouseEvent.MOUSE_CLICKED, 0, InputEvent.BUTTON1_DOWN_MASK,
+                cell.x + 2, cell.y + cell.height / 2, 1, false, MouseEvent.BUTTON1));
+        assertEquals(List.of("v Ready to start", "> graph first-task", "  Alone task"),
+                describe(list.entries()));
+
+        list.setGraphView(false);
+        assertEquals(List.of("v Blocked", "  Second task", "v Ready to start", "  Alone task", "  First task"),
+                describe(list.entries()));
+        assertFalse(list.graphView());
     }
 }
