@@ -23,9 +23,11 @@ import java.util.Optional;
  *
  * <p>A {@link Role#BABYSITTER} carries its own pairing even once it is
  * {@link BabysitState#STOPPED} (a babysitter is created for one engagement,
- * so its pairing is its history: the row shows "stopped"); a {@link
- * Role#WATCHED} session carries only an active pairing -- a watched session
- * whose engagement ended is an ordinary session again. {@link #escalation}
+ * so its pairing is its history; expiry normally removes the session when
+ * the engagement ends, so a stopped row only lingers when that removal was
+ * refused) and shows "stopped"; a {@link Role#WATCHED} session carries only
+ * an active pairing -- a watched session whose engagement ended is an
+ * ordinary session again. {@link #escalation}
  * is the latest unresolved escalation the ACTIVE pairing's babysitter raised
  * for its watched session; none once the engagement stops, so ending an
  * engagement clears its badge without rewriting the escalation history.</p>

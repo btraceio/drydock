@@ -154,8 +154,10 @@ public final class BabysitStateTransforms {
     /**
      * {@code state} with {@code babysitterId}'s active pairing set to {@code
      * next}; the same instance when there is none or it already is. Ending an
-     * engagement is {@code next = STOPPED}: the pairing stays, for the UI's
-     * history, and is inactive from then on.
+     * engagement is {@code next = STOPPED}: the pairing is inactive from then
+     * on. It stays in the transform's answer only for the moment between
+     * this write and the plugin's expiry of the babysitter's session, whose
+     * delete cascade drops the pairing with the row.
      */
     public static ApplicationState withPairingState(ApplicationState state, ManagedSessionId babysitterId,
                                                     BabysitState next) {

@@ -42,6 +42,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -69,6 +70,15 @@ import java.util.function.Predicate;
  *
  * <p>Every path in {@link Inputs} is expected to be canonical already;
  * this class does no I/O.</p>
+ *
+ * <p>A session whose engagement is active as the babysitter is never a row
+ * of its own: it nests beneath the watched session's row, wherever that
+ * row sits (a worktree group, the Inactive band, the unregistered current
+ * project's rows). A babysitter whose watched row is built nowhere — the
+ * watched session is unplaced or under an unregistered project — is
+ * hidden: an engagement is shown through its watched session or not at
+ * all. A stopped pairing's babysitter, when its row still exists (expiry
+ * has not removed it yet), places like any ordinary session.</p>
  */
 public final class TaskTreeModel {
 
@@ -298,13 +308,28 @@ public final class TaskTreeModel {
             local = local.stream().filter(project -> project.root().equals(focused)).toList();
         }
         Map<Path, List<TaskRow>> tasksByMain = new LinkedHashMap<>();
+        Map<ManagedSessionId, List<TaskRow>> babysittersByWatched = new LinkedHashMap<>();
+        Map<Path, List<TaskRow>> babysittersByMain = new LinkedHashMap<>();
         for (ManagedAgentSession session : in.sessions()) {
             if (session.agentKind() == AgentKind.TERMINAL) {
+                continue;
+            }
+            SessionBabysit part = in.babysitBySession().get(session.id());
+            if (part != null && part.role() == SessionBabysit.Role.BABYSITTER && part.active()) {
+                placement(in, local, session).ifPresent(main -> {
+                    TaskRow babysitter = row(in, main, session);
+                    babysittersByWatched.computeIfAbsent(part.pairing().watchedId(), ignored -> new ArrayList<>())
+                            .add(babysitter);
+                    babysittersByMain.computeIfAbsent(main, ignored -> new ArrayList<>()).add(babysitter);
+                });
                 continue;
             }
             placement(in, local, session).ifPresent(main ->
                     tasksByMain.computeIfAbsent(main, ignored -> new ArrayList<>()).add(row(in, main, session)));
         }
+        List<TaskRow> hiddenBabysitters = nestBabysitters(tasksByMain, babysittersByWatched);
+        Set<ManagedSessionId> hiddenBabysitterIds = new LinkedHashSet<>();
+        hiddenBabysitters.forEach(babysitter -> hiddenBabysitterIds.add(babysitter.session().id()));
 
         List<TaskNode> nodes = new ArrayList<>();
         in.listProblem().ifPresent(message -> nodes.add(new TaskNode.ListProblem(message)));
@@ -332,8 +357,11 @@ public final class TaskTreeModel {
             boolean thisWindow = project.root().equals(current.orElse(null));
             boolean nameMatch = nameMatch(in.filter(), project.displayName());
             String itemFilter = itemFilter(in.filter(), nameMatch);
+            List<TaskRow> hiddenForProject = babysittersByMain.getOrDefault(project.root(), List.of()).stream()
+                    .filter(babysitter -> hiddenBabysitterIds.contains(babysitter.session().id()))
+                    .toList();
             Children classified = children(in, project.root(),
-                    tasksByMain.getOrDefault(project.root(), List.of()), itemFilter);
+                    tasksByMain.getOrDefault(project.root(), List.of()), hiddenForProject, itemFilter);
             if (termsConstrain && !classified.termsMatched() && !nameMatch) {
                 continue;
             }
@@ -342,8 +370,8 @@ public final class TaskTreeModel {
                     && !(termsConstrain && classified.termsMatched())) {
                 continue;
             }
-            int running = (int) tasksByMain.getOrDefault(project.root(), List.of()).stream()
-                    .filter(TaskRow::running).count();
+            int running = (int) runningCount(tasksByMain.getOrDefault(project.root(), List.of()))
+                    + (int) hiddenForProject.stream().filter(TaskRow::running).count();
             nodes.add(new ProjectRow(project, in.missingFolders().contains(project.root()), thisWindow,
                     classified.visible(), classified.inactive(), running));
         }
@@ -472,10 +500,58 @@ public final class TaskTreeModel {
                 Optional.ofNullable(in.babysitBySession().get(session.id())));
     }
 
+    /**
+     * Nests every active babysitter row beneath its watched session's row,
+     * wherever that row landed in {@code tasksByMain}; a babysitter whose
+     * watched row was built nowhere stays unbuilt — hidden. Mutates the
+     * map's lists in place, before the per-project children pass runs.
+     */
+    private static List<TaskRow> nestBabysitters(Map<Path, List<TaskRow>> tasksByMain,
+                                                 Map<ManagedSessionId, List<TaskRow>> babysittersByWatched) {
+        if (babysittersByWatched.isEmpty()) {
+            return List.of();
+        }
+        Map<ManagedSessionId, List<TaskRow>> pending = new LinkedHashMap<>(babysittersByWatched);
+        for (Map.Entry<Path, List<TaskRow>> byMain : tasksByMain.entrySet()) {
+            List<TaskRow> rows = byMain.getValue();
+            List<TaskRow> rebuilt = null;
+            for (int i = 0; i < rows.size(); i++) {
+                TaskRow row = rows.get(i);
+                List<TaskRow> children = pending.remove(row.session().id());
+                if (children != null) {
+                    if (rebuilt == null) {
+                        rebuilt = new ArrayList<>(rows);
+                    }
+                    rebuilt.set(i, row.withBabysitters(children));
+                }
+            }
+            if (rebuilt != null) {
+                byMain.setValue(rebuilt);
+            }
+        }
+        // Entries left in `pending` have no visible watched session, so the
+        // babysitter rows are hidden but still reserve their worktrees and
+        // contribute to the owning project's running count.
+        return pending.values().stream().flatMap(List::stream).toList();
+    }
+
     private record Children(List<TaskNode> visible, List<IdleWorktree> inactive, boolean termsMatched) {
     }
 
-    private static Children children(Inputs in, Path main, List<TaskRow> tasks, String itemFilter) {
+    /** The row and everything nested beneath it that is running. */
+    private static long runningCount(List<TaskRow> rows) {
+        long count = 0;
+        for (TaskRow row : rows) {
+            if (row.running()) {
+                count++;
+            }
+            count += runningCount(row.babysitters());
+        }
+        return count;
+    }
+
+    private static Children children(Inputs in, Path main, List<TaskRow> tasks,
+                                     List<TaskRow> hiddenBabysitters, String itemFilter) {
         List<TaskNode> children = new ArrayList<>();
         List<TaskRow> visibleTasks = sorted(tasks).stream()
                 .filter(task -> matches(itemFilter, task))
@@ -496,9 +572,18 @@ public final class TaskTreeModel {
         List<TaskNode> sessionlessWorktrees = new ArrayList<>();
         List<IdleWorktree> inactive = new ArrayList<>();
         List<IdleWorktree> stale = new ArrayList<>();
+        // A nested babysitter occupies its detached worktree just like a
+        // top-level row occupies its own: neither worktree is offered for
+        // Start.
+        Set<Path> occupied = new LinkedHashSet<>();
+        tasks.forEach(task -> {
+            occupied.add(task.session().workingDirectory());
+            task.babysitters().forEach(babysitter ->
+                    occupied.add(babysitter.session().workingDirectory()));
+        });
+        hiddenBabysitters.forEach(babysitter -> occupied.add(babysitter.session().workingDirectory()));
         for (Worktree worktree : in.worktreesByMainRoot().getOrDefault(main, List.of())) {
-            if (worktree.mainCheckout() || worktree.prunable()
-                    || tasks.stream().anyMatch(task -> task.session().workingDirectory().equals(worktree.path()))) {
+            if (worktree.mainCheckout() || worktree.prunable() || occupied.contains(worktree.path())) {
                 continue;
             }
             String branch = worktree.branch().orElse(String.valueOf(worktree.path().getFileName()));
@@ -573,13 +658,13 @@ public final class TaskTreeModel {
                 case JiraNode jira -> jira.children();
                 case JiraGroupRow group -> group.children();
                 case WorktreeGroup group -> group.tasks();
+                case TaskRow row -> row.babysitters();
                 case StaleWorktrees stale -> stale.worktrees();
                 case ListProblem ignored -> List.of();
                 case AddCurrentProject ignored -> List.of();
                 case Deferred ignored -> List.of();
                 case Placeholder ignored -> List.of();
                 case Ghost ignored -> List.of();
-                case TaskRow ignored -> List.of();
                 case IdleWorktree ignored -> List.of();
                 case IssueRow ignored -> List.of();
                 case JiraIssueRow ignored -> List.of();
@@ -806,7 +891,11 @@ public final class TaskTreeModel {
 
     private static boolean matches(String filter, TaskRow task) {
         return filter.isEmpty() || contains(task.session().displayName(), filter)
-                || task.branch().map(branch -> contains(branch, filter)).orElse(false);
+                || task.branch().map(branch -> contains(branch, filter)).orElse(false)
+                // A hit on a nested babysitter keeps its watched row, as a
+                // listing hit keeps its container: the nested row is only
+                // ever reachable through it.
+                || task.babysitters().stream().anyMatch(babysitter -> matches(filter, babysitter));
     }
 
     private static boolean matches(String filter, OpenIssue issue) {

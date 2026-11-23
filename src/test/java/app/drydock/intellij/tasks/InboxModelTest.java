@@ -589,10 +589,8 @@ class InboxModelTest {
     }
 
     @Test
-    void anActiveBabysitterGoesToBabysittingBeforeEveryOtherCheck() {
-        // Running, waiting for the user AND flagged: every other group would
-        // take it, Babysitting takes it first.
-        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.NEEDS_ATTENTION), true, NOW);
+    void anActiveBabysitterRunsInTheRegularGroups() {
+        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
         TaskRow watched = running("Watched", NOW);
         Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
         alphaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
@@ -602,13 +600,9 @@ class InboxModelTest {
 
         Inbox inbox = inbox(Query.NONE);
 
-        assertEquals(List.of(GroupKind.RUNNING, GroupKind.READY, GroupKind.BABYSITTING, GroupKind.IDLE),
-                kinds(inbox), "Babysitting sits between Ready to start and Idle");
-        assertEquals(List.of("babysit PR #12"), titles(inbox, GroupKind.BABYSITTING));
-        assertEquals(List.of("Watched"), titles(inbox, GroupKind.RUNNING),
-                "a watched session with nothing to say stays where its dot puts it");
-        assertEquals("Babysitting", inbox.groups().get(2).label());
-        assertEquals(List.of(GroupKind.BABYSITTING), kinds(inbox(new Query(Optional.empty(), "is:babysit"))));
+        assertEquals(List.of(GroupKind.RUNNING, GroupKind.READY, GroupKind.IDLE), kinds(inbox));
+        assertEquals(List.of("babysit PR #12", "Watched"), titles(inbox, GroupKind.RUNNING),
+                "a babysitter runs like any session; no group of its own any more");
     }
 
     @Test
@@ -626,7 +620,7 @@ class InboxModelTest {
     }
 
     @Test
-    void anEscalatedWatchedSessionNeedsYouAndTheBabysitterIsNoActivity() {
+    void anEscalatedEngagementPutsBothSidesInNeedsYou() {
         TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
         TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
         Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.ESCALATED, true);
@@ -635,11 +629,11 @@ class InboxModelTest {
 
         Inbox inbox = inbox(Query.NONE);
 
-        assertEquals(List.of(GroupKind.NEEDS_YOU, GroupKind.BABYSITTING), kinds(inbox));
-        assertEquals(List.of("Watched"), titles(inbox, GroupKind.NEEDS_YOU),
-                "a stopped watched session its babysitter escalated needs the human");
-        assertEquals(2, inbox.quietProjects(), "a project with only a babysitter is quiet");
-        assertEquals(List.of("alpha"), inbox.projects().stream().filter(suggestion -> suggestion.active() > 0)
+        assertEquals(List.of(GroupKind.NEEDS_YOU), kinds(inbox));
+        assertEquals(List.of("Watched", "babysit PR #12"), titles(inbox, GroupKind.NEEDS_YOU),
+                "both sides ask for the human: the escalation is the babysitter asking, the human acts on the watched session");
+        assertEquals(1, inbox.quietProjects(), "only the project with no session at all is quiet");
+        assertEquals(List.of("alpha", "beta"), inbox.projects().stream().filter(suggestion -> suggestion.active() > 0)
                 .map(suggestion -> suggestion.project().name()).toList());
     }
 

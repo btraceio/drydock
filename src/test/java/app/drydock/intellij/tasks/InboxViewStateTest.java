@@ -52,18 +52,22 @@ class InboxViewStateTest {
     }
 
     @Test
-    void theBabysittingGroupsTogglesRoundTripByName() {
+    void theGroupTogglesRoundTripByNameAndUnknownNamesAreDropped() {
         InboxViewState state = new InboxViewState();
-        state.setToggles(new InboxViewState.Toggles(Set.of(GroupKind.BABYSITTING), Set.of(),
-                Set.of(GroupKind.BABYSITTING)));
-        assertEquals(List.of("BABYSITTING"), state.getState().collapsed, "stored by the enum's name");
+        state.setToggles(new InboxViewState.Toggles(Set.of(GroupKind.FLAGGED), Set.of(),
+                Set.of(GroupKind.FLAGGED)));
+        assertEquals(List.of("FLAGGED"), state.getState().collapsed, "stored by the enum's name");
+
+        InboxViewState.Stored stored = state.getState();
+        stored.collapsed = List.of("FLAGGED", "BABYSITTING", "NO_SUCH_GROUP");
+        stored.showingAll = List.of("FLAGGED", "BABYSITTING", "NO_SUCH_GROUP");
 
         InboxViewState reloaded = new InboxViewState();
-        reloaded.loadState(state.getState());
-        assertEquals(Set.of(GroupKind.BABYSITTING), reloaded.toggles().collapsed());
-        assertEquals(Set.of(GroupKind.BABYSITTING), reloaded.toggles().showingAll());
-        assertFalse(GroupKind.BABYSITTING.collapsedByDefault(), "the section opens expanded");
-        assertTrue(GroupKind.BABYSITTING.truncates());
+        reloaded.loadState(stored);
+        assertEquals(Set.of(GroupKind.FLAGGED), reloaded.toggles().collapsed());
+        assertEquals(Set.of(GroupKind.FLAGGED), reloaded.toggles().showingAll());
+        assertFalse(GroupKind.FLAGGED.collapsedByDefault(), "the section opens expanded");
+        assertTrue(GroupKind.FLAGGED.truncates());
     }
 
     @Test

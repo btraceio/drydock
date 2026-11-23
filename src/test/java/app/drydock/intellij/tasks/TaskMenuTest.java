@@ -725,7 +725,7 @@ class TaskMenuTest {
     }
 
     @Test
-    void bothSidesOfAnEngagementOfferTheJumpFirstAndStopWithTheManagement() {
+    void theWatchedSideOffersTheJumpAndAnActiveBabysitterIsNestedNotJumping() {
         TaskRow watched = task(false, new TaskPlacement.Idle(true));
         TaskRow babysitter = task(true, new TaskPlacement.Here());
         Map<ManagedSessionId, SessionBabysit> parts = SessionBabysit.join(List.of(new BabysitPairing(
@@ -741,9 +741,11 @@ class TaskMenuTest {
                 List.of(TaskMenu.Item.OPEN_MAIN_CHECKOUT),
                 List.of(TaskMenu.Item.DONE_WITH_TASK)),
                 sectionsOf(withBabysit(watched, parts.get(watched.session().id()))));
+        // An active engagement's babysitter is nested beneath its watched
+        // session: no Go to Watched Session, the parent is right there.
         List<List<TaskMenu.Item>> babysitterMenu = sectionsOf(withBabysit(babysitter,
                 parts.get(babysitter.session().id())));
-        assertEquals(List.of(TaskMenu.Item.SHOW_WATCHED), babysitterMenu.get(0));
+        assertTrue(babysitterMenu.stream().noneMatch(section -> section.contains(TaskMenu.Item.SHOW_WATCHED)));
         assertTrue(babysitterMenu.contains(List.of(TaskMenu.Item.STOP_BABYSITTING)));
 
         // A stopped engagement: the babysitter keeps its way back, nothing stops twice.

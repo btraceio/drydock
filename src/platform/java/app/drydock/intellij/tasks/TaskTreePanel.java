@@ -2325,10 +2325,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /**
      * The Swing node of one model node, attaching every child a folder node
-     * holds (a project, a section, a worktree, an issues container or a Jira
-     * group) — a node whose children are never attached is a leaf the tree
-     * cannot expand, however expandable the model says it is. Package-private
-     * so the dispatch tests can assert the mapping directly.
+     * holds (a project, a section, a worktree, an issues container, a Jira
+     * group) and every nested babysitter a watched session row carries — a
+     * node whose children are never attached is a leaf the tree cannot
+     * expand, however expandable the model says it is. Package-private so
+     * the dispatch tests can assert the mapping directly.
      */
     static DefaultMutableTreeNode treeNode(TaskNode node) {
         DefaultMutableTreeNode treeNode = new DefaultMutableTreeNode(node);
@@ -2337,6 +2338,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case Section section -> section.children();
             case StaleWorktrees stale -> stale.worktrees();
             case WorktreeGroup group -> group.tasks();
+            case TaskRow row -> row.babysitters();
             case JiraGroupRow group -> group.children();
             case GitHubNode github -> github.children();
             case JiraNode jira -> jira.children();

@@ -195,7 +195,7 @@ public final class BabysitMonitorService implements Disposable {
     private final WriteGuard guard;
     private final Waker waker;
     private final Runnable publish;
-    private final Consumer<ManagedSessionId> stopAgent;
+    private final Consumer<BabysitPairing> forgetBabysitter;
     private final LongSupplier clock;
     private final long firstTickMs;
     private final long periodMs;
@@ -210,12 +210,13 @@ public final class BabysitMonitorService implements Disposable {
 
     /**
      * The full seam; {@code closeOnDispose} is closed by {@link #dispose()};
-     * {@code stopAgent} stops a babysitter's agent wherever it runs (a no-op
-     * when none does) and must not block.
+     * {@code forgetBabysitter} removes an ended engagement's babysitter
+     * session wherever it is hosted -- agent and console with it, a no-op
+     * when there is no row -- and must not block.
      */
     BabysitMonitorService(Supplier<ApplicationStateStore> stateStore, Path baseDir, PrReader reader,
                           Function<Path, Optional<String>> repositoryOf, WriteGuard guard, Waker waker,
-                          Runnable publish, Consumer<ManagedSessionId> stopAgent, LongSupplier clock,
+                          Runnable publish, Consumer<BabysitPairing> forgetBabysitter, LongSupplier clock,
                           long firstTickMs, long periodMs, long backoffInitialMs, AutoCloseable closeOnDispose) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.baseDir = Objects.requireNonNull(baseDir, "baseDir");
@@ -224,7 +225,7 @@ public final class BabysitMonitorService implements Disposable {
         this.guard = Objects.requireNonNull(guard, "guard");
         this.waker = Objects.requireNonNull(waker, "waker");
         this.publish = Objects.requireNonNull(publish, "publish");
-        this.stopAgent = Objects.requireNonNull(stopAgent, "stopAgent");
+        this.forgetBabysitter = Objects.requireNonNull(forgetBabysitter, "forgetBabysitter");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.firstTickMs = firstTickMs;
         this.periodMs = periodMs;
@@ -246,8 +247,11 @@ public final class BabysitMonitorService implements Disposable {
      * open project. One {@link BabysitWaker} serves every wake (its
      * per-babysitter serialisation and woken marks are per instance), made
      * on the first wake; nothing IDE-bound is touched until a tick needs it.
-     * An ended engagement's babysitter is stopped through the
-     * application-wide execution registry, wherever it is shown.
+     * An ended engagement's babysitter session is removed through the
+     * session service of the project hosting the babysitter, else the
+     * watched session, else any open project; with no project at all its
+     * agent is stopped through the application-wide execution registry and
+     * the row is left for the next start.
      */
     public static BabysitMonitorService create(DrydockPluginService plugin, Path baseDir, ExecutorService executor,
                                                Supplier<List<SharedProject>> projects) {
@@ -263,7 +267,24 @@ public final class BabysitMonitorService implements Disposable {
                                 : BabysitWaker.of(plugin, AgentExecutionRegistry.getInstance(),
                                         BabysitMonitorService::sessionsFor))
                         .wake(pairing.babysitterId(), pointer),
-                DrydockSessionsListener::publishChanged, id -> AgentExecutionRegistry.getInstance().stop(id),
+                DrydockSessionsListener::publishChanged,
+                pairing -> {
+                    Optional<DrydockSessionService> sessions = sessionsFor(pairing);
+                    if (sessions.isEmpty()) {
+                        LOG.log(Level.WARNING, "No open project can remove the ended babysitter "
+                                + pairing.babysitterId() + "; its agent is stopped and its row stays");
+                        AgentExecutionRegistry.getInstance().stop(pairing.babysitterId());
+                        return;
+                    }
+                    sessions.get().deleteSession(pairing.babysitterId())
+                            .handle((ignored, failure) -> {
+                                if (failure != null) {
+                                    LOG.log(Level.WARNING, "Could not remove the ended babysitter "
+                                            + pairing.babysitterId() + ": " + failure);
+                                }
+                                return null;
+                            });
+                },
                 System::currentTimeMillis,
                 FIRST_TICK_MS, PERIOD_MS, BabysitMonitorRules.BACKOFF_INITIAL_MS, read);
     }
@@ -619,13 +640,14 @@ public final class BabysitMonitorService implements Disposable {
         });
         if (changed.get()) {
             publish.run();
-            // Nothing is left to watch: stop the babysitter's agent, as
-            // deleting the watched session does. Its row stays.
+            // The ended engagement's babysitter session is removed outright
+            // (agent and console with it): with nothing left to watch it
+            // would only linger as a row the human had to remove.
             try {
-                stopAgent.accept(pairing.babysitterId());
+                forgetBabysitter.accept(pairing);
             } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "Could not stop babysitter " + pairing.babysitterId() + " of the ended"
-                        + " engagement for PR #" + pairing.prNumber() + ": " + e);
+                LOG.log(Level.WARNING, "Could not remove the babysitter " + pairing.babysitterId()
+                        + " of the ended engagement for PR #" + pairing.prNumber() + ": " + e);
             }
         }
         tracks.remove(pairing.babysitterId());

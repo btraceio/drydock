@@ -53,10 +53,10 @@ class SearchTermsTest {
     }
 
     @Test
-    void isBabysitNarrowsToTheBabysittingSectionAndBabysitterIsPlainText() {
+    void isBabysitIsPlainTextNowThatBabysittersRunInTheRegularGroups() {
         SearchTerms<InboxModel.GroupKind> terms = parse("IS:babysit is:needs is:babysitter");
-        assertEquals(Set.of(InboxModel.GroupKind.BABYSITTING, InboxModel.GroupKind.NEEDS_YOU), terms.groupKinds());
-        assertEquals("is:babysitter", terms.plainText());
+        assertEquals(Set.of(InboxModel.GroupKind.NEEDS_YOU), terms.groupKinds());
+        assertEquals("IS:babysit is:babysitter", terms.plainText());
         // Every group's token parses back to its group: a new group cannot
         // ship without a working is: word.
         for (InboxModel.GroupKind kind : InboxModel.GroupKind.values()) {
