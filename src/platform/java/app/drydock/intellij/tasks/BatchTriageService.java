@@ -183,7 +183,19 @@ public final class BatchTriageService implements Disposable {
 
     public BatchTriageService(@NotNull Project project) {
         this.project = project;
-        MessageBusConnection bus = project.getMessageBus().connect(this);
+        // AgentExecutionRegistry publishes execution ends on the APPLICATION
+        // bus, and a project bus is a child of it: a project-bus subscriber
+        // never receives an application-bus publication. Subscribed on the
+        // project bus, the drain only ever ran for launch failures -- the
+        // first parallelism sessions launched and the batch then sat active
+        // forever, refusing a second triage while nothing ran. The same
+        // application-bus subscription SessionHostController, TaskTreePanel
+        // and SessionHostVisibility already use. Cross-project ends are
+        // harmless here: ended() only frees a slot for a session this batch
+        // itself launched. The connection is still disposed with the
+        // project (a project service dies with it), and drain() refuses to
+        // work a disposed service or a closed project.
+        MessageBusConnection bus = ApplicationManager.getApplication().getMessageBus().connect(this);
         bus.subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
             @Override
             public void executionTerminated(@NotNull ManagedSessionId sessionId, boolean stopRequested,
