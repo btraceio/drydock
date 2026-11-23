@@ -2002,9 +2002,10 @@ public final class DrydockSessionService implements AgentExecutionListener {
                         }
                         consoles.forgetConsole(sessionId);
                         // A babysitter has nothing left to watch once its
-                        // watched session is forgotten: its agent is stopped
-                        // here and its pairing leaves with the row below.
-                        stopBabysittersOf(sessionId);
+                        // watched session is forgotten: its row (agent and
+                        // console with it) is removed outright, and its
+                        // pairing leaves with its own row's delete cascade.
+                        forgetBabysittersOf(sessionId);
                         // The row's eval marking dies with the session; the
                         // mark is keyed on the agent session id the row bound.
                         unmarkEvalAsync(session);
@@ -2924,21 +2925,18 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
-     * Stops the agent of every babysitter watching {@code watchedId},
-     * wherever it is shown; best-effort, a failure is logged. The rows stay:
-     * the human removes a babysitter (and its worktree) the way any session
-     * is removed.
+     * Removes the row of every babysitter watching {@code watchedId}, with
+     * its agent and console: a babysitter whose watched session is gone has
+     * nothing to watch and, nested or hidden as it now is, nowhere to be
+     * shown. Its pairing leaves with its own row's cascade; one a refused
+     * delete left behind still leaves with {@code sessionId}'s own cascade
+     * below. Best-effort: a failure is logged and the other babysitters go
+     * on.
      */
-    private void stopBabysittersOf(ManagedSessionId watchedId) {
+    private void forgetBabysittersOf(ManagedSessionId watchedId) {
         for (BabysitPairing pairing : stateStore.get().state().pairings()) {
-            if (!pairing.watchedId().equals(watchedId)) {
-                continue;
-            }
-            try {
-                consoles.stopConsole(pairing.babysitterId());
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, () -> "Could not stop babysitter " + pairing.babysitterId()
-                        + " of the forgotten session " + watchedId + ": " + e);
+            if (pairing.watchedId().equals(watchedId)) {
+                forgetBabysitterRow(pairing.babysitterId(), " of the forgotten session " + watchedId);
             }
         }
     }
@@ -2947,38 +2945,67 @@ public final class DrydockSessionService implements AgentExecutionListener {
      * The human's Stop Babysitting: ends the active engagement {@code
      * sessionId} takes part in, on either side -- the watched session or its
      * babysitter. One store transform re-resolves the active pairing in the
-     * state it transforms and sets it {@link BabysitState#STOPPED} (kept for
-     * history, inactive from then on, as the monitor ends one); then the
-     * change is published and the babysitter's agent is stopped wherever it
-     * is shown, like the delete cascade does. The babysitter's row stays, for
-     * the human to remove through Done. Completes with the pairing as it was
-     * before the stop, or empty when no active engagement involves {@code
-     * sessionId} (already stopped, or never babysat) -- nothing is written
-     * or stopped then.
+     * state it transforms and sets it {@link BabysitState#STOPPED}; then
+     * the change is published and the babysitter's session is removed
+     * outright ({@link #expireBabysitter}): with the engagement gone it has
+     * nothing to watch, and it would only linger as a row the human had to
+     * remove. Completes with the pairing as it was before the stop, or
+     * empty when no active engagement involves {@code sessionId} (already
+     * stopped, or never babysat) -- nothing is written or stopped then.
      */
     public CompletableFuture<Optional<BabysitPairing>> stopBabysitting(ManagedSessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
-        return initialization.thenApplyAsync(unused -> {
-            AtomicReference<BabysitPairing> stopped = new AtomicReference<>();
-            stateStore.get().update(state -> {
-                Optional<BabysitPairing> active = activeEngagementOf(state, sessionId);
-                stopped.set(active.orElse(null));
-                return active.map(pairing -> BabysitStateTransforms.withPairingState(state, pairing.babysitterId(),
-                        BabysitState.STOPPED)).orElse(state);
-            });
-            BabysitPairing pairing = stopped.get();
-            if (pairing == null) {
-                return Optional.<BabysitPairing>empty();
+        AtomicReference<BabysitPairing> stopped = new AtomicReference<>();
+        return initialization
+                .thenApplyAsync(unused -> {
+                    stateStore.get().update(state -> {
+                        Optional<BabysitPairing> active = activeEngagementOf(state, sessionId);
+                        stopped.set(active.orElse(null));
+                        return active.map(pairing -> BabysitStateTransforms.withPairingState(state,
+                                pairing.babysitterId(), BabysitState.STOPPED)).orElse(state);
+                    });
+                    return stopped.get();
+                }, executor)
+                .thenApply(pairing -> {
+                    if (pairing == null) {
+                        return Optional.<BabysitPairing>empty();
+                    }
+                    DrydockSessionsListener.publishChanged();
+                    expireBabysitter(pairing);
+                    return Optional.of(pairing);
+                });
+    }
+
+    /**
+     * Removes an ended engagement's babysitter session the way Done does:
+     * {@code deleteSession} stops the agent, closes its console, removes
+     * the row and -- by the delete cascade -- the stopped pairing. The
+     * detached worktree stays, removable like any session's. A babysitter
+     * still launching cannot be removed yet (the removal claim is taken);
+     * when the launch settles, its own cancellation path
+     * ({@code stopIfCancelled}, reading the already-inactive pairing)
+     * stops the agent. Fire-and-forget: a failure is logged.
+     */
+    private void expireBabysitter(BabysitPairing pairing) {
+        forgetBabysitterRow(pairing.babysitterId(), " whose engagement was stopped");
+    }
+
+    /**
+     * Fire-and-forget removal of {@code babysitter}'s session row, agent
+     * and console with it. A missing row is nothing to remove; a refused
+     * or failed delete is logged and left to its own path or the human.
+     */
+    private void forgetBabysitterRow(ManagedSessionId babysitter, String why) {
+        if (findIn(stateStore.get().state(), babysitter) == null) {
+            return;
+        }
+        deleteSession(babysitter).handle((ignored, failure) -> {
+            if (failure != null) {
+                LOG.log(Level.WARNING, () -> "Could not remove the babysitter " + babysitter + why
+                        + ": " + unwrap(failure));
             }
-            DrydockSessionsListener.publishChanged();
-            try {
-                consoles.stopConsole(pairing.babysitterId());
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, () -> "Could not stop babysitter " + pairing.babysitterId()
-                        + " after its engagement was stopped: " + e);
-            }
-            return Optional.of(pairing);
-        }, executor);
+            return null;
+        });
     }
 
     /** Pure: the active (not STOPPED) pairing {@code sessionId} is the babysitter or the watched session of. */

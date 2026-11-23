@@ -75,7 +75,7 @@ class BabysitMonitorServiceTest {
     private final List<String> pointers = new CopyOnWriteArrayList<>();
     private final List<BabysitState> stateDuringWake = new CopyOnWriteArrayList<>();
     private final AtomicInteger published = new AtomicInteger();
-    private final List<ManagedSessionId> stoppedAgents = new CopyOnWriteArrayList<>();
+    private final List<ManagedSessionId> forgottenBabysitters = new CopyOnWriteArrayList<>();
 
     private ApplicationStateStore store;
     private Verdict verdict = new Verdict.Allowed(HEAD);
@@ -127,7 +127,8 @@ class BabysitMonitorServiceTest {
                     stateDuringWake.add(pairing().state());
                     return wakeAnswer.get();
                 },
-                published::incrementAndGet, stoppedAgents::add, now::get, firstTickMs, periodMs, 30_000, null);
+                published::incrementAndGet, pairing -> forgottenBabysitters.add(pairing.babysitterId()),
+                now::get, firstTickMs, periodMs, 30_000, null);
     }
 
     private static Snapshot pr(PrLifecycle lifecycle, String head, Mergeable mergeable, Check... checks) {
@@ -399,7 +400,7 @@ class BabysitMonitorServiceTest {
 
         assertEquals(BabysitState.STOPPED, pairing().state());
         assertEquals(publishedBefore + 1, published.get());
-        assertEquals(List.of(babysitter), stoppedAgents, "the babysitter's agent is stopped, its row kept");
+        assertEquals(List.of(babysitter), forgottenBabysitters, "the babysitter session is handed to the forget seam");
         assertTrue(store.state().sessions().stream().anyMatch(row -> row.id().equals(babysitter)));
         assertEquals(List.of(), babysitFiles());
         int reads = readCalls.get();
@@ -413,11 +414,11 @@ class BabysitMonitorServiceTest {
 
         assertEquals(BabysitState.STOPPED, pairing().state());
         assertEquals(List.of(), pointers);
-        assertEquals(List.of(babysitter), stoppedAgents);
+        assertEquals(List.of(babysitter), forgottenBabysitters);
     }
 
     @Test
-    void aFailingAgentStopDoesNotKeepTheEngagementAlive() {
+    void aFailingBabysitterRemovalDoesNotKeepTheEngagementAlive() {
         monitor.dispose();
         monitor = new BabysitMonitorService(() -> store, base,
                 (root, repository, prNumber) -> CompletableFuture.completedFuture(
@@ -425,8 +426,9 @@ class BabysitMonitorServiceTest {
                 root -> Optional.empty(),
                 (pairing, branch, knownBase) -> CompletableFuture.completedFuture(verdict),
                 (pairing, pointer) -> wakeAnswer.get(),
-                published::incrementAndGet, id -> {
-                    throw new IllegalStateException("no registry");
+                published::incrementAndGet, pairing -> {
+                    forgottenBabysitters.add(pairing.babysitterId());
+                    throw new IllegalStateException("no session service");
                 }, now::get, 60_000, 60_000, 30_000, null);
 
         monitor.tick();
@@ -453,8 +455,8 @@ class BabysitMonitorServiceTest {
         List<BabysitState> states = store.state().pairings().stream().map(BabysitPairing::state).toList();
         assertEquals(List.of(BabysitState.WATCHING, BabysitState.STOPPED, BabysitState.STOPPED), states);
         assertEquals(3, published.get());
-        assertEquals(List.of(ghost, orphanedBabysitter), stoppedAgents,
-                "the babysitters of the ended engagements are stopped (a no-op for the one with no row)");
+        assertEquals(List.of(ghost, orphanedBabysitter), forgottenBabysitters,
+                "the babysitters of the ended engagements are forgotten (a no-op for the one with no row)");
     }
 
     @Test
@@ -618,7 +620,8 @@ class BabysitMonitorServiceTest {
                 (pairing, branch, knownBase) -> CompletableFuture.completedFuture(verdict),
                 (pairing, pointer) -> CompletableFuture.completedFuture(
                         new WakeOutcome.Skipped(Decision.SKIP_BUSY)),
-                published::incrementAndGet, stoppedAgents::add, now::get, 1, 1, 30_000, null);
+                published::incrementAndGet, pairing -> forgottenBabysitters.add(pairing.babysitterId()),
+                now::get, 1, 1, 30_000, null);
 
         monitor.start();
         monitor.start();

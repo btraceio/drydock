@@ -67,6 +67,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.PathManager;
 import com.intellij.util.EnvironmentUtil;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.Disposer;
 
 import java.io.IOException;
@@ -81,6 +82,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -935,7 +937,14 @@ public final class DrydockPluginService implements Disposable {
         cleanEndedEngagements(store.state(), result.ended());
     }
 
-    /** Deletes the delta and instructions files of engagements that ended while detached, unless still shared. */
+    /**
+     * Cleans up engagements that ended while the IDE was away: the delta
+     * and instructions files of each, unless still shared, and the
+     * babysitter's session row outright -- the watcher ended it and the
+     * ingest marked it STOPPED, so the row would only linger. Best-effort:
+     * with no open project able to host the removal, the row stays for the
+     * next start.
+     */
     private void cleanEndedEngagements(ApplicationState state, Set<ManagedSessionId> ended) {
         for (BabysitPairing pairing : state.pairings()) {
             if (!ended.contains(pairing.babysitterId()) || pairing.state() != BabysitState.STOPPED) {
@@ -951,7 +960,32 @@ public final class DrydockPluginService implements Disposable {
                             + pairing.prNumber() + ": " + e);
                 }
             }
+            forgetEndedBabysitterRow(state, pairing.babysitterId());
         }
+    }
+
+    /** Removes the row of an ended engagement's babysitter, agent and console with it. */
+    private void forgetEndedBabysitterRow(ApplicationState state, ManagedSessionId babysitter) {
+        if (state.sessions().stream().noneMatch(row -> row.id().equals(babysitter))) {
+            return;
+        }
+        Optional<Project> host = AgentExecutionRegistry.getInstance().execution(babysitter)
+                .flatMap(AgentExecution::host).filter(project -> !project.isDisposed())
+                .or(() -> Arrays.stream(ProjectManager.getInstance().getOpenProjects())
+                        .filter(project -> !project.isDisposed() && !project.isDefault()).findFirst());
+        if (host.isEmpty()) {
+            LOG.log(Level.WARNING, "No open project can remove the ended babysitter " + babysitter
+                    + "; its row stays");
+            return;
+        }
+        DrydockStartupActivity.sessions(host.get()).deleteSession(babysitter)
+                .handle((ignored, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not remove the ended babysitter " + babysitter
+                                + ": " + failure);
+                    }
+                    return null;
+                });
     }
 
     /**
