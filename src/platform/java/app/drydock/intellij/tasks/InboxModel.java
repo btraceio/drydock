@@ -37,8 +37,7 @@ import java.util.Set;
  * by repository. Built from the rows {@link TaskTreeModel} already derives
  * (the ALL view, no search) and the task layer's rows; no I/O, no clock.
  *
- * <p>A session goes to the first group that takes it: Babysitting (a
- * babysitter whose engagement is active), Needs you
+ * <p>A session goes to the first group that takes it: Needs you
  * ({@link DelayedTaskRows#needsYou(TaskRow)}: a running session waiting
  * for the user, or a watched session its babysitter escalated), Flagged
  * (a flagged session that is not running -- a flagged one that runs goes
@@ -68,8 +67,6 @@ final class InboxModel {
         BLOCKED("Blocked", "blocked", false, true),
         IN_REVIEW("In review", "review", false, true),
         READY("Ready to start", "ready", false, true),
-        /** Babysitter sessions with an active engagement: their own section, never mixed into the others. */
-        BABYSITTING("Babysitting", "babysit", false, true),
         IDLE("Idle", "idle", true, true),
         DONE("Done today", "done", true, true);
 
@@ -105,11 +102,11 @@ final class InboxModel {
 
         /**
          * Whether the group's rows count as the project's activity: Idle and
-         * Done do not, and neither do babysitters -- background helpers whose
-         * news reaches the human through the watched session's row.
+         * Done do not. A babysitter runs like any session now — it shows in
+         * Running (or Needs you when escalated) and counts.
          */
         boolean active() {
-            return this != IDLE && this != DONE && this != BABYSITTING;
+            return this != IDLE && this != DONE;
         }
     }
 
@@ -642,19 +639,14 @@ final class InboxModel {
     }
 
     /**
-     * A session's group. A babysitter with an active engagement goes to
-     * Babysitting before any other check, so it never mixes into the regular
-     * groups whatever its dot says; a watched session whose engagement needs
-     * the human (escalated) goes to Needs you -- an escalation is the
-     * babysitter asking for the human. Flagged takes a session only while it
-     * is not running: a running flagged one shows in Running (its row wears
-     * the flagged chip, the group header no longer says it).
+     * A session's group. A babysitter runs like any session: Running, or
+     * Needs you when its engagement asks for the human. A watched session
+     * whose engagement needs the human goes to Needs you -- an escalation
+     * is the babysitter asking for the human. Flagged takes a session only
+     * while it is not running: a running flagged one shows in Running (its
+     * row wears the flagged chip, the group header no longer says it).
      */
     static GroupKind sessionKind(TaskRow row) {
-        if (row.babysit().filter(part -> part.role() == SessionBabysit.Role.BABYSITTER
-                && part.active()).isPresent()) {
-            return GroupKind.BABYSITTING;
-        }
         if (DelayedTaskRows.needsYou(row) || row.babysit().filter(SessionBabysit::needsHuman).isPresent()) {
             return GroupKind.NEEDS_YOU;
         }
@@ -718,13 +710,21 @@ final class InboxModel {
                 case Section section -> collectSessions(section.children(), loose, out);
                 case WorktreeGroup group -> {
                     for (TaskRow task : group.tasks()) {
-                        out.putIfAbsent(task.session().id().toString(), new SessionAt(task, loose));
+                        collect(task, loose, out);
                     }
                 }
-                case TaskRow task -> out.putIfAbsent(task.session().id().toString(), new SessionAt(task, loose));
+                case TaskRow task -> collect(task, loose, out);
                 default -> {
                 }
             }
+        }
+    }
+
+    /** Puts the row and every babysitter nested beneath it, watched side first. */
+    private static void collect(TaskRow row, Optional<ProjectRef> project, Map<String, SessionAt> out) {
+        out.putIfAbsent(row.session().id().toString(), new SessionAt(row, project));
+        for (TaskRow babysitter : row.babysitters()) {
+            collect(babysitter, project, out);
         }
     }
 }

@@ -255,18 +255,24 @@ class TaskActionsTest {
                 row(true, new TaskPlacement.Here()));
         IdleWorktree worktree = new IdleWorktree(Path.of("/wt/fix"), "fix", Optional.empty(), false, false);
         // The babysitting rows: a session with an open branch PR (Babysit),
-        // and both sides of an active engagement (Stop and the two jumps).
+        // both sides of an active engagement (Stop, Go to Babysitter), and a
+        // stopped-pairing babysitter (Go to Watched Session — an active one
+        // is nested beneath its watched session and offers no jump).
         TaskNode.TaskRow watched = row(false, new TaskPlacement.Idle(false));
         TaskNode.TaskRow babysitter = row(true, new TaskPlacement.Here());
         Map<ManagedSessionId, SessionBabysit> engagement = SessionBabysit.join(List.of(new BabysitPairing(
                 babysitter.session().id(), watched.session().id(), watched.session().repositoryId(), 7,
                 BabysitState.WATCHING)), List.of());
+        SessionBabysit ended = SessionBabysit.join(List.of(new BabysitPairing(
+                babysitter.session().id(), watched.session().id(), watched.session().repositoryId(), 7,
+                BabysitState.STOPPED)), List.of()).get(babysitter.session().id());
         List<TaskNode> shapes = List.of(
                 row(true, new TaskPlacement.OwnWindow()),
                 row(false, new TaskPlacement.Idle(false)),
                 withOpenPullRequest(row(false, new TaskPlacement.Idle(false))),
                 withBabysit(watched, engagement.get(watched.session().id())),
                 withBabysit(babysitter, engagement.get(babysitter.session().id())),
+                withBabysit(babysitter, ended),
                 pullRequest(Optional.of("https://github.com/DataDog/repo/pull/7")),
                 new PullRequestRow(Path.of("/repo"), new OpenPullRequest(8, "Conflicts", "pr-8", "main",
                         false, Optional.empty(), Optional.empty(), true)),

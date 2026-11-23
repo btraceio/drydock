@@ -191,12 +191,15 @@ public sealed interface TaskNode {
      * project lists pull requests and {@code gh} has answered.
      * {@code babysit}: the session's part in a babysitting engagement
      * ({@link SessionBabysit}), joined from the same state snapshot the
-     * rebuild read its sessions from.
+     * rebuild read its sessions from. {@code babysitters}: the active
+     * babysitter sessions watching this session's pull request, nested
+     * beneath it by the model — never a row of their own; empty for a
+     * session nothing babysits.
      */
     record TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
                    Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
                    boolean resumable, Optional<BranchPullRequest> branchPullRequest,
-                   Optional<SessionBabysit> babysit)
+                   Optional<SessionBabysit> babysit, List<TaskRow> babysitters)
             implements TaskNode {
         public TaskRow {
             Objects.requireNonNull(session, "session");
@@ -205,6 +208,24 @@ public sealed interface TaskNode {
             Objects.requireNonNull(placement, "placement");
             Objects.requireNonNull(branchPullRequest, "branchPullRequest");
             Objects.requireNonNull(babysit, "babysit");
+            Objects.requireNonNull(babysitters, "babysitters");
+            babysitters = List.copyOf(babysitters);
+        }
+
+        /** The shape before the model nested babysitters: a session is never a parent. */
+        public TaskRow(ManagedAgentSession session, Optional<SessionActivity> activity, boolean running,
+                       Optional<String> branch, TaskPlacement placement, boolean readOnly, boolean folderMissing,
+                       boolean resumable, Optional<BranchPullRequest> branchPullRequest,
+                       Optional<SessionBabysit> babysit) {
+            this(session, activity, running, branch, placement, readOnly, folderMissing, resumable,
+                    branchPullRequest, babysit, List.of());
+        }
+
+        /** This row with {@code babysitters} nested beneath it; everything else unchanged. */
+        public TaskRow withBabysitters(List<TaskRow> babysitters) {
+            return babysitters.isEmpty() && this.babysitters.isEmpty() ? this
+                    : new TaskRow(session, activity, running, branch, placement, readOnly, folderMissing,
+                            resumable, branchPullRequest, babysit, babysitters);
         }
 
         /** The shape before the model carried babysitting: no engagement. */

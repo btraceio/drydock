@@ -101,9 +101,15 @@ final class BabysitActions {
         return row.babysit().filter(part -> part.role() == SessionBabysit.Role.WATCHED).isPresent();
     }
 
-    /** Pure. Whether Go to Watched Session applies: the row is a babysitter, its engagement on or stopped. */
+    /**
+     * Pure. Whether Go to Watched Session applies: the row is a babysitter
+     * of an ended engagement. An active engagement's babysitter is nested
+     * beneath its watched session (or hidden entirely, when the watched row
+     * shows nowhere), so the jump is redundant there.
+     */
     static boolean showsWatched(TaskRow row) {
-        return row.babysit().filter(part -> part.role() == SessionBabysit.Role.BABYSITTER).isPresent();
+        return row.babysit()
+                .filter(part -> part.role() == SessionBabysit.Role.BABYSITTER && !part.active()).isPresent();
     }
 
     /** Pure. The start action's label for the row: {@code Babysit PR #12}, or the plain label when none applies. */

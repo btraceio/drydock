@@ -133,8 +133,7 @@ final class InboxList extends JBList<InboxList.Entry> {
     static final JBColor NEEDS_TAG_BORDER = new JBColor(0xE4D3C4, 0x5C4A3B);
     static final JBColor BLOCKED_TEXT = new JBColor(0xB4282E, 0xE5777C);
     static final JBColor TAG_BORDER = new JBColor(0xEBECF0, 0x43454A);
-    /** The Babysitting header and the babysitting chip's border: distinct from every other group's. */
-    static final JBColor BABYSIT_TEXT = new JBColor(0x2E7D6F, 0x5DB8A8);
+    /** The babysitting chip's colours: distinct from every other chip's. */
     static final JBColor BABYSIT_TAG_BORDER = new JBColor(0xBFDCD6, 0x355A53);
     /** A babysitter row's mark after its dot: the debugger's watch eye. */
     static final Icon BABYSITTER_ICON = AllIcons.Debugger.Watch;
@@ -716,7 +715,6 @@ final class InboxList extends JBList<InboxList.Entry> {
         return switch (kind) {
             case NEEDS_YOU -> NEEDS_TEXT;
             case BLOCKED -> BLOCKED_TEXT;
-            case BABYSITTING -> BABYSIT_TEXT;
             case DONE, IDLE -> NamedColorUtil.getInactiveTextColor();
             default -> UIUtil.getLabelForeground();
         };

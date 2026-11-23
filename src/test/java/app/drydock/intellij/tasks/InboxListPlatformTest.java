@@ -510,7 +510,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 row.readOnly(), row.folderMissing(), row.resumable(), row.branchPullRequest(), Optional.of(part));
     }
 
-    public void testABabysitterAndItsEscalatedWatchedSessionWearTheirChipsBadgeAndSection() throws Exception {
+    public void testABabysitterAndItsEscalatedWatchedSessionWearTheirChipsAndBadge() throws Exception {
         DrydockPluginService.getInstance().initialization().get(60, TimeUnit.SECONDS);
         TaskRow watchedRow = running("Watched", NOW);
         TaskRow babysitterRow = running("babysit PR #12", NOW.minusSeconds(60));
@@ -528,7 +528,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE),
                 false);
 
-        assertEquals(List.of("v Needs you", "  Watched", "v Running", "  Plain", "v Babysitting", "  babysit PR #12"),
+        assertEquals(List.of("v Needs you", "  Watched", "  babysit PR #12", "v Running", "  Plain"),
                 describe(list.entries()));
         assertEquals("the engagement chip comes last, after the project tag",
                 List.of("babysit PR #12", "alpha", "escalated #12"), renderedLabels(indexOf("babysit PR #12")));
@@ -543,10 +543,9 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertSame(dot, InboxList.icon(itemOf("Plain")));
 
         assertEquals(InboxList.NEEDS_BACKGROUND, renderedBackground(indexOf("Watched")));
-        assertEquals("the human acts on the watched session, so only its row is tinted",
-                list.getBackground(), renderedBackground(indexOf("babysit PR #12")));
+        assertEquals("both sides ask for the human, and both sit in Needs you now",
+                InboxList.NEEDS_BACKGROUND, renderedBackground(indexOf("babysit PR #12")));
         assertEquals(list.getBackground(), renderedBackground(indexOf("Plain")));
-        assertEquals(InboxList.BABYSIT_TEXT, InboxList.headerColor(GroupKind.BABYSITTING));
 
         String tooltip = InboxList.tooltip(itemOf("Watched"), NOW);
         assertTrue(tooltip, tooltip

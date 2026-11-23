@@ -1160,12 +1160,67 @@ class TaskTreeModelTest {
                 in.build().withScope("", List.of(), List.of(), Optional.empty()),
                 in.build().withMatchRefs(Map.of(), Map.of()))) {
             List<TaskNode> nodes = TaskTreeModel.build(inputs);
-            assertEquals(Optional.of(SessionBabysit.Role.WATCHED),
-                    sessionRow(nodes, BTRACE, watched.id()).babysit().map(SessionBabysit::role));
+            TaskRow watchedRow = sessionRow(nodes, BTRACE, watched.id());
+            assertEquals(Optional.of(SessionBabysit.Role.WATCHED), watchedRow.babysit().map(SessionBabysit::role));
+            // The active babysitter is not a row of its own: it nests beneath
+            // the watched session, carrying the join's answer for itself.
             assertEquals(Optional.of(SessionBabysit.Role.BABYSITTER),
-                    sessionRow(nodes, BTRACE, babysitter.id()).babysit().map(SessionBabysit::role));
+                    watchedRow.babysitters().stream().findFirst().orElseThrow().babysit().map(SessionBabysit::role));
+            assertEquals(1, watchedRow.babysitters().size());
+            assertEquals(babysitter.id(),
+                    watchedRow.babysitters().get(0).session().id());
+            assertTrue(sessionNodes(projectRow(nodes, BTRACE)).stream().map(TaskRow.class::cast)
+                    .noneMatch(row -> row.session().id().equals(babysitter.id())),
+                    "the babysitter is never a row of its own");
+            // The detached worktree the babysitter runs in stays occupied —
+            // it is not offered for Start while the engagement is on.
+            Optional<Section> worktrees = section(projectRow(nodes, BTRACE), SectionKind.WORKTREES);
+            assertTrue(worktrees.isEmpty() || worktrees.get().children().stream()
+                            .noneMatch(node -> node instanceof TaskNode.IdleWorktree idle
+                                    && idle.worktree().equals(babysitterWt)),
+                    "the babysitter's worktree is not a sessionless worktree");
             assertEquals(Optional.empty(), sessionRow(nodes, BTRACE, plain.id()).babysit());
         }
+    }
+
+    @Test
+    void anActiveBabysitterWithNoVisibleWatchedSessionIsHidden() {
+        Path babysitterWt = Path.of("/wt/btrace--babysit-pr12");
+        In in = new In().project(BTRACE).worktree(BTRACE, babysitterWt, "HEAD");
+        ManagedAgentSession babysitter = session("babysit PR #12", babysitterWt);
+        in.sessions.add(babysitter);
+        in.babysit.putAll(SessionBabysit.join(List.of(new BabysitPairing(babysitter.id(),
+                ManagedSessionId.newId(), babysitter.repositoryId(), 12, BabysitState.WATCHING)), List.of()));
+        in.running.add(babysitter.id());
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), BTRACE);
+        assertTrue(section(row, SectionKind.SESSIONS).isEmpty(),
+                "the watched session's row exists nowhere, so the babysitter is hidden");
+        Optional<Section> worktrees = section(row, SectionKind.WORKTREES);
+        assertTrue(worktrees.isEmpty() || worktrees.get().children().stream()
+                        .noneMatch(node -> node instanceof IdleWorktree idle && idle.worktree().equals(babysitterWt)),
+                "the hidden babysitter's worktree is not offered as sessionless");
+        assertEquals(1, row.running(), "a running hidden babysitter contributes to the project count");
+    }
+
+    @Test
+    void aSearchHitOnTheNestedBabysitterKeepsItsWatchedRow() {
+        Path watchedWt = Path.of("/wt/btrace-watched");
+        Path babysitterWt = Path.of("/wt/btrace--babysit-pr12");
+        In in = new In().project(BTRACE).worktree(BTRACE, watchedWt, "feature/watched")
+                .worktree(BTRACE, babysitterWt, "HEAD");
+        ManagedAgentSession watched = session("Watched", watchedWt);
+        ManagedAgentSession babysitter = session("babysit PR #12", babysitterWt);
+        in.sessions.addAll(List.of(watched, babysitter));
+        in.babysit.putAll(SessionBabysit.join(List.of(new BabysitPairing(babysitter.id(),
+                watched.id(), watched.repositoryId(), 12, BabysitState.WATCHING)), List.of()));
+        in.filter = "babysit";
+
+        List<TaskNode> nodes = TaskTreeModel.build(in.build());
+        TaskRow watchedRow = sessionRow(nodes, BTRACE, watched.id());
+        assertEquals(List.of(babysitter.id()), watchedRow.babysitters().stream()
+                .map(row -> row.session().id()).toList(),
+                "a hit on the nested row keeps the watched row that hosts it");
     }
 
     @Test
