@@ -62,6 +62,8 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
     private final JPanel heldSlot = new JPanel(new BorderLayout());
     private final JPanel allSessionsSlot = new JPanel(new BorderLayout());
     private final JPanel emptyPrimary = new JPanel(new BorderLayout());
+    /** The emptied primary slot's placeholder; its text names why nothing is shown. */
+    private final JBLabel emptyLabel = new JBLabel("No session shown", SwingConstants.CENTER);
     private final List<SessionPane> mounted = new ArrayList<>();
     private boolean disposed;
 
@@ -79,7 +81,7 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
         toolbarRow.add(toolbar.getComponent(), BorderLayout.EAST);
         root.add(toolbarRow, BorderLayout.NORTH);
         root.add(body, BorderLayout.CENTER);
-        emptyPrimary.add(new JBLabel("No session shown", SwingConstants.CENTER), BorderLayout.CENTER);
+        emptyPrimary.add(emptyLabel, BorderLayout.CENTER);
         allSessionsSlot.setName("allSessionsSlot");
         emptyPrimary.add(allSessionsSlot, BorderLayout.SOUTH);
         if (leased) {
@@ -120,11 +122,18 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
 
     JComponent heldSlot() { return heldSlot; }
 
+    /** The emptied primary slot's placeholder label; the empty-state test reads its text. */
+    JBLabel emptyStateLabel() {
+        return emptyLabel;
+    }
+
     /** Re-mounts the slots from the controller's current layout; a no-op when inert or disposed. */
     void refreshLayout() {
         if (!leased || disposed) {
             return;
         }
+        emptyLabel.setText(controller.noRemainingSessions()
+                ? "No active sessions" : "No session shown");
         Layout layout = controller.layout();
         List<SessionPane> wanted = new ArrayList<>();
         SessionPane primary = mountInto(primarySlot, layout.primary(), emptyPrimary, wanted);

@@ -1,5 +1,6 @@
 package app.drydock.intellij.agent;
 
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
@@ -10,6 +11,7 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationActivationListener;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
@@ -32,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * One window's session host: the project-lifetime presentation authority.
@@ -44,7 +47,11 @@ import java.util.function.Function;
  * identity is the only thing that writes {@link SessionHostState} and
  * publishes {@link SessionHostListener#sessionSelected}; re-activating the
  * current session, hold, close, invalidation and availability changes do
- * neither. Previous/current are data, never a target by themselves.</p>
+ * neither. Previous/current are data, never a target by themselves. The one
+ * exception in spirit is {@link #sessionDone}: a Done flow that emptied the
+ * shown slot picks the next remaining catalog session and shows it through
+ * {@link #show}, so the committed identity and event follow what is now on
+ * screen.</p>
  *
  * <p><b>Adoption.</b> Construction restores the remembered id into primary
  * through {@link SessionHostModel#restorePrimary}: passive, with no intent,
@@ -128,6 +135,8 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     private final SessionHostState state;
     private final Consumer<ManagedSessionId> selectionPublisher;
     private final Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders;
+    /** The catalog's live session ids, in catalog order; the Done advance picks from it. */
+    private final Supplier<List<ManagedSessionId>> remainingSessions;
     private Layout layout;
     private long epoch;
     private boolean permitted;
@@ -142,6 +151,7 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     /** Focus intents waiting for the pane to mount the console; one per id, fired once. */
     private final Map<ManagedSessionId, Runnable> consoleFocusAwaiting = new HashMap<>();
     private FileEditor lease;
+    private static final Logger LOG = Logger.getInstance(SessionHostController.class);
     private static final int AGE_TICK_MILLIS = 10_000;
     /** Sessions marked by any thread, drained by the next flush. */
     private final Set<ManagedSessionId> dirty = ConcurrentHashMap.newKeySet();
@@ -167,10 +177,18 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     /** The loader factory is invoked lazily, at most once, and resolves the plugin only then. */
     SessionHostController(Project project, SessionHostState state, Consumer<ManagedSessionId> selectionPublisher,
                           Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders) {
+        this(project, state, selectionPublisher, loaders, SessionHostController::catalogSessions);
+    }
+
+    /** The loader and remaining-session factories are invoked lazily, at most once, and resolve the plugin only then. */
+    SessionHostController(Project project, SessionHostState state, Consumer<ManagedSessionId> selectionPublisher,
+                          Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders,
+                          Supplier<List<ManagedSessionId>> remainingSessions) {
         this.project = Objects.requireNonNull(project, "project");
         this.state = Objects.requireNonNull(state, "state");
         this.selectionPublisher = Objects.requireNonNull(selectionPublisher, "selectionPublisher");
         this.loaders = Objects.requireNonNull(loaders, "loaders");
+        this.remainingSessions = Objects.requireNonNull(remainingSessions, "remainingSessions");
         state.selectedSession().ifPresent(model::restorePrimary);
         this.layout = project();
         ageTicker.setRepeats(true);
@@ -499,6 +517,72 @@ public final class SessionHostController implements Disposable, SessionPane.Host
         if (shown) {
             revoke();
             advance();
+        }
+    }
+
+    /**
+     * A Done flow (per-session or bulk) forgot this session: the pane empties
+     * like {@link #invalidate}. When the forgotten session was primary, the
+     * host picks up the next remaining catalog session instead of leaving an
+     * empty primary pane; a held-session completion only empties the held
+     * slot. Either way the layout cache is re-projected, since the model has
+     * changed — a held-session Done that skipped the re-projection left the
+     * cached layout reporting a phantom held pane. A pick is an intentional
+     * show, so the remembered id and selection event follow what is now
+     * displayed. With no session left, the emptied primary slot's placeholder
+     * names the fact. EDT only: the catalog read is a synchronized in-memory
+     * read.
+     */
+    void sessionDone(ManagedSessionId id) {
+        Objects.requireNonNull(id, "id");
+        if (closed()) {
+            return;
+        }
+        boolean primaryDone = model.primary().filter(id::equals).isPresent();
+        boolean shown = primaryDone || model.held().filter(id::equals).isPresent();
+        model.invalidate(id);
+        if (shown) {
+            revoke();
+            advance();
+            if (primaryDone) {
+                pickNext(id);
+            }
+        }
+    }
+
+    /** The first remaining catalog session this host can still show, done id excluded; empty when none. */
+    private Optional<ManagedSessionId> pickNext(ManagedSessionId done) {
+        Optional<ManagedSessionId> next = remainingSessions.get().stream()
+                .filter(candidate -> !candidate.equals(done))
+                .filter(model::isAvailable)
+                .findFirst();
+        if (next.isPresent()) {
+            show(next.get());
+        } else {
+            // No selection event will follow, so the leased editor is told
+            // directly: it unmounts the emptied slot and its placeholder can
+            // name the no-sessions fact.
+            if (lease instanceof SessionHostEditor editor) {
+                editor.refreshLayout();
+            }
+        }
+        return next;
+    }
+
+    /** Whether the catalog holds no session at all any more; the emptied slot's placeholder reads it. */
+    boolean noRemainingSessions() {
+        return remainingSessions.get().isEmpty();
+    }
+
+    /** The catalog's live ids in catalog order; an unavailable catalog reads as none, with failures logged. */
+    private static List<ManagedSessionId> catalogSessions() {
+        try {
+            return DrydockPluginService.getInstance().stateStore().state().sessions().stream()
+                    .map(ManagedAgentSession::id)
+                    .toList();
+        } catch (RuntimeException e) {
+            LOG.warn("Unable to read the session catalog", e);
+            return List.of();
         }
     }
 
