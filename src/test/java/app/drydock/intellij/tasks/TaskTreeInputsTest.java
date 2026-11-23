@@ -4,6 +4,8 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.PrState;
+import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -627,12 +629,13 @@ class TaskTreeInputsTest {
     }
 
     @Test
-    void aSessionWhoseFolderIsGoneIsNeverAskedAbout() {
+    void aSessionWhoseFolderIsGoneIsStaleWithoutACheckoutProbe() {
         Path main = tempDir.resolve("repo");
         AtomicInteger checkouts = new AtomicInteger();
+        ManagedAgentSession gone = session(tempDir.resolve("gone"));
 
-        TaskTreeInputs.sessionPullRequests(
-                List.of(session(tempDir.resolve("gone"))),
+        TaskTreeInputs.SessionPullRequestJoin join = TaskTreeInputs.sessionPullRequestJoin(
+                List.of(gone),
                 Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
                 dir -> {
                     checkouts.incrementAndGet();
@@ -640,7 +643,120 @@ class TaskTreeInputsTest {
                 },
                 source -> Map.of());
 
-        assertEquals(0, checkouts.get());
+        assertEquals(Set.of(gone.id()), join.evaluated(),
+                "a vanished worktree is positive evidence the branch can no longer carry its PR");
+        assertEquals(Set.of(gone.id()), join.stale());
+        assertEquals(0, checkouts.get(), "a directory that is gone is never probed with git");
+    }
+
+    @Test
+    void aDetachedCheckoutIsStaleWithoutConsultingTheListing() throws IOException {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path wt = Files.createDirectories(tempDir.resolve("repo/detached"));
+        ManagedAgentSession detached = session(wt).withPr(PrState.OPEN, Optional.of(77));
+        BranchPullRequest unrelated = new BranchPullRequest(
+                12, PrLifecycle.OPEN, false, "some-other-branch", "", Optional.empty());
+        AtomicInteger prs = new AtomicInteger();
+
+        TaskTreeInputs.SessionPullRequestJoin join = TaskTreeInputs.sessionPullRequestJoin(
+                List.of(detached), Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> Optional.of(new Checkout(main, Optional.empty())),
+                source -> {
+                    prs.incrementAndGet();
+                    return Map.of("some-other-branch", unrelated);
+                });
+
+        assertEquals(Set.of(detached.id()), join.evaluated());
+        assertEquals(Set.of(detached.id()), join.stale(), "a successful detached checkout has no branch-backed PR");
+        assertEquals(0, prs.get(), "a branchless checkout gives the listing nothing to match: it is never asked");
+    }
+
+    @Test
+    void failedCheckoutMissingSourceAndEmptyListingDoNotClassifySessionsAsStale() throws IOException {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path other = Files.createDirectories(tempDir.resolve("other"));
+        Path failedPath = Files.createDirectories(tempDir.resolve("repo/.wt/failed"));
+        Path unregisteredPath = Files.createDirectories(tempDir.resolve("repo/.wt/unregistered"));
+        Path emptyPath = Files.createDirectories(tempDir.resolve("repo/.wt/empty"));
+        ManagedAgentSession failed = session(failedPath).withPr(PrState.OPEN, Optional.of(71));
+        ManagedAgentSession unregistered = session(unregisteredPath).withPr(PrState.OPEN, Optional.of(72));
+        ManagedAgentSession empty = session(emptyPath).withPr(PrState.OPEN, Optional.of(73));
+        AtomicInteger prs = new AtomicInteger();
+
+        TaskTreeInputs.SessionPullRequestJoin join = TaskTreeInputs.sessionPullRequestJoin(
+                List.of(failed, unregistered, empty),
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> {
+                    if (dir.equals(failedPath)) {
+                        return Optional.empty();
+                    }
+                    if (dir.equals(unregisteredPath)) {
+                        return on(other, "branch");
+                    }
+                    return on(main, "branch");
+                },
+                source -> {
+                    prs.incrementAndGet();
+                    return Map.of();
+                });
+
+        assertEquals(Set.of(), join.evaluated(),
+                "a failed git probe, an unregistered project and an empty listing are no evidence");
+        assertEquals(Set.of(), join.stale(), "silence must never clear a persisted link");
+        assertEquals(1, prs.get(), "one listing per known source; the empty answer then fences the session off");
+    }
+
+    @Test
+    void onlyBranchMatchesAreAuthoritativeAndNumberFallbacksAreStale() throws IOException {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path onBranch = Files.createDirectories(tempDir.resolve("repo/.wt/on-branch"));
+        Path byNumber = Files.createDirectories(tempDir.resolve("repo/.wt/by-number"));
+        Path targeted = Files.createDirectories(tempDir.resolve("repo/.wt/targeted"));
+        ManagedAgentSession branchSession = session(onBranch);
+        // A session whose branch matches nothing but whose stored number does:
+        // the badge joins through the number, the persisted link does not.
+        ManagedAgentSession numberSession = session(byNumber).withPr(PrState.OPEN, Optional.of(77));
+        ManagedAgentSession targetSession = session(targeted)
+                .toBuilder().targetPullRequest(Optional.of(new PullRequestTarget("github.com/o/r", 9))).build();
+        BranchPullRequest pr12 = new BranchPullRequest(12, PrLifecycle.OPEN, false, "fix/branch", "", Optional.empty());
+        BranchPullRequest pr77 = new BranchPullRequest(77, PrLifecycle.OPEN, false, "someone/else", "", Optional.empty());
+
+        TaskTreeInputs.SessionPullRequestJoin join = TaskTreeInputs.sessionPullRequestJoin(
+                List.of(branchSession, numberSession, targetSession),
+                Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> switch (dir.getFileName().toString()) {
+                    case "targeted" -> on(main, "targeted-branch");
+                    default -> on(main, dir.getFileName().toString().equals("on-branch") ? "fix/branch" : "review/local");
+                },
+                source -> Map.of("fix/branch", pr12, "someone/else", pr77));
+
+        assertEquals(Map.of(branchSession.id(), pr12, numberSession.id(), pr77), join.matched(),
+                "the badge map is unchanged: branch match first, then the stored number");
+        assertEquals(Map.of(branchSession.id(), pr12), join.branchMatched(),
+                "only the head-branch match is authoritative enough to persist");
+        assertEquals(Set.of(branchSession.id(), numberSession.id()), join.evaluated(),
+                "a targeted session is never evaluated, so a human association is never touched");
+        assertEquals(Map.of(branchSession.id(), 12), join.discovered());
+        assertEquals(Set.of(numberSession.id()), join.stale(),
+                "the number-fallback session's branch carries no PR: its link is stale");
+    }
+
+    @Test
+    void aBranchMatchedMergedPullRequestSuppressesTheClearWithoutPersisting() throws IOException {
+        Path main = Files.createDirectories(tempDir.resolve("repo"));
+        Path wt = Files.createDirectories(tempDir.resolve("repo/.wt/fix"));
+        ManagedAgentSession branchSession = session(wt);
+        // The branch's PR merged but the merge flow has not recorded it yet:
+        // the link must neither be re-persisted as OPEN nor cleared.
+        BranchPullRequest merged = new BranchPullRequest(12, PrLifecycle.MERGED, false, "fix/branch", "", Optional.empty());
+
+        TaskTreeInputs.SessionPullRequestJoin join = TaskTreeInputs.sessionPullRequestJoin(
+                List.of(branchSession), Map.of(main, new TaskTreeInputs.BadgeSource(main, Optional.of("o/r"))),
+                dir -> on(main, "fix/branch"), source -> Map.of("fix/branch", merged));
+
+        assertEquals(Map.of(branchSession.id(), merged), join.branchMatched());
+        assertEquals(Map.of(), join.discovered(), "a merged PR's link belongs to the merge flow");
+        assertEquals(Set.of(), join.stale(), "the branch still carries the PR: no clearing");
     }
 
     // --- Carried PR health through the existing root+repository join and cache ---
