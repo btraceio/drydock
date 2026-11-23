@@ -234,9 +234,10 @@ final class InboxModel {
 
     /**
      * One task of a dependency {@link Graph}: its row, its depth below the graph's roots, the titles of
-     * the unfinished tasks it waits on, and how many unfinished tasks wait on it.
+     * the unfinished tasks it waits on, how many unfinished tasks wait on it, and whether its graph spans
+     * several projects (then each row names its own project; otherwise the header does).
      */
-    record GraphNode(TaskItem item, int depth, List<String> waitsOn, int unblocks) {
+    record GraphNode(TaskItem item, int depth, List<String> waitsOn, int unblocks, boolean mixedProjects) {
         GraphNode {
             Objects.requireNonNull(item, "item");
             waitsOn = List.copyOf(waitsOn);
@@ -271,6 +272,11 @@ final class InboxModel {
         List<TaskItem> startTargets() {
             return stuck ? List.of() : sinks.stream().filter(sink -> sink.row().presentation() == TaskState.Presentation.READY
                     || sink.row().presentation() == TaskState.Presentation.BLOCKED).toList();
+        }
+
+        /** The distinct projects of the members, in display order. */
+        List<ProjectRef> projects() {
+            return nodes.stream().flatMap(node -> node.item().project().stream()).distinct().toList();
         }
 
         boolean contains(TaskId id) {
@@ -542,9 +548,14 @@ final class InboxModel {
         List<GraphNode> nodes = new ArrayList<>();
         List<TaskItem> sinks = new ArrayList<>();
         Set<TaskId> finished = new HashSet<>();
+        Map<TaskId, TaskItem> items = new LinkedHashMap<>();
         for (TaskId id : order) {
             DelayedTaskRow row = unfinished.get(id);
-            TaskItem item = new TaskItem(row, projectOf(in, row));
+            items.put(id, new TaskItem(row, projectOf(in, row)));
+        }
+        boolean mixed = items.values().stream().flatMap(item -> item.project().stream()).distinct().count() > 1;
+        for (TaskId id : order) {
+            TaskItem item = items.get(id);
             List<String> waiting = new ArrayList<>(waitsOn.get(id).stream()
                     .map(prerequisite -> unfinished.get(prerequisite).title()).toList());
             for (TaskId prerequisite : in.prerequisites().getOrDefault(id, List.of())) {
@@ -552,7 +563,7 @@ final class InboxModel {
                     waiting.add(running.get(prerequisite).title());
                 }
             }
-            nodes.add(new GraphNode(item, depth.get(id), waiting, dependents.get(id).size()));
+            nodes.add(new GraphNode(item, depth.get(id), waiting, dependents.get(id).size(), mixed));
             if (dependents.get(id).isEmpty()) {
                 sinks.add(item);
             }

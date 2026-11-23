@@ -13,6 +13,7 @@ import app.drydock.intellij.tasks.InboxModel.SessionItem;
 import app.drydock.intellij.tasks.InboxModel.TaskItem;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.ui.SessionDots;
+import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskState.Presentation;
@@ -60,6 +61,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 /**
  * The Attention Inbox's list: one header per non-empty {@link Group}, its
@@ -141,8 +143,11 @@ final class InboxList extends JBList<InboxList.Entry> {
     private final Set<GroupKind> collapsed = EnumSet.noneOf(GroupKind.class);
     private final Set<GroupKind> expanded = EnumSet.noneOf(GroupKind.class);
     private final Set<GroupKind> showingAll = EnumSet.noneOf(GroupKind.class);
-    /** The keys of the graphs the user collapsed; not persisted. */
-    private final Set<String> collapsedGraphs = new HashSet<>();
+    /**
+     * The tasks of the graphs the user collapsed; not persisted. A graph is collapsed when any of its tasks
+     * is here, so it stays collapsed while its first task changes, and new tasks joining it are collapsed too.
+     */
+    private final Set<TaskId> collapsedGraphTasks = new HashSet<>();
     private final Renderer renderer = new Renderer();
     private final Actions actions;
     private Inbox inbox;
@@ -180,10 +185,13 @@ final class InboxList extends JBList<InboxList.Entry> {
                 switch (entry) {
                     case Header header when event.getClickCount() == 1 -> toggleCollapsed(header.group().kind());
                     case GraphHeader header when event.getClickCount() == 1 -> {
-                        if (hit(index, event.getPoint()) == Hit.START_GRAPH) {
+                        Hit hit = hit(index, event.getPoint());
+                        if (hit == Hit.START_GRAPH) {
                             actions.startGraph(header.graph());
+                        } else if (hit == Hit.TAG && header.graph().projects().size() == 1) {
+                            actions.pickProject(header.graph().projects().get(0));
                         } else {
-                            toggleGraph(header.graph().key());
+                            toggleGraph(header.graph());
                         }
                     }
                     case More more when event.getClickCount() == 1 -> toggleShowAll(more.group().kind());
@@ -208,9 +216,15 @@ final class InboxList extends JBList<InboxList.Entry> {
                 if (event.getKeyCode() != KeyEvent.VK_ENTER || getSelectedValue() == null) {
                     return;
                 }
+                // Ctrl/Cmd+Enter starts the selected graph (its header, or one of its tasks).
+                if ((event.isControlDown() || event.isMetaDown()) && selectedGraph().isPresent()) {
+                    actions.startGraph(selectedGraph().get());
+                    event.consume();
+                    return;
+                }
                 switch (getSelectedValue()) {
                     case Header header -> toggleCollapsed(header.group().kind());
-                    case GraphHeader header -> toggleGraph(header.graph().key());
+                    case GraphHeader header -> toggleGraph(header.graph());
                     case More more -> toggleShowAll(more.group().kind());
                     case Row row -> actions.activate(row.item());
                 }
@@ -224,6 +238,8 @@ final class InboxList extends JBList<InboxList.Entry> {
         List<String> selectedKeys = selectedItems().stream().map(InboxList::key).toList();
         inbox = next;
         tagsHidden = hideTags;
+        collapsedGraphTasks.retainAll(next.graphs().stream().flatMap(graph -> graph.nodes().stream())
+                .map(node -> node.item().row().id()).collect(Collectors.toSet()));
         rebuild(selectedKeys);
     }
 
@@ -239,9 +255,12 @@ final class InboxList extends JBList<InboxList.Entry> {
         return graphView;
     }
 
-    void toggleGraph(String key) {
-        if (!collapsedGraphs.remove(key)) {
-            collapsedGraphs.add(key);
+    void toggleGraph(Graph graph) {
+        List<TaskId> members = graph.nodes().stream().map(node -> node.item().row().id()).toList();
+        if (isGraphCollapsed(graph)) {
+            members.forEach(collapsedGraphTasks::remove);
+        } else {
+            collapsedGraphTasks.addAll(members);
         }
         rebuild(selectedItems().stream().map(InboxList::key).toList());
     }
@@ -325,6 +344,23 @@ final class InboxList extends JBList<InboxList.Entry> {
         actions.togglesChanged();
     }
 
+    private boolean isGraphCollapsed(Graph graph) {
+        return graph.nodes().stream().anyMatch(node -> collapsedGraphTasks.contains(node.item().row().id()));
+    }
+
+    /** The graph the selected entry is, or a task of; empty for anything else. */
+    Optional<Graph> selectedGraph() {
+        Entry entry = getSelectedValue();
+        if (entry instanceof GraphHeader header) {
+            return Optional.of(header.graph());
+        }
+        if (entry instanceof Row row && row.node() != null && inbox != null) {
+            return inbox.graphs().stream().filter(graph -> graph.contains(row.item() instanceof TaskItem task
+                    ? task.row().id() : null)).findFirst();
+        }
+        return Optional.empty();
+    }
+
     private boolean isCollapsed(GroupKind kind) {
         return kind.collapsedByDefault() ? !expanded.contains(kind) : collapsed.contains(kind);
     }
@@ -391,7 +427,7 @@ final class InboxList extends JBList<InboxList.Entry> {
 
     private void addGraphs(Inbox shown) {
         for (Graph graph : shown.graphs()) {
-            boolean isCollapsed = collapsedGraphs.contains(graph.key());
+            boolean isCollapsed = isGraphCollapsed(graph);
             entries.addElement(new GraphHeader(graph, isCollapsed));
             if (!isCollapsed) {
                 for (GraphNode node : graph.nodes()) {
@@ -738,8 +774,9 @@ final class InboxList extends JBList<InboxList.Entry> {
                             selected ? foreground : NamedColorUtil.getInactiveTextColor()));
                     startGraph.setVisible(!graph.startTargets().isEmpty());
                     startGraph.setForeground(selected ? foreground : JBUI.CurrentTheme.Link.Foreground.ENABLED);
-                    Optional<ProjectRef> graphProject = tagsHidden ? Optional.empty()
-                            : graph.nodes().get(0).item().project();
+                    // One project: the header names it. Several: each task row names its own.
+                    Optional<ProjectRef> graphProject = tagsHidden || graph.projects().size() != 1
+                            ? Optional.empty() : Optional.of(graph.projects().get(0));
                     tag.setVisible(graphProject.isPresent());
                     graphProject.ifPresent(ref -> {
                         tag.setText(ref.name());
@@ -781,7 +818,8 @@ final class InboxList extends JBList<InboxList.Entry> {
                         pullRequest.setForeground(selected ? foreground : label.link()
                                 ? JBUI.CurrentTheme.Link.Foreground.ENABLED : NamedColorUtil.getInactiveTextColor());
                     });
-                    Optional<ProjectRef> project = tagsHidden || row.node() != null ? Optional.empty()
+                    Optional<ProjectRef> project = tagsHidden || row.node() != null && !row.node().mixedProjects()
+                            ? Optional.empty()
                             : item.project();
                     tag.setVisible(project.isPresent());
                     project.ifPresent(ref -> {

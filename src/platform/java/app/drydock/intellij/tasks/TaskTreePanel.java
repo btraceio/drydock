@@ -149,6 +149,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The registered project the selected row belongs to; tree selections only. */
     public static final DataKey<SharedProject> SELECTED_PROJECT = DataKey.create("drydock.task.project");
 
+    /** The dependency graph the inbox selection is, or a task of. */
+    static final DataKey<InboxModel.Graph> SELECTED_GRAPH = DataKey.create("drydock.selectedGraph");
+
     /** The selected Tasks section (T20a), for its New Task action and the context menu. */
     static final DataKey<TasksSection> SELECTED_TASKS_SECTION =
             DataKey.create("drydock.task.tasksSection");
@@ -221,16 +224,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
         @Override
         public void startGraph(InboxModel.Graph graph) {
-            List<InboxModel.TaskItem> targets = graph.startTargets();
-            if (targets.size() == 1) {
-                DelayedTaskStart.start(project, targets.get(0).row());
-            } else if (!targets.isEmpty()) {
-                JBPopupFactory.getInstance().createPopupChooserBuilder(targets)
-                        .setTitle("Start the plan for which task?")
-                        .setRenderer(SimpleListCellRenderer.create("", InboxModel.TaskItem::title))
-                        .setItemChosenCallback(target -> DelayedTaskStart.start(project, target.row()))
-                        .createPopup().showInCenterOf(inbox);
-            }
+            TaskTreePanel.this.startGraph(graph);
         }
 
         @Override
@@ -238,6 +232,46 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             viewState().setToggles(inbox.toggles());
         }
     });
+    /**
+     * Starts a graph: its one open outcome, or the one the user picks from a popup. Nothing happens for a
+     * graph with no open outcome (a stuck graph has none); the start flow itself shows progress and refusals.
+     */
+    private void startGraph(InboxModel.Graph graph) {
+        List<InboxModel.TaskItem> targets = graph.startTargets();
+        if (targets.size() == 1) {
+            DelayedTaskStart.start(project, targets.get(0).row());
+        } else if (!targets.isEmpty()) {
+            JBPopupFactory.getInstance().createPopupChooserBuilder(targets)
+                    .setTitle("Start the plan for which task?")
+                    .setRenderer(SimpleListCellRenderer.create("", InboxModel.TaskItem::title))
+                    .setItemChosenCallback(target -> DelayedTaskStart.start(project, target.row()))
+                    .createPopup().showInCenterOf(inbox);
+        }
+    }
+
+    /** The context-menu entry that starts the selected graph, offered whenever a graph or one of its tasks is selected. */
+    private final AnAction startGraphAction = new DumbAwareAction("Start Graph",
+            "Plan and start the whole graph through its outcome task", AllIcons.Actions.Execute) {
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.BGT;
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent event) {
+            InboxModel.Graph graph = event.getData(SELECTED_GRAPH);
+            event.getPresentation().setEnabled(graph != null && !graph.startTargets().isEmpty());
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent event) {
+            InboxModel.Graph graph = event.getData(SELECTED_GRAPH);
+            if (graph != null) {
+                startGraph(graph);
+            }
+        }
+    };
+
     /** "Add open project" under the header while this window's project is not registered. */
     private final AddProjectBanner banner = new AddProjectBanner(new AddProjectBanner.Actions() {
         @Override
@@ -959,7 +993,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         AnAction addRemoteRepository = addRemoteRepositoryAction();
         TreeMenu treeMenu = new TreeMenu(menuActions, addRemoteRepository, delayedTaskActions,
                 newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
-                () -> displayedTasks, TaskTreePanel::watchedSnapshot);
+                () -> displayedTasks, TaskTreePanel::watchedSnapshot, startGraphAction);
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
         Disposer.register(this, popups);
         popups.register(tree, treeScroll.getViewport());
@@ -1316,12 +1350,24 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final Supplier<List<TaskNode>> displayed;
         private final Supplier<TaskLayer> tasks;
         private final Supplier<WatchedSnapshot> watched;
+        /** The "Start Graph" entry, offered when a graph or one of its tasks is selected; null offers none. */
+        private final AnAction startGraph;
 
         TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
                  AnAction[] delayedTaskActions,
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched) {
+            this(actions, addRemoteRepository, delayedTaskActions, newDelayedTask, refreshTasksAction, jiraEnabled,
+                    displayed, tasks, watched, null);
+        }
+
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
+                 AnAction[] delayedTaskActions,
+                 AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
+                 Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
+                 Supplier<WatchedSnapshot> watched, @Nullable AnAction startGraph) {
+            this.startGraph = startGraph;
             this.actions = actions;
             this.addRemoteRepository = addRemoteRepository;
             this.delayedTaskActions = delayedTaskActions;
@@ -1352,8 +1398,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // actions, and the Tasks node offers New Task over the T18a
             // form and the task store's fresh re-read -- everything else
             // keeps the session-layer menu it had.
+            boolean inGraph = startGraph != null && e.getData(SELECTED_GRAPH) != null;
             if (e.getData(DelayedTaskActions.SELECTED_TASK) != null) {
-                return delayedTaskActions;
+                if (!inGraph) {
+                    return delayedTaskActions;
+                }
+                AnAction[] withGraph = new AnAction[delayedTaskActions.length + 1];
+                withGraph[0] = startGraph;
+                System.arraycopy(delayedTaskActions, 0, withGraph, 1, delayedTaskActions.length);
+                return withGraph;
+            }
+            if (inGraph && e.getData(SELECTED_NODE) == null) {
+                return new AnAction[] {startGraph};
             }
             if (e.getData(SELECTED_TASKS_SECTION) != null) {
                 return new AnAction[] { newDelayedTask, refreshTasksAction };
@@ -1381,6 +1437,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         selected().ifPresent(node -> sink.set(SELECTED_NODE, node));
         // T20a: a task node is its own selection data -- the task-node
         // actions key on it; selected() answers only session-layer rows.
+        if (!browsing) {
+            inbox.selectedGraph().ifPresent(graph -> sink.set(SELECTED_GRAPH, graph));
+        }
         Object value = selectedValue();
         if (value instanceof DelayedTaskRow task) {
             sink.set(DelayedTaskActions.SELECTED_TASK, task);

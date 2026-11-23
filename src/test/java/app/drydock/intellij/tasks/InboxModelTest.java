@@ -61,6 +61,7 @@ class InboxModelTest {
     private static final SharedProject BETA_PROJECT = project(BETA, "beta");
     private static final SharedProject QUIET_PROJECT = project(QUIET, "quiet");
     private static final RepositoryId ALPHA_TASKS = RepositoryId.newId();
+    private static final RepositoryId BETA_TASKS = RepositoryId.newId();
 
     /** The nodes, tasks and documents one test builds its inbox from. */
     private final List<TaskNode> alphaRows = new ArrayList<>();
@@ -112,7 +113,7 @@ class InboxModelTest {
         nodes.add(new ProjectRow(BETA_PROJECT, false, false, betaRows, List.of(), 0));
         nodes.add(new ProjectRow(QUIET_PROJECT, false, false, List.of(), List.of(), 0));
         return InboxModel.build(new Inputs(nodes, List.of(ALPHA_PROJECT, BETA_PROJECT, QUIET_PROJECT), tasks,
-                documents, Map.of(ALPHA_TASKS, ALPHA), NOW, ZONE, prerequisites), query);
+                documents, Map.of(ALPHA_TASKS, ALPHA, BETA_TASKS, BETA), NOW, ZONE, prerequisites), query);
     }
 
     /** {@code task} waits on each of {@code prerequisiteRows}. */
@@ -313,6 +314,35 @@ class InboxModelTest {
         InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
 
         assertEquals(List.of(0, 1, 2), graph.nodes().stream().map(InboxModel.GraphNode::depth).toList());
+    }
+
+    @Test
+    void aGraphAcrossProjectsNamesThemAllAndMarksEachRowToShowItsOwn() {
+        DelayedTaskRow alpha = task("Alpha task", Presentation.READY);
+        TaskId betaId = TaskId.of("beta-task");
+        DelayedTaskRow beta = new DelayedTaskRow(new TaskView(betaId, Presentation.BLOCKED, List.of(), List.of()),
+                "Beta task", BETA_TASKS, List.of());
+        documents.put(betaId, new TaskDocument(betaId, BETA_TASKS, "Beta task", TaskStatus.OPEN, DoneBy.HUMAN,
+                Optional.empty(), List.of(), List.of(), List.of(), Optional.empty(), "", ""));
+        tasks.add(beta);
+        after(beta, alpha);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of("alpha", "beta"), graph.projects().stream().map(InboxModel.ProjectRef::name).toList());
+        assertTrue(graph.nodes().stream().allMatch(InboxModel.GraphNode::mixedProjects));
+    }
+
+    @Test
+    void aGraphInOneProjectLeavesTheProjectToItsHeader() {
+        DelayedTaskRow first = task("First", Presentation.READY);
+        DelayedTaskRow second = task("Second", Presentation.BLOCKED);
+        after(second, first);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(1, graph.projects().size());
+        assertTrue(graph.nodes().stream().noneMatch(InboxModel.GraphNode::mixedProjects));
     }
 
     @Test

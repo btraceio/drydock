@@ -55,6 +55,8 @@ import java.awt.Container;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
 import java.awt.event.MouseEvent;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -567,8 +569,15 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 false).getBackground();
     }
 
-    /** One graph (first, then second which waits on it) and one standalone ready task, no sessions. */
     private Inbox graphInbox() {
+        return graphInbox(false);
+    }
+
+    /**
+     * One graph (first, then second which waits on it) and one standalone ready task, no sessions;
+     * {@code earlyRoot} adds a ready task the second also waits on, which sorts before the first.
+     */
+    private Inbox graphInbox(boolean earlyRoot) {
         TaskId firstId = TaskId.of("first-task");
         TaskId secondId = TaskId.of("second-task");
         TaskId aloneId = TaskId.of("alone-task");
@@ -578,14 +587,18 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
                 List.of("blocked by 'First task' (open)"), List.of()), "Second task", TASKS, List.of());
         DelayedTaskRow alone = new DelayedTaskRow(new TaskView(aloneId, Presentation.READY, List.of(), List.of()),
                 "Alone task", TASKS, List.of());
+        TaskId earlyId = TaskId.of("early-task");
+        DelayedTaskRow early = new DelayedTaskRow(new TaskView(earlyId, Presentation.READY, List.of(), List.of()),
+                "Early task", TASKS, List.of());
+        List<DelayedTaskRow> rows = earlyRoot ? List.of(first, second, alone, early) : List.of(first, second, alone);
         Map<TaskId, TaskDocument> documents = new HashMap<>();
-        for (DelayedTaskRow row : List.of(first, second, alone)) {
+        for (DelayedTaskRow row : rows) {
             documents.put(row.id(), new TaskDocument(row.id(), TASKS, row.title(), TaskStatus.OPEN, DoneBy.HUMAN,
                     Optional.empty(), List.of(), List.of(), "", ""));
         }
-        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT),
-                List.of(first, second, alone), documents, Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
-                Map.of(secondId, List.of(firstId))), Query.NONE);
+        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT), rows, documents,
+                Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
+                Map.of(secondId, earlyRoot ? List.of(firstId, earlyId) : List.of(firstId))), Query.NONE);
     }
 
     public void testGraphsSitUnderReadyToStartAheadOfItsStandaloneTasks() {
@@ -651,11 +664,55 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertFalse(tooltip, tooltip.contains("<b>"));
     }
 
+    public void testACollapsedGraphStaysCollapsedWhenItsFirstTaskChanges() {
+        list.show(graphInbox(), false);
+        list.toggleGraph(((InboxList.GraphHeader) list.entries().get(1)).graph());
+
+        list.show(graphInbox(true), false);
+
+        InboxList.GraphHeader header = (InboxList.GraphHeader) list.entries().get(1);
+        assertEquals("the first task changed", "early-task", header.graph().key());
+        assertTrue(header.collapsed());
+    }
+
+    /** Delivers Ctrl+Enter straight to the list's key listeners: a headless list has no focus to route it. */
+    private void pressCtrlEnter() {
+        KeyEvent event = new KeyEvent(list, KeyEvent.KEY_PRESSED, 0, InputEvent.CTRL_DOWN_MASK,
+                KeyEvent.VK_ENTER, '\n');
+        for (KeyListener listener : list.getKeyListeners()) {
+            listener.keyPressed(event);
+        }
+    }
+
+    public void testCtrlEnterStartsTheSelectedGraphFromItsHeaderOrOneOfItsTasks() {
+        list.show(graphInbox(), false);
+
+        list.setSelectedIndex(1);
+        pressCtrlEnter();
+        list.setSelectedIndex(3);
+        pressCtrlEnter();
+        list.setSelectedIndex(4);
+        pressCtrlEnter();
+
+        assertEquals("the standalone task is no graph", 2, startedGraphs.size());
+        assertEquals("on the standalone task it is a plain Enter: it opens the task", 1, activated.size());
+    }
+
+    public void testTheGraphHeaderNamesItsProjectAndAClickOnItPicksTheProject() {
+        list.show(graphInbox(), false);
+
+        click(1, Hit.TAG, 1);
+
+        assertEquals(1, picked.size());
+        assertEquals("alpha", picked.get(0).name());
+        assertEquals("the click did not collapse the graph", 5, list.entries().size());
+    }
+
     public void testASelectedGraphHeaderStaysSelectedAcrossARebuildAndAnotherInbox() {
         list.show(graphInbox(), false);
         list.setSelectedIndex(1);
 
-        list.toggleGraph("first-task");
+        list.toggleGraph(((InboxList.GraphHeader) list.entries().get(1)).graph());
         assertTrue(list.getSelectedValue() instanceof InboxList.GraphHeader);
 
         list.show(graphInbox(), false);
