@@ -84,6 +84,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private final List<Item> activated = new ArrayList<>();
     private final List<Item> pullRequests = new ArrayList<>();
     private final List<ProjectRef> picked = new ArrayList<>();
+    private final List<InboxModel.Graph> startedGraphs = new ArrayList<>();
     private int toggleReports;
     private InboxList list;
     /** The six running sessions, the same rows (and ids) in every inbox a test builds. */
@@ -107,6 +108,11 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
             @Override
             public void pickProject(ProjectRef project) {
                 picked.add(project);
+            }
+
+            @Override
+            public void startGraph(InboxModel.Graph graph) {
+                startedGraphs.add(graph);
             }
 
             @Override
@@ -559,5 +565,67 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
     private Color renderedBackground(int index) {
         return list.getCellRenderer().getListCellRendererComponent(list, list.entries().get(index), index, false,
                 false).getBackground();
+    }
+
+    /** One graph (first, then second which waits on it) and one standalone ready task, no sessions. */
+    private Inbox graphInbox() {
+        TaskId firstId = TaskId.of("first-task");
+        TaskId secondId = TaskId.of("second-task");
+        TaskId aloneId = TaskId.of("alone-task");
+        DelayedTaskRow first = new DelayedTaskRow(new TaskView(firstId, Presentation.READY, List.of(), List.of()),
+                "First task", TASKS, List.of());
+        DelayedTaskRow second = new DelayedTaskRow(new TaskView(secondId, Presentation.BLOCKED,
+                List.of("blocked by 'First task' (open)"), List.of()), "Second task", TASKS, List.of());
+        DelayedTaskRow alone = new DelayedTaskRow(new TaskView(aloneId, Presentation.READY, List.of(), List.of()),
+                "Alone task", TASKS, List.of());
+        Map<TaskId, TaskDocument> documents = new HashMap<>();
+        for (DelayedTaskRow row : List.of(first, second, alone)) {
+            documents.put(row.id(), new TaskDocument(row.id(), TASKS, row.title(), TaskStatus.OPEN, DoneBy.HUMAN,
+                    Optional.empty(), List.of(), List.of(), "", ""));
+        }
+        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT),
+                List.of(first, second, alone), documents, Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
+                Map.of(secondId, List.of(firstId))), Query.NONE);
+    }
+
+    public void testGraphsSitUnderReadyToStartAheadOfItsStandaloneTasks() {
+        list.show(graphInbox(), false);
+
+        assertEquals(List.of("v Ready to start", "v graph first-task", "  First task", "  Second task",
+                "  Alone task"), describe(list.entries()));
+        assertEquals("the header counts the graph's tasks and the standalone one", 3,
+                ((InboxList.Header) list.entries().get(0)).count());
+        assertEquals(Optional.of("unblocks 1"), InboxList.graphChip(
+                ((InboxList.Row) list.entries().get(2)).node()));
+        assertEquals(Optional.of("waits on 1"), InboxList.graphChip(
+                ((InboxList.Row) list.entries().get(3)).node()));
+        assertEquals("a graph with one outcome is labelled by it", "Second task",
+                InboxList.graphLabel(((InboxList.GraphHeader) list.entries().get(1)).graph()));
+    }
+
+    public void testStartGraphIsAHitOnTheGraphHeaderAndReportsItsGraph() {
+        list.show(graphInbox(), false);
+
+        assertTrue(hitsAcross(1).contains(Hit.START_GRAPH));
+        click(1, Hit.START_GRAPH, 1);
+
+        assertEquals(1, startedGraphs.size());
+        assertEquals("first-task", startedGraphs.get(0).key());
+        assertEquals("a Start graph click does not collapse the graph", 5, list.entries().size());
+    }
+
+    public void testClickingAGraphHeaderElsewhereCollapsesItAndTheViewToggleRestoresStateGroups() {
+        list.show(graphInbox(), false);
+
+        Rectangle cell = list.getCellBounds(1, 1);
+        list.dispatchEvent(new MouseEvent(list, MouseEvent.MOUSE_CLICKED, 0, InputEvent.BUTTON1_DOWN_MASK,
+                cell.x + 2, cell.y + cell.height / 2, 1, false, MouseEvent.BUTTON1));
+        assertEquals(List.of("v Ready to start", "> graph first-task", "  Alone task"),
+                describe(list.entries()));
+
+        list.setGraphView(false);
+        assertEquals(List.of("v Blocked", "  Second task", "v Ready to start", "  Alone task", "  First task"),
+                describe(list.entries()));
+        assertFalse(list.graphView());
     }
 }
