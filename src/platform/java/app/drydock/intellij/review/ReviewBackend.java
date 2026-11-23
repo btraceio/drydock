@@ -1,0 +1,525 @@
+package app.drydock.intellij.review;
+
+import app.drydock.agent.api.AgentRegistry;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
+import app.drydock.babysit.BabysitStateFile;
+import app.drydock.config.UserConfig;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.Repository;
+import app.drydock.git.DiffService;
+import app.drydock.git.GhCliService;
+import app.drydock.git.GitStatusService;
+import app.drydock.git.PrCheckoutService;
+import app.drydock.git.WorktreeService;
+import app.drydock.github.GitHubReviewService;
+import app.drydock.mcp.McpConfigWriter;
+import app.drydock.mcp.McpServer;
+import app.drydock.mcp.McpSessionContext.RenameOutcome;
+import app.drydock.mcp.McpSessionRegistry;
+import app.drydock.mcp.McpSessionRegistry.Spawn;
+import app.drydock.mcp.McpToolRouter;
+import app.drydock.mcp.BabysitToolContext;
+import app.drydock.mcp.BabysitTools;
+import app.drydock.mcp.RemoteAuthorizationPermit;
+import app.drydock.mcp.RemoteMcpTransportPolicy;
+import app.drydock.mcp.TaskTools;
+import app.drydock.mcp.ReviewInvocationBindings;
+import app.drydock.mcp.WorkspaceMcpSessionContext;
+import app.drydock.review.AnnotationStore;
+import app.drydock.review.PendingQuestions;
+import app.drydock.review.ReviewScopeRegistry;
+import app.drydock.review.SessionReviewScopes;
+import app.drydock.review.tour.TourStore;
+
+import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.net.InetSocketAddress;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/**
+ * The review stack of the IntelliJ plugin: the annotation and tour stores,
+ * the git services, and a loopback MCP server that serves only the review
+ * tools ({@link McpToolRouter#REVIEW_TOOLS}).
+ *
+ * <p>Construction is blocking, because the store constructors read their
+ * files; call it on the plugin executor. {@link #start()} binds the server
+ * and never throws. Until it succeeds {@link #ready()} is false and {@link
+ * #accessFor} returns empty. After {@link #close()} the backend stays
+ * not ready for good: {@link #start()} does nothing and {@link #accessFor}
+ * returns empty. Never logs a token, the endpoint URL or the
+ * port.</p>
+ */
+public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
+
+    private static final Logger LOG = System.getLogger(ReviewBackend.class.getName());
+
+    private final AnnotationStore annotationStore;
+    private final PendingQuestions pendingQuestions;
+    private final SelectionAsks selectionAsks;
+    private final TourStore tourStore;
+    private final DiffService diffService;
+    private final GitStatusService gitStatusService;
+    private final WorktreeService worktreeService;
+    private final ReviewScopeRegistry scopeRegistry;
+    private final McpSessionRegistry mcpRegistry;
+    private final McpConfigWriter configWriter;
+    private final McpServer server;
+    /** The router {@link #server} serves; the task-capability query reads its serving set. */
+    private final McpToolRouter router;
+    private final SessionReviewScopeResolver scopeResolver;
+    /** The local router context's presentation bindings; the workbench installs one at commit. */
+    private final ReviewInvocationBindings invocationBindings;
+    private final GhCliService pullRequests;
+    /** The pull request lane's transport: gh checks and the review POST (W5e). */
+    private final GitHubReviewService reviews;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    /** Package-private so tests can replace it; production uses {@link McpConfigWriter}. */
+    CredentialWriter credentialWriter;
+    private volatile boolean ready;
+
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry) {
+        this(baseDir, sessions, repositories, agentRegistry,
+                (id, title) -> CompletableFuture.failedFuture(
+                        new UnsupportedOperationException("session_rename is not served by this backend")));
+    }
+
+    /**
+     * As above, with the agent-rename write: {@code sessionRenamer} receives
+     * a validated title and answers with the outcome (refusing a human-pinned
+     * name, republishing on a real change) -- the channel the workspace
+     * binds to the plugin's session rename. The production backend serves
+     * {@code session_rename} through it; backends without one keep refusing.
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer) {
+        Path stateFile = baseDir.resolve("state.json");
+        annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
+        tourStore = new TourStore(TourStore.siblingOf(stateFile));
+        scopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
+        diffService = new DiffService();
+        gitStatusService = new GitStatusService();
+        worktreeService = new WorktreeService();
+        // The workbench's "Ask Reviewer About Selection…" mints asks; an
+        // answer to one becomes a finding at the asked range (SelectionAsks).
+        selectionAsks = new SelectionAsks(annotationStore);
+        pendingQuestions = new PendingQuestions(selectionAsks::answered);
+        mcpRegistry = new McpSessionRegistry();
+        configWriter = new McpConfigWriter(baseDir);
+        // Both deliveries get a file so a credential is never a command-line
+        // argument; COMMAND_LINE gets the bare token.
+        credentialWriter = (id, delivery, endpointUrl, token) -> delivery == McpDelivery.COMMAND_LINE
+                ? configWriter.writeTokenFor(id, token)
+                : configWriter.writeFor(id, endpointUrl, token);
+        // The router serves the review tools plus session_rename: an agent
+        // reviewing here may relabel its own session. Everything else
+        // session-side stays unserved (the IDE handles it through its own
+        // UI, not through the agent's MCP).
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessions,
+                repositories,
+                annotationStore,
+                tourStore,
+                scopeRegistry,
+                agentRegistry,
+                diffService,
+                gitStatusService,
+                worktreeService,
+                UserConfig::load,
+                (worktree, prompt) -> notServed("session_start"),
+                sessionRenamer,
+                (session, conversation) -> notServed("session_reclaim"),
+                (session, draft) -> notServed("session_handoff"),
+                (session, draft) -> notServed("session_handoff"),
+                pendingQuestions);
+        invocationBindings = context.invocationBindings();
+        McpToolRouter router = new McpToolRouter(context, mcpRegistry, McpToolRouter.REVIEW_TOOLS_AND_RENAME);
+        this.router = router;
+        server = new McpServer(mcpRegistry, router);
+        pullRequests = new GhCliService();
+        reviews = new GitHubReviewService();
+        scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
+                scopeRegistry, sessions, this::pullRequestCarriedBy);
+    }
+
+    /**
+     * The tools of a task-enabled backend: {@link McpToolRouter#REVIEW_TOOLS_AND_RENAME}
+     * plus exactly the four {@link McpToolRouter#TASK_TOOLS} -- the union the
+     * constructor below hands the router, computed here so the union policy
+     * lives in one place.
+     */
+    private static Set<String> reviewRenameAndTaskTools() {
+        return Stream.concat(McpToolRouter.REVIEW_TOOLS_AND_RENAME.stream(),
+                        McpToolRouter.TASK_TOOLS.stream())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * The tools of a babysitting-enabled backend: review, rename, the task
+     * tools when {@code withTasks}, and exactly the three {@link
+     * McpToolRouter#BABYSIT_TOOLS}.
+     */
+    private static Set<String> servedTools(boolean withTasks) {
+        Stream<String> base = withTasks ? reviewRenameAndTaskTools().stream()
+                : McpToolRouter.REVIEW_TOOLS_AND_RENAME.stream();
+        return Stream.concat(base, McpToolRouter.BABYSIT_TOOLS.stream())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * As the five-argument constructor, with the delayed-task delegate
+     * (T14a): {@code taskTools} is the {@link TaskTools} instance the router
+     * dispatches the four {@code task_*} tools to, and the backend's surface
+     * becomes the union of the review tools, {@code session_rename} and
+     * exactly those four task tools -- nothing else is added, nothing
+     * removed, and every error path (start failures, credential writes,
+     * close) is the one above. A backend built without a delegate, by either
+     * legacy constructor, serves exactly what it served before: no task
+     * tool is advertised or callable.
+     *
+     * <p>The shared delegate-carrying body repeats the five-argument one
+     * instead of delegating to it on purpose: the four/five-argument
+     * constructors and test seams stay byte-identical, so the only
+     * difference here is the router's allowed set and its delegates.</p>
+     *
+     * @throws NullPointerException if {@code taskTools} is null (build a
+     *         delegate-less backend through a legacy constructor instead)
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                         TaskTools taskTools) {
+        this(baseDir, sessions, repositories, agentRegistry, sessionRenamer, (BabysitToolContext) null,
+                Objects.requireNonNull(taskTools, "taskTools"));
+    }
+
+    /**
+     * As above, with the babysitting delegate as well: the router also serves
+     * exactly the three {@link McpToolRouter#BABYSIT_TOOLS}, through a {@link
+     * BabysitTools} built here over {@code babysitContext}, this backend's
+     * own MCP registry (the escalation budget) and the shared babysitting
+     * state file under {@code baseDir} (the persisted rerun counters).
+     * {@code taskTools} may be null: a failed task service still leaves the
+     * babysitting tools served, beside review and rename.
+     *
+     * @throws NullPointerException if {@code babysitContext} is null
+     */
+    public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                         Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                         BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                         TaskTools taskTools, BabysitToolContext babysitContext) {
+        this(baseDir, sessions, repositories, agentRegistry, sessionRenamer,
+                Objects.requireNonNull(babysitContext, "babysitContext"), taskTools);
+    }
+
+    /**
+     * The delegate-carrying body: {@code babysitContext} and {@code taskTools}
+     * are each optional here (at least one is present by the public
+     * constructors' checks), and the allowed set is review, rename and the
+     * names of exactly the delegates present. The parameter order differs
+     * from the public seven-argument constructor's so the two cannot be
+     * confused by overload resolution.
+     */
+    private ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
+                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry,
+                          BiFunction<ManagedSessionId, String, CompletableFuture<RenameOutcome>> sessionRenamer,
+                          BabysitToolContext babysitContext, TaskTools taskTools) {
+        Path stateFile = baseDir.resolve("state.json");
+        annotationStore = new AnnotationStore(AnnotationStore.siblingOf(stateFile));
+        tourStore = new TourStore(TourStore.siblingOf(stateFile));
+        scopeRegistry = new ReviewScopeRegistry(annotationStore.scopeIdSecret());
+        diffService = new DiffService();
+        gitStatusService = new GitStatusService();
+        worktreeService = new WorktreeService();
+        // The workbench's "Ask Reviewer About Selection…" mints asks; an
+        // answer to one becomes a finding at the asked range (SelectionAsks).
+        selectionAsks = new SelectionAsks(annotationStore);
+        pendingQuestions = new PendingQuestions(selectionAsks::answered);
+        mcpRegistry = new McpSessionRegistry();
+        configWriter = new McpConfigWriter(baseDir);
+        // Both deliveries get a file so a credential is never a command-line
+        // argument; COMMAND_LINE gets the bare token.
+        credentialWriter = (id, delivery, endpointUrl, token) -> delivery == McpDelivery.COMMAND_LINE
+                ? configWriter.writeTokenFor(id, token)
+                : configWriter.writeFor(id, endpointUrl, token);
+        // The router serves the review tools, session_rename and the tools
+        // of the delegates present (task, babysitting), and nothing more:
+        // a delegate adds names, never privileges (P7), and the same
+        // allowlist gates every tool.
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessions,
+                repositories,
+                annotationStore,
+                tourStore,
+                scopeRegistry,
+                agentRegistry,
+                diffService,
+                gitStatusService,
+                worktreeService,
+                UserConfig::load,
+                (worktree, prompt) -> notServed("session_start"),
+                sessionRenamer,
+                (session, conversation) -> notServed("session_reclaim"),
+                (session, draft) -> notServed("session_handoff"),
+                (session, draft) -> notServed("session_handoff"),
+                pendingQuestions);
+        invocationBindings = context.invocationBindings();
+        McpToolRouter router;
+        if (babysitContext == null) {
+            router = new McpToolRouter(context, mcpRegistry, reviewRenameAndTaskTools(), taskTools);
+        } else {
+            BabysitTools babysitTools = new BabysitTools(babysitContext, mcpRegistry,
+                    new BabysitStateFile(BabysitStateFile.defaultFile(baseDir)));
+            router = new McpToolRouter(context, mcpRegistry, servedTools(taskTools != null), taskTools,
+                    babysitTools);
+        }
+        this.router = router;
+        server = new McpServer(mcpRegistry, router);
+        pullRequests = new GhCliService();
+        reviews = new GitHubReviewService();
+        scopeResolver = new SessionReviewScopeResolver(worktreeService, gitStatusService,
+                scopeRegistry, sessions, this::pullRequestCarriedBy);
+    }
+
+    /**
+     * The remote endpoint over this backend's SAME stores and scope registry:
+     * an independent registry/router/server serving only the review tools and
+     * {@code session_rename}, through {@code renamer} and never the local
+     * renamer. Session start, reclaim and handoff are not served there.
+     */
+    public RemoteMcpComposition remoteComposition(
+            Supplier<List<ManagedAgentSession>> sessions, Supplier<List<Repository>> repositories,
+            AgentRegistry agentRegistry, RemoteMcpComposition.RemoteRenamer renamer,
+            RemoteMcpTransportPolicy policy, RemoteAuthorizationPermit.Seams seams) {
+        WorkspaceMcpSessionContext context = new WorkspaceMcpSessionContext(
+                sessions, repositories, annotationStore, tourStore, scopeRegistry, agentRegistry,
+                diffService, gitStatusService, worktreeService, UserConfig::load,
+                (worktree, prompt) -> notServed("session_start"),
+                RemoteMcpComposition.renameAdapter(renamer),
+                (session, conversation) -> notServed("session_reclaim"),
+                (session, draft) -> notServed("session_handoff"),
+                (session, draft) -> notServed("session_handoff"),
+                pendingQuestions);
+        return new RemoteMcpComposition(annotationStore, tourStore, pendingQuestions, selectionAsks,
+                scopeRegistry, context, policy, seams);
+    }
+
+    /**
+     * The open PR a checkout's branch carries, if the branch is one of the
+     * {@code pr-<n>} aliases {@link PrCheckoutService} checks PRs out under.
+     * Alias-gated on purpose: an ordinary branch never carries a PR ref in
+     * its local scope's identity, so asking gh for it would spend a network
+     * round trip on a base the scope never uses. A failed listing (no gh,
+     * no auth, gh down) degrades to no PR: the declared base is an
+     * improvement, never a requirement -- the fork-point heuristic stays
+     * the fallback and the review still starts.
+     */
+    private CompletableFuture<Optional<GhCliService.OpenPullRequest>> pullRequestCarriedBy(
+            Path repositoryRoot, Optional<String> branch) {
+        if (branch.flatMap(name -> PrCheckoutService.pullRequestNumberOf(name)).isEmpty()) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        return pullRequests.openPullRequests(repositoryRoot, Optional.empty())
+                .thenApply(listing -> listing instanceof GhCliService.PullRequestListing.Listed listed
+                        ? SessionReviewScopes.pullRequestCarriedBy(listed.pullRequests(), branch)
+                        : Optional.<GhCliService.OpenPullRequest>empty())
+                .exceptionally(failure -> {
+                    LOG.log(Level.WARNING, "Could not list the pull requests of " + repositoryRoot
+                            + "; the review base falls back to the fork point", failure);
+                    return Optional.empty();
+                });
+    }
+
+    private static <T> CompletableFuture<T> notServed(String tool) {
+        return CompletableFuture.failedFuture(
+                new UnsupportedOperationException(tool + " is not served by the IntelliJ plugin"));
+    }
+
+    /**
+     * Purges credential files left by a previous run, then binds the server.
+     * On failure the server is closed, {@link #ready()} stays false and the
+     * failure is logged. After {@link #close()} this does nothing and {@link
+     * #ready()} stays false. Blocking; never throws.
+     */
+    public void start() {
+        if (closed.get()) {
+            return;
+        }
+        try {
+            configWriter.purgeStale();
+            server.start();
+            // close() may have run while the server was binding.
+            ready = !closed.get();
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.WARNING,
+                    "Drydock MCP server unavailable; sessions launch without Drydock tools", e);
+            server.close();
+        }
+    }
+
+    public boolean ready() {
+        return ready;
+    }
+
+    /**
+     * Whether this backend's MCP surface serves the four task tools (T29a):
+     * true exactly when the router's allowed set intersects {@link
+     * McpToolRouter#TASK_TOOLS} -- a backend built without the task
+     * delegate (a failed or still-initializing task service) serves none,
+     * so the launches it credentials are not task-tool-capable. Pure query
+     * over the router's own serving set; no tool list is restated here.
+     */
+    public boolean servesTaskTools() {
+        return McpToolRouter.TASK_TOOLS.stream().anyMatch(router::serves);
+    }
+
+    @Override
+    public Optional<McpAccess> accessFor(ManagedSessionId sessionId, McpDelivery delivery) {
+        if (closed.get() || !ready || delivery == McpDelivery.NONE) {
+            return Optional.empty();
+        }
+        String token = mcpRegistry.mint(sessionId, Spawn.FORBIDDEN);
+        try {
+            // Both deliveries get a file so a credential is never a
+            // command-line argument; COMMAND_LINE gets the bare token.
+            Path credentialFile = credentialWriter.write(sessionId, delivery, server.endpointUrl(), token);
+            return Optional.of(new McpAccess(server.endpointUrl(), token, Optional.of(credentialFile)));
+        } catch (IOException | RuntimeException e) {
+            // Never log the token or the endpoint URL (it carries the port),
+            // nor the exception itself: a message could echo either.
+            mcpRegistry.revoke(sessionId);
+            configWriter.delete(sessionId);
+            LOG.log(Level.WARNING, "Could not write MCP config for session " + sessionId
+                    + "; launching without Drydock tools: " + e.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    /** Writes the credential file for one delivery; a seam so tests can force a failed write. */
+    @FunctionalInterface
+    interface CredentialWriter {
+        Path write(ManagedSessionId sessionId, McpDelivery delivery, String endpointUrl, String token)
+                throws IOException;
+    }
+
+    /**
+     * Whether {@code sessionId} holds a token from this backend: minted by
+     * {@link #accessFor} and not revoked since, by a failed credential write
+     * or by {@link #release}. A failed credential write (an {@link IOException}
+     * or a {@link RuntimeException} in {@link #accessFor}) revokes the token
+     * and deletes the session's credential files. False after {@link #close()} and while not
+     * {@linkplain #ready() ready}. A map lookup; never blocks, never logs.
+     */
+    public boolean holdsAccess(ManagedSessionId sessionId) {
+        return !closed.get() && ready && mcpRegistry.tokenFor(sessionId).isPresent();
+    }
+
+    @Override
+    public void release(ManagedSessionId sessionId) {
+        mcpRegistry.revoke(sessionId);
+        configWriter.delete(sessionId);
+    }
+
+    /** The questions agents are asked to answer through {@code review_ask_answer}. */
+    public PendingQuestions pendingQuestions() {
+        return pendingQuestions;
+    }
+
+    /** The selection questions awaiting an answer, and where an answer goes. */
+    SelectionAsks selectionAsks() {
+        return selectionAsks;
+    }
+
+    public SessionReviewScopeResolver scopeResolver() {
+        return scopeResolver;
+    }
+
+    /** The exact-scope seam: a scope is addressable only by the session it is bound to. */
+    public ReviewRequest.ScopeAuthorizer scopeAuthorizer() {
+        return (session, scopeId) -> scopeRegistry.isAddressableBy(scopeId, session);
+    }
+
+    /** The invocation bindings the router reads; a request installs one just before its commit. */
+    public ReviewInvocationBindings invocationBindings() {
+        return invocationBindings;
+    }
+
+    public void flushPendingSaves() {
+        annotationStore.flushPendingSaves();
+        tourStore.flushPendingSaves();
+    }
+
+    /**
+     * Marks the backend not ready, then closes the server first and the stores
+     * and git services after it; one failing step does not skip the rest.
+     * Only the first call does anything; later calls return silently.
+     */
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        ready = false;
+        closeEach(List.of(server, annotationStore, tourStore, diffService, gitStatusService,
+                worktreeService, pullRequests, reviews));
+    }
+
+    static void closeEach(List<AutoCloseable> steps) {
+        for (AutoCloseable step : steps) {
+            try {
+                step.close();
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Closing " + step.getClass().getSimpleName() + " failed", e);
+            }
+        }
+    }
+
+    /** The scope registry; public so the application-level remote data source shares the backend's (T61). */
+    public ReviewScopeRegistry scopeRegistry() {
+        return scopeRegistry;
+    }
+
+    /** For tests: the diff service. Package-private; the Review tab (T13) is wired through it. */
+    DiffService diffService() {
+        return diffService;
+    }
+
+    /** For tests: the annotation store. */
+    AnnotationStore annotationStore() {
+        return annotationStore;
+    }
+
+    /** For tests: the tour store. */
+    /** The pull request lane's transport: the gh checks and the review POST. */
+    GitHubReviewService reviews() {
+        return reviews;
+    }
+
+    /** The backend's gh service: the pull request lookups the review makes (its description). */
+    GhCliService pullRequests() {
+        return pullRequests;
+    }
+
+    TourStore tourStore() {
+        return tourStore;
+    }
+
+    /** For tests: the socket the server is bound to. */
+    InetSocketAddress boundAddress() {
+        return server.boundAddress();
+    }
+}

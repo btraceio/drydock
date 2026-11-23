@@ -1,0 +1,59 @@
+package app.drydock.projects;
+
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SshRemote;
+
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * One entry of the registered-projects list ({@link SharedProjectsFile}).
+ *
+ * <p>Membership only: what a tool remembers <em>about</em> a project (its
+ * last-used agent, its sessions) stays in that tool's own state, keyed by
+ * {@link #id()}. The id is therefore the contract between writers of the
+ * file and never changes once written.</p>
+ *
+ * <p>{@code root} is the project's main checkout, absolute and normalized.
+ * A remote (SSH) project, which no IDE window can open, carries its
+ * {@link SshRemote} and the remote's placeholder root.</p>
+ */
+public record SharedProject(RepositoryId id, Path root, String displayName, Instant addedAt,
+                            Optional<SshRemote> remote) {
+
+    public SharedProject {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(root, "root");
+        Objects.requireNonNull(displayName, "displayName");
+        Objects.requireNonNull(addedAt, "addedAt");
+        Objects.requireNonNull(remote, "remote");
+        if (!root.isAbsolute()) {
+            throw new IllegalArgumentException("root must be absolute: " + root);
+        }
+        root = root.normalize();
+        if (displayName.isBlank()) {
+            throw new IllegalArgumentException("displayName must not be blank");
+        }
+    }
+
+    /** A local project: one on this machine's disk. */
+    public static SharedProject local(RepositoryId id, Path root, String displayName, Instant addedAt) {
+        return new SharedProject(id, root, displayName, addedAt, Optional.empty());
+    }
+
+    /**
+     * A remote (SSH) project: {@code root} is the remote's deterministic
+     * placeholder ({@link SshRemote#placeholderRoot}), and the carried
+     * {@link SshRemote} is the single source of remote truth the launch
+     * paths read.
+     */
+    public static SharedProject remote(RepositoryId id, SshRemote remote, String displayName, Instant addedAt) {
+        return new SharedProject(id, remote.placeholderRoot(), displayName, addedAt, Optional.of(remote));
+    }
+
+    public boolean isRemote() {
+        return remote.isPresent();
+    }
+}

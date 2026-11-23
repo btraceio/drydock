@@ -16,7 +16,8 @@ with stub `ssh`/`tmux`/`claude`); **no live-box end-to-end check has been run**
 investigation (`workspace-persistent-sessions`, 12 nodes); anything else is
 marked **inferred** or, for what the plugin now does, **implemented** (code
 plus tests, no live box). Companion to `docs/unattended-sessions-tmux-spike.md`
-(the local tmux arm, implemented in the desktop app). This doc records the
+(the local tmux arm, which lived in the standalone app that has since been
+removed). This doc records the
 shipped behavior, including every divergence from the original design
 ("Divergences from the original design" below).
 
@@ -44,7 +45,8 @@ carry `Optional<RemotePersistence>` (the `ManagedSessionId` plus the agent
 env — see component 1), and the session row carries an optional
 `WorkspaceBoxBinding` persisted as a `workspaceBox` state member (component 2).
 The plugin's dead `TmuxPersistence` copy was deleted in this series; the
-desktop app's spike remains the local arm.
+local arm went with the standalone app (see
+`docs/unattended-sessions-tmux-spike.md` for the spike it came from).
 
 ## Architecture
 
@@ -514,7 +516,6 @@ contract settled a question the design doc had left open:
 - Investigation trail (frozen 2026-11-12, 12 nodes):
   `~/.cairn/investigations/btraceio--drydock/brave-dewy-sparrow/workspace-persistent-sessions/`
 - Wrap-up note (refill artifact): `notes/workspace-persistent-sessions-wrapup.md`
-- Local tmux arm (implemented in the desktop app, flag-guarded):
-  `docs/unattended-sessions-tmux-spike.md` and the app's
-  `app.drydock.process.TmuxPersistence` (`app/src/main/java`) — the
-  IntelliJ plugin's dead copy was deleted in this series.
+- Local tmux arm (flag-guarded): it lived in the standalone app
+  (`app.drydock.process.TmuxPersistence`, `docs/unattended-sessions-tmux-spike.md`)
+  and was removed with the app.

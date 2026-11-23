@@ -1,0 +1,858 @@
+package app.drydock.agent.providers.claude;
+
+import app.drydock.agent.api.ActivityReporter;
+import app.drydock.agent.api.AgentCapabilities;
+import app.drydock.agent.api.AgentContext;
+import app.drydock.agent.api.AgentKind;
+import app.drydock.agent.api.ConversationSource;
+import app.drydock.agent.api.CreateContext;
+import app.drydock.agent.api.LaunchPlan;
+import app.drydock.agent.api.LaunchResources;
+import app.drydock.agent.api.LocalWorkflowAccess;
+import app.drydock.agent.api.McpAccess;
+import app.drydock.agent.api.McpDelivery;
+import app.drydock.agent.api.RemoteLaunchSupport;
+import app.drydock.agent.api.RemotePersistence;
+import app.drydock.agent.api.ResumeContext;
+import app.drydock.agent.api.SessionIdDiscovery;
+import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.api.SphinxReviewSupport;
+import app.drydock.agent.api.StdioMcpServer;
+import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.HostBinaryLocator;
+import app.drydock.agent.spi.AgentProvider;
+import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
+import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
+import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
+import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
+import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller;
+import app.drydock.agent.providers.claude.internal.ClaudeSphinxProbe;
+import app.drydock.agent.providers.claude.internal.ConversationCatalog;
+import app.drydock.app.LoginShellEnvironment;
+import app.drydock.domain.SshRemote;
+import app.drydock.process.SshCommandBuilder;
+import app.drydock.state.json.JsonValue;
+import app.drydock.state.json.JsonWriter;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.TreeMap;
+
+/**
+ * Claude Code as an {@link AgentProvider}. Command strings are identical to the
+ * pre-seam {@code SessionManager} output. Delegates discovery/capabilities/
+ * catalog/activity to the existing {@code app.drydock.agent.providers.claude.internal} classes.
+ */
+public final class ClaudeAgentProvider implements AgentProvider {
+
+    static final String ENV_CLEANUP_PREFIX = "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
+            + " -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION"
+            + " -u CLAUDE_EFFORT LANG=en_US.UTF-8 CLAUDE_CODE_NO_FLICKER=1 ";
+
+    private static final String REMOTE_COMMAND_PREFIX = "exec env LANG=en_US.UTF-8"
+            + " CLAUDE_CODE_NO_FLICKER=1 claude";
+
+    private final ClaudeExecutableLocator locator;
+    private final HostBinaryLocator ddtoolLocator;
+
+    /**
+     * The resolved {@code claude} binary, shell-quoted, or bare {@code "claude"} when
+     * the locator found nothing. Using the absolute path when it is known removes the
+     * launch's dependence on the login-shell PATH merge: a GUI/Finder launch inherits
+     * launchd's bare PATH, and the merge probe is best-effort and can time out.
+     * The remote path stays bare {@code "claude"} -- it runs on the remote host via
+     * SSH, whose PATH is the remote's, not this machine's.
+     */
+    private String claudeBinary() {
+        return locator.locate()
+                .map(p -> AgentCommands.shellQuote(p.toString()))
+                .orElse("claude");
+    }
+
+    /**
+     * A {@code PATH=...} assignment spliced into the env prefix when the
+     * host's {@code apiKeyHelper} (managed settings: {@code ddtool auth
+     * token ...}) would run against a PATH that cannot find {@code ddtool}
+     * -- the Finder/Dock launch case where the login-shell merge was slow
+     * or never completed, so the inherited PATH is still launchd's bare
+     * {@code /usr/bin:/bin}. Prepends {@code ddtool}'s directory to the
+     * launching shell's PATH, so the helper resolves even from a bare PATH.
+     *
+     * <p>The emitted form is {@code PATH='<dir>:'"$PATH"}: the directory is a
+     * single-quoted literal, and the tail is a double-quoted {@code $PATH}
+     * the shell expands at run time. The expansion is deferred on purpose:
+     * the shell's PATH -- already repaired by the user's rc files and
+     * prefixed with the dogbrew shims by {@code ShellCommandAdapter} -- is
+     * the authoritative one. A literal snapshot of the IDE's PATH here would
+     * be the last PATH assignment before claude, so it would silently drop
+     * the shims (and anything else the rc files added).
+     *
+     * <p>Empty when {@code ddtool} is already on the IDE's inherited PATH (the
+     * common case, merge or no), so the launch never overrides a working
+     * PATH. Note that guard checks the IDE's frozen environment, not the
+     * launching shell's PATH that the injection extends. Only the eval
+     * container strips {@code apiKeyHelper} outright (it has no {@code
+     * ddtool} and receives the token as {@code ANTHROPIC_API_KEY}), so this
+     * injection is skipped for eval launches.
+     */
+    private String ddtoolPathInjection() {
+        return ddtoolDir()
+                .map(dir -> "PATH=" + AgentCommands.shellQuote(dir + ":") + "\"$PATH\" ")
+                .orElse("");
+    }
+
+    /**
+     * PATH value needed by a directly spawned Claude child, without shell
+     * quoting. Unlike the shell-embedded injection, there is no launching
+     * shell to defer to, so the frozen IDE PATH rides along after ddtool's
+     * directory.
+     */
+    private Optional<String> ddtoolPathValue() {
+        return ddtoolDir().map(dir -> {
+            String realPath = LoginShellEnvironment.currentRealPath();
+            return (realPath == null || realPath.isBlank()) ? dir : dir + ":" + realPath;
+        });
+    }
+
+    /** ddtool's directory, when the injection or container override is needed at all. */
+    private Optional<String> ddtoolDir() {
+        Optional<Path> ddtool = ddtoolLocator.locate();
+        if (ddtool.isEmpty() || ddtool.get().getParent() == null) {
+            return Optional.empty();
+        }
+        String dir = ddtool.get().getParent().toString();
+        String realPath = LoginShellEnvironment.currentRealPath();
+        if (realPath != null && pathContainsEntry(realPath, dir)) {
+            return Optional.empty();
+        }
+        return Optional.of(dir);
+    }
+
+    /** True if {@code pathEnv} (colon-separated) already contains {@code dir}. */
+    private static boolean pathContainsEntry(String pathEnv, String dir) {
+        for (String entry : pathEnv.split(":")) {
+            if (entry.equals(dir)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    private ClaudeCapabilityService capabilityService;
+    private ClaudeConversationSource conversationSource;
+    private ClaudeActivityReporter activityReporter;
+    /** The eval container; a test stub from the constructor, or the real one built at {@link #init}. */
+    private ClaudeEvalContainer evalContainer;
+    /** The activity state-word dir, needed to mount it into the eval container. Set at {@link #init}. */
+    private Path activityDirectory;
+    /** Set once by the background probe at {@link #init}; read by {@link #evalAvailable()} on the UI thread. */
+    private volatile boolean evalAvailable;
+    /** Snapshotted by the config read at {@link #init}; read by {@link #sphinxReview()} on the EDT. */
+    private volatile Optional<SphinxReviewSupport> sphinxReview = Optional.empty();
+    /**
+     * Set once by the background capability probe at {@link #init}; read by
+     * {@link #enforcesReadOnly()}, which the UI calls synchronously and which
+     * therefore must never re-probe. Starts {@code false}, so a strip painted
+     * before the probe lands says "not enforced" rather than promising an
+     * enforcement that may not exist.
+     */
+    private volatile boolean planModeAvailable;
+
+    /**
+     * Fallback locations for {@code ddtool}, tried after the live PATH.
+     * {@code ddtool} is a homebrew cask on this class of machine, so the
+     * homebrew dirs lead; {@code /opt/dogbrew/bin} covers the internal
+     * package manager path.
+     */
+    private static List<Path> ddtoolFallbacks() {
+        String home = System.getProperty("user.home", "");
+        return List.of(
+                Path.of("/opt/homebrew/bin/ddtool"),
+                Path.of("/usr/local/bin/ddtool"),
+                Path.of(home, ".local", "bin", "ddtool"),
+                Path.of("/opt/dogbrew/bin/ddtool"));
+    }
+
+    /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
+    public ClaudeAgentProvider() {
+        this(new ClaudeExecutableLocator(), null, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
+    }
+
+    /** For tests: inject a locator (e.g. a nonexistent path to force conservative caps). */
+    public ClaudeAgentProvider(ClaudeExecutableLocator locator) {
+        this(locator, null, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
+    }
+
+    /** For tests: inject the eval container (e.g. a stub that reports unavailable). */
+    public ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer) {
+        this(locator, evalContainer, new HostBinaryLocator("ddtool", ddtoolFallbacks()));
+    }
+
+    /** For tests: inject both, so the PATH-injection form can be exercised deterministically. */
+    ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer,
+                        HostBinaryLocator ddtoolLocator) {
+        this.locator = locator;
+        this.evalContainer = evalContainer;
+        this.ddtoolLocator = ddtoolLocator;
+    }
+
+    @Override
+    public AgentKind kind() {
+        return AgentKind.CLAUDE;
+    }
+
+    @Override
+    public String displayName() {
+        return "Claude";
+    }
+
+    @Override
+    public void init(AgentContext ctx) {
+        this.capabilityService = new ClaudeCapabilityService(locator, ctx.backgroundExecutor());
+        this.conversationSource = new ClaudeConversationSource(new ConversationCatalog());
+        this.activityReporter = new ClaudeActivityReporter(new ClaudeHookInstaller(ctx.stateDirectory()));
+        this.activityDirectory = ctx.activityDirectory();
+        if (evalContainer == null) {
+            evalContainer = new ClaudeEvalContainer(ctx.stateDirectory());
+        }
+        ctx.backgroundExecutor().execute(() -> evalAvailable = evalContainer.probe());
+        // A config-file read (a few ms), so it runs here rather than on the
+        // background executor: the registry snapshots sphinxReview() right
+        // after init, and a later-landing probe would leave the task tree's
+        // menus without the item until a listings rescan.
+        this.sphinxReview = ClaudeSphinxProbe.probe();
+        // Same shape as the eval probe: `claude --help` is a process spawn, so
+        // the plan-mode answer is snapshotted here instead of being re-probed
+        // from the EDT every time the strip repaints. A probe failure leaves
+        // the flag false (detectCaps's conservative fallback).
+        ctx.backgroundExecutor().execute(() -> planModeAvailable = detectCaps().supportsPlanMode());
+    }
+
+    @Override
+    public Optional<Path> locateExecutable() {
+        return locator.locate();
+    }
+
+    @Override
+    public String describeSearched() {
+        return locator.describeSearched();
+    }
+
+    @Override
+    public AgentCapabilities probeCapabilities() {
+        ClaudeCapabilities caps = detectCaps();
+        return new AgentCapabilities(true, caps.supportsResume(), caps.version());
+    }
+
+    @Override
+    public boolean supportsRemote() {
+        return true;
+    }
+
+    @Override
+    public boolean supportsSubagents() {
+        return true;
+    }
+
+    /**
+     * {@code --model <m>} for a picked starting model; empty for the
+     * harness's own default. Claude's {@code --help} names the aliases
+     * {@code fable}, {@code opus}, and {@code sonnet} and accepts a model's
+     * full name, so the value is passed through verbatim. Launch-time only:
+     * {@code buildResumeCommand} never appends it, so a resume keeps whatever
+     * model the conversation last used.
+     */
+    private static String modelFlag(Optional<String> model) {
+        return model.map(m -> " --model " + AgentCommands.shellQuote(m)).orElse("");
+    }
+
+    /**
+     * The aliases claude's own {@code --help} names ("e.g. 'fable', 'opus',
+     * or 'sonnet'"). Claude has no model-listing command, so this is the
+     * whole catalog the picker can offer beyond free text and remembered
+     * models -- a suggestion list, not a whitelist (the launch passes
+     * whatever the human typed).
+     */
+    @Override
+    public List<String> modelSuggestions() {
+        return List.of("fable", "opus", "sonnet");
+    }
+
+    /** Claude reads a config file drydock writes ({@code --mcp-config}). */
+    @Override
+    public McpDelivery mcpDelivery() {
+        return McpDelivery.CONFIG_FILE;
+    }
+
+    @Override
+    public LaunchPlan buildCreateCommand(CreateContext c) {
+        if (c.remote().isPresent()) {
+            // A remote claude runs on another host: an extra working directory
+            // or the task-guidance location is a path on THIS machine, invisible
+            // there. Refusing the launch is the honest answer (the
+            // LaunchResources consumer contract: a resource the provider
+            // cannot serve is never silently dropped, and a host path is never
+            // pushed through the ssh hop).
+            if (requestsHostPathResource(c.launchResources())) {
+                return LaunchPlan.unsupported();
+            }
+            if (c.persistence().isPresent()) {
+                return persistentCreateCommand(c);
+            }
+            return LaunchPlan.of(
+                    SshCommandBuilder.interactiveSessionCommand(c.remote().get(),
+                            REMOTE_COMMAND_PREFIX + modelFlag(c.model())), false);
+        }
+        if (c.evalMode() && requestsHostPathResource(c.launchResources())) {
+            // An eval claude runs inside a container that mounts only the
+            // session worktree and the hook/activity dirs, so an extra
+            // directory or the guidance location on this host is invisible
+            // to it -- the same refusal stance as remote, for the same reason.
+            return LaunchPlan.unsupported();
+        }
+        ClaudeCapabilities caps = detectCaps();
+        // Eval runs inside a container whose PATH has `claude` (installed by the
+        // claudeEvalImage Dockerfile at /root/.local/bin), not the host's absolute
+        // path -- which does not exist in the container's filesystem.
+        String binary = c.evalMode() ? "claude" : claudeBinary();
+        String pathInjection = c.evalMode() ? "" : ddtoolPathInjection();
+        StringBuilder command = new StringBuilder(ENV_CLEANUP_PREFIX).append(pathInjection).append(binary)
+                .append(modelFlag(c.model()));
+        boolean sessionIdUsed = false;
+        if (caps.supportsName()) {
+            command.append(" -n ").append(AgentCommands.shellQuote(c.displayName()));
+        }
+        if (caps.supportsSessionId()) {
+            command.append(" --session-id ").append(AgentCommands.shellQuote(c.sessionId()));
+            sessionIdUsed = true;
+        }
+        command.append(activitySettingsFlag(caps));
+        command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
+        command.append(stdioMcpConfigFlag(caps, c.stdioMcpServers()));
+        command.append(planModeFlag(caps, c.readOnly()));
+        command.append(addDirFlags(c.launchResources()));
+        command.append(workflowReadRootFlags(c.workflowAccess(), c.launchResources(), c.evalMode()));
+        command.append(pluginDirFlag(c.launchResources(),
+                c.mcp().flatMap(McpAccess::credentialFile)));
+        // The task goes last, as claude's positional [prompt], so the session
+        // opens already working on it. After "--" so a task that starts with
+        // a dash is a prompt, never an option. Remote launches above do not
+        // carry it: their command crosses an ssh hop with its own quoting.
+        c.initialPrompt().ifPresent(prompt -> command.append(" -- ").append(AgentCommands.shellQuote(prompt)));
+        if (c.evalMode()) {
+            return LaunchPlan.of(
+                    wrapEval(command.toString(), c.sessionId(), c.workingDirectory(),
+                            c.mcp().flatMap(McpAccess::credentialFile),
+                            c.workflowAccess().flatMap(LocalWorkflowAccess::evalNamespace)),
+                    sessionIdUsed);
+        }
+        return LaunchPlan.of(command.toString(), sessionIdUsed);
+    }
+
+    @Override
+    public LaunchPlan buildResumeCommand(ResumeContext r) {
+        if (r.remote().isPresent()) {
+            // As on create: a remote claude cannot see this machine's extra
+            // working directories or task guidance, so a resume that requests
+            // them is refused rather than silently launching without them.
+            if (requestsHostPathResource(r.launchResources())) {
+                return LaunchPlan.unsupported();
+            }
+            if (r.persistence().isPresent()) {
+                return persistentResumeCommand(r);
+            }
+            String exec = REMOTE_COMMAND_PREFIX + " --resume";
+            if (r.agentSessionId().isPresent()) {
+                exec += " " + SshCommandBuilder.posixQuote(r.agentSessionId().get());
+            } else if (r.agentSessionName().isPresent()) {
+                exec += " " + SshCommandBuilder.posixQuote(r.agentSessionName().get());
+            }
+            return LaunchPlan.of(SshCommandBuilder.interactiveSessionCommand(r.remote().get(), exec), false);
+        }
+        if (r.evalMode() && requestsHostPathResource(r.launchResources())) {
+            // The eval container mounts only the session worktree and the
+            // hook dirs -- the create-path refusal, applied to resumes, now
+            // covering the guidance location too.
+            return LaunchPlan.unsupported();
+        }
+        ClaudeCapabilities caps = detectCaps();
+        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
+                + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly())
+                + addDirFlags(r.launchResources())
+                + workflowReadRootFlags(r.workflowAccess(), r.launchResources(), r.evalMode())
+                + pluginDirFlag(r.launchResources(), r.mcp().flatMap(McpAccess::credentialFile));
+        // Eval runs inside a container whose PATH has `claude`, not the host path.
+        String binary = r.evalMode() ? "claude" : claudeBinary();
+        // ddtool is not in the eval container and apiKeyHelper is stripped
+        // from its seeded settings, so the PATH injection is host-only.
+        String prefix = ENV_CLEANUP_PREFIX + (r.evalMode() ? "" : ddtoolPathInjection());
+        String inner;
+        if (r.agentSessionId().isPresent()) {
+            inner = prefix + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionId().get()) + suffix;
+        } else if (r.agentSessionName().isPresent()) {
+            inner = prefix + binary + " --resume " + AgentCommands.shellQuote(r.agentSessionName().get()) + suffix;
+        } else {
+            inner = prefix + binary + " --resume" + suffix;
+        }
+        // The resume prompt goes last, as claude's positional [prompt], after
+        // "--" so a prompt that starts with a dash is a prompt, never an
+        // option — the same shape the create path uses for initialPrompt. Only
+        // on a pinned id: the bare picker has no conversation to re-orient.
+        if (r.agentSessionId().isPresent() && r.resumePrompt().isPresent()) {
+            inner += " -- " + AgentCommands.shellQuote(r.resumePrompt().get());
+        }
+        if (r.evalMode()) {
+            // Resume key is the agent session id; for PRESET it equals the
+            // --session-id drydock minted at create, so the seeded config
+            // dir (keyed by it) persists across resumes and mark() refreshes
+            // the token.
+            String key = r.agentSessionId().orElse("");
+            return LaunchPlan.of(wrapEval(inner, key, r.workingDirectory(),
+                    r.mcp().flatMap(McpAccess::credentialFile),
+                    r.workflowAccess().flatMap(LocalWorkflowAccess::evalNamespace)), false);
+        }
+        return LaunchPlan.of(inner, false);
+    }
+
+    @Override
+    public Optional<List<String>> buildTransferSummaryCommand(Path workingDirectory, String agentSessionId,
+                                                               String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = new ArrayList<>(List.of(
+                    "/usr/bin/env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                    "-u", "CLAUDE_CODE_EXECPATH", "-u", "CLAUDE_CODE_SESSION_ID", "-u",
+                    "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_EFFORT", "LANG=en_US.UTF-8"));
+            ddtoolPathValue().ifPresent(path -> command.add("PATH=" + path));
+            command.addAll(List.of(executable.toString(), "--safe-mode", "--print", "--resume", agentSessionId,
+                    "--permission-mode", "plan", "--output-format", "json", "--", prompt));
+            return List.copyOf(command);
+        });
+    }
+
+    /**
+     * The tools the headless babysitter run PRE-APPROVES: reading,
+     * searching, editing and writing files, and {@code git} and {@code gh}
+     * through Bash -- what a rebase, a mechanical fix, a push and a CI log
+     * read need. One space-separated value, the form {@code claude --help}
+     * documents for {@code --allowedTools}.
+     *
+     * <p><b>What this guarantees, and what not.</b> {@code --allowedTools}
+     * only spares these tools a permission prompt; it neither selects nor
+     * denies the others. In {@code --print} mode nothing can be asked, so a
+     * tool that would need a prompt is not run -- but one the user's own
+     * Claude settings already allow (a {@code permissions.allow} rule, an
+     * allow-listed command) still runs. Drydock enforces no denial here:
+     * {@code --disallowedTools} / {@code --tools} exist in current Claude
+     * Code, but the capability probe does not verify them, and an install
+     * that rejected one would fail every detached run.</p>
+     */
+    static final String HEADLESS_ALLOWED_TOOLS = "Read Glob Grep Edit MultiEdit Write Bash(git:*) Bash(gh:*)";
+
+    /**
+     * {@code env -u CLAUDE… claude --print --resume <id> --add-dir <shared>
+     * --permission-mode acceptEdits --allowedTools "<tools>" --output-format
+     * text -- <prompt>}: the transfer command's shape without its read-only
+     * safety flags. {@code acceptEdits} auto-approves file edits (the only
+     * permission mode besides the bypass, which this deliberately is not),
+     * {@code --allowedTools} pre-approves the tools above (it denies nothing;
+     * see there), {@code --add-dir}
+     * lets the tools reach the babysitting directory outside the worktree.
+     * No {@code --safe-mode} (what it disables beyond the transfer's needs is
+     * not verified in-tree), and no {@code --mcp-config}: no Drydock MCP
+     * server runs while the IDE is closed. None of these flags is covered by
+     * the capability probe, which only knows the interactive flag set; an
+     * install that rejects one fails the run, which the watcher logs.
+     */
+    @Override
+    public Optional<List<String>> buildHeadlessWriteCommand(Path workingDirectory, Path sharedDirectory,
+                                                             String agentSessionId, String prompt) {
+        return locator.locate().map(executable -> {
+            List<String> command = new ArrayList<>(List.of(
+                    "/usr/bin/env", "-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT",
+                    "-u", "CLAUDE_CODE_EXECPATH", "-u", "CLAUDE_CODE_SESSION_ID", "-u",
+                    "CLAUDE_CODE_CHILD_SESSION", "-u", "CLAUDE_EFFORT", "LANG=en_US.UTF-8"));
+            ddtoolPathValue().ifPresent(path -> command.add("PATH=" + path));
+            command.addAll(List.of(executable.toString(), "--print", "--resume", agentSessionId,
+                    "--add-dir", sharedDirectory.toAbsolutePath().normalize().toString(),
+                    "--permission-mode", "acceptEdits", "--allowedTools", HEADLESS_ALLOWED_TOOLS,
+                    "--output-format", "text", "--", prompt));
+            return List.copyOf(command);
+        });
+    }
+
+    @Override
+    public SessionIdStrategy idStrategy() {
+        return SessionIdStrategy.PRESET;
+    }
+
+    @Override
+    public Optional<ConversationSource> conversations() {
+        return Optional.of(conversationSource);
+    }
+
+    @Override
+    public Optional<ActivityReporter> activity() {
+        return Optional.of(activityReporter);
+    }
+
+    @Override
+    public Optional<SessionIdDiscovery> idDiscovery() {
+        return Optional.empty();   // Claude is PRESET
+    }
+
+    @Override
+    public boolean evalAvailable() {
+        return evalAvailable;
+    }
+
+    @Override
+    public Optional<SphinxReviewSupport> sphinxReview() {
+        return sphinxReview;
+    }
+
+    @Override
+    public boolean enforcesReadOnly() {
+        return planModeAvailable;
+    }
+
+    @Override
+    public void markEvalSession(String sessionKey) {
+        evalContainer.mark(sessionKey);
+    }
+
+    @Override
+    public void unmarkEvalSession(String sessionKey) {
+        evalContainer.unmark(sessionKey);
+    }
+
+    @Override
+    public Optional<Instant> evalTokenExpiry(String sessionKey) {
+        return evalContainer.setupFor(sessionKey).map(EvalSetup::tokenExpiry);
+    }
+
+    /** Uncached, like the pre-seam code: every launch/resume re-probes. Runs on the caller's (background) thread. */
+    private ClaudeCapabilities detectCaps() {
+        try {
+            return capabilityService.detectCapabilitiesBlocking();
+        } catch (RuntimeException e) {
+            // Fail conservatively: no name/session-id/settings/plan-mode
+            // support (matches NO_CAPABILITIES semantics).
+            return new ClaudeCapabilities(false, true, false, false, false, false, false, "unknown");
+        }
+    }
+
+    /**
+     * The persistent-remote create (a {@code CreateContext} whose {@code
+     * persistence} is present): the agent command that runs inside the
+     * box-side tmux session, wrapped by {@link
+     * SshCommandBuilder#persistentSessionCommand} so {@code new-session -A}
+     * creates the session named after the managed id or re-attaches to it.
+     *
+     * <p>The agent exec is {@code exec <ENV_CLEANUP_PREFIX> <K='V'…> claude
+     * [--model m] -n <displayName> --session-id <sessionId>
+     * [--permission-mode plan] [-- <prompt>]}: the same env cleanup and
+     * stable-renderer forcing as a local launch, plus the box's agent
+     * environment (the gateway-only proxy base URL). Unlike the local path,
+     * no capability probe decides anything here — the flags describe the
+     * <em>Mac's</em> claude, not the box's — so {@code -n} and {@code
+     * --session-id} are always rendered and read-only always gets plan mode.
+     * No local-only surface is emitted: no settings file, no host
+     * mcp-config, no PATH injection, no host add-dirs (the host-path refusal
+     * above already covers the directories), no plugin-dir. The only
+     * exception is the typed {@link RemoteLaunchSupport} (remote bridge
+     * config and private namespace read dirs), rendered only when present. {@code --session-id} is the
+     * generated UUID, so it appears literally in the plan and the launch
+     * persists {@code agentSessionId}.</p>
+     */
+    private LaunchPlan persistentCreateCommand(CreateContext c) {
+        StringBuilder agentExec = new StringBuilder("exec ").append(ENV_CLEANUP_PREFIX)
+                .append(persistentEnvEntries(c.persistence().get()))
+                .append("claude").append(modelFlag(c.model()))
+                .append(" -n ").append(AgentCommands.shellQuote(c.displayName()))
+                .append(" --session-id ").append(AgentCommands.shellQuote(c.sessionId()));
+        if (c.readOnly()) {
+            agentExec.append(" --permission-mode plan");
+        }
+        agentExec.append(remoteSupportFlags(c.remoteLaunchSupport()));
+        c.initialPrompt().ifPresent(prompt -> agentExec
+                .append(" -- ").append(AgentCommands.shellQuote(prompt)));
+        return LaunchPlan.of(persistentSessionCommand(c.remote().get(), c.persistence().get(),
+                agentExec.toString()), true);
+    }
+
+    /**
+     * The persistent-remote resume: the same prefix as the persistent
+     * create, then {@code claude --resume <agentSessionId> [--permission-mode
+     * plan] [-- <resumePrompt>]}. The conversation id is the only resume
+     * key: an empty one is refused outright ({@code LaunchPlan.unsupported()}),
+     * never the picker and never a fallback to the session name, because a
+     * picker on the box would open a different conversation than the row the
+     * user resumed. Same no-probe, no-local-flags stance as the create.
+     */
+    private LaunchPlan persistentResumeCommand(ResumeContext r) {
+        if (r.agentSessionId().isEmpty() || r.agentSessionId().get().isBlank()) {
+            return LaunchPlan.unsupported();
+        }
+        StringBuilder agentExec = new StringBuilder("exec ").append(ENV_CLEANUP_PREFIX)
+                .append(persistentEnvEntries(r.persistence().get()))
+                .append("claude --resume ").append(AgentCommands.shellQuote(r.agentSessionId().get()));
+        if (r.readOnly()) {
+            agentExec.append(" --permission-mode plan");
+        }
+        agentExec.append(remoteSupportFlags(r.remoteLaunchSupport()));
+        r.resumePrompt().ifPresent(prompt -> agentExec
+                .append(" -- ").append(AgentCommands.shellQuote(prompt)));
+        return LaunchPlan.of(persistentSessionCommand(r.remote().get(), r.persistence().get(),
+                agentExec.toString()), false);
+    }
+
+    /**
+     * The typed remote surface as options, only when {@link RemoteLaunchSupport}
+     * is present: {@code --mcp-config <remote bridge JSON path>} for a review
+     * connection and one narrow {@code --add-dir <remote dir>} per private
+     * workflow-namespace read reference. The components are independent; an
+     * absent one renders nothing. All values are remote path text, never a
+     * host path, and no {@code --plugin-dir} or task guidance is added. The
+     * host McpAccess/LaunchResources refusals have already run in the callers.
+     */
+    private static String remoteSupportFlags(Optional<RemoteLaunchSupport> support) {
+        StringBuilder flags = new StringBuilder();
+        support.ifPresent(s -> {
+            s.reviewConnection().ifPresent(connection -> flags.append(" --mcp-config ")
+                    .append(AgentCommands.shellQuote(connection.mcpConfigPath())));
+            s.workflowAccess().ifPresent(access -> access.readReferences().forEach(reference ->
+                    flags.append(" --add-dir ").append(AgentCommands.shellQuote(reference))));
+        });
+        return flags.toString();
+    }
+
+    /**
+     * The agent environment as {@code K='V'} assignments, in sorted key
+     * order, one trailing space each: the same rendering shape {@code env}
+     * takes from the literals in {@link #ENV_CLEANUP_PREFIX}, so the whole
+     * prefix is deterministic regardless of the caller's map iteration order
+     * ({@link RemotePersistence#toString()} sorts for the same reason).
+     */
+    private static String persistentEnvEntries(RemotePersistence persistence) {
+        StringBuilder entries = new StringBuilder();
+        new TreeMap<>(persistence.agentEnvironment()).forEach((key, value) ->
+                entries.append(key).append('=').append(AgentCommands.shellQuote(value)).append(' '));
+        return entries.toString();
+    }
+
+    /**
+     * Wraps the agent exec in the interactive ssh that starts or re-attaches
+     * the box-side tmux session named after the managed session id. The
+     * remote is the binding-derived one the context carries (the row's
+     * {@code workspaceBox.sshRemote()}); the session name is formed only in
+     * {@link SshCommandBuilder#tmuxSessionName}.
+     */
+    private static String persistentSessionCommand(SshRemote remote,
+                                                    RemotePersistence persistence, String agentExec) {
+        return SshCommandBuilder.persistentSessionCommand(remote,
+                SshCommandBuilder.tmuxSessionName(persistence.managedSessionId()), agentExec);
+    }
+
+    /**
+     * Wraps the bare {@code claude ...} command in a {@code docker run} that
+     * runs it inside the eval container. Throws if the container setup is
+     * missing (ddtool or docker unavailable): an eval session that cannot
+     * be containerized fails loudly rather than silently shipping an
+     * unauthenticated host launch. A present {@code workflowNamespace} (from the
+     * typed {@link LocalWorkflowAccess}, never from launch resources) is mounted
+     * read-only through the container's dedicated overload.
+     */
+    private String wrapEval(String innerCommand, String sessionKey, Path worktree, Optional<Path> mcpConfig,
+                            Optional<String> workflowNamespace) {
+        EvalSetup setup = evalContainer.setupFor(sessionKey).orElseThrow(() -> new IllegalStateException(
+                "Eval session " + sessionKey + " has no container setup; ddtool or docker unavailable"));
+        Optional<Path> settingsFile = activityReporter.settingsFile();
+        if (settingsFile.isEmpty() || activityDirectory == null) {
+            throw new IllegalStateException("Eval container needs the activity hook dirs, which are not installed");
+        }
+        try {
+            return evalContainer.wrap(setup, innerCommand, worktree, mcpConfig,
+                    settingsFile.get().getParent(), activityDirectory, workflowNamespace);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not write eval entrypoint: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Whether this launch requests extra working directories, whose rendering
+     * is this provider's to serve (the {@link LaunchResources} consumer
+     * contract). An absent or empty resource set is no request at all: those
+     * launches keep exactly today's command.
+     */
+    private static boolean requestsExtraDirectories(Optional<LaunchResources> resources) {
+        return resources.map(r -> !r.extraDirectories().isEmpty()).orElse(false);
+    }
+
+    /**
+     * Each extra working directory as a safely quoted {@code --add-dir}
+     * argument, positioned before any {@code --}/positional prompt so a
+     * directory is always an option, never prompt text. First-occurrence
+     * order is preserved: {@link LaunchResources} has already collapsed
+     * duplicates. Empty for a launch that requests none -- byte-identical to
+     * the pre-resource command.
+     */
+    private static String addDirFlags(Optional<LaunchResources> resources) {
+        if (resources.isEmpty()) {
+            return "";
+        }
+        StringBuilder flags = new StringBuilder();
+        for (Path dir : resources.get().extraDirectories()) {
+            flags.append(" --add-dir ").append(AgentCommands.shellQuote(dir.toString()));
+        }
+        return flags.toString();
+    }
+
+    /**
+     * The local workflow read roots as {@code --add-dir} options, unioned
+     * into the host rendering through this separate typed path: they are
+     * never part of {@link LaunchResources}, so the task-resource and eval
+     * refusals ({@link #requestsHostPathResource}) neither see nor change
+     * them. A root already rendered by {@link #addDirFlags} is not repeated.
+     * Empty for no access, for an access carrying only an eval namespace,
+     * and for eval launches -- the container cannot see host paths and its
+     * namespace mount is not a Claude flag. Remote builders return before
+     * this point. Adds no {@code --plugin-dir} and no guidance.
+     */
+    private static String workflowReadRootFlags(Optional<LocalWorkflowAccess> access,
+            Optional<LaunchResources> resources, boolean evalMode) {
+        if (evalMode || access.isEmpty()) {
+            return "";
+        }
+        List<Path> already = resources.map(LaunchResources::extraDirectories).orElse(List.of());
+        StringBuilder flags = new StringBuilder();
+        for (Path root : access.get().readRoots()) {
+            if (!already.contains(root)) {
+                flags.append(" --add-dir ").append(AgentCommands.shellQuote(root.toString()));
+            }
+        }
+        return flags.toString();
+    }
+
+    /**
+     * Whether this launch requests the task guidance, whose rendering is
+     * this provider's to serve through Claude's {@code --plugin-dir}: the
+     * guidance location is present in {@link LaunchResources}. Absent
+     * guidance is no request at all (LaunchResources: empty means nothing
+     * was requested) -- those launches keep exactly today's command and the
+     * flag below stays off.
+     */
+    private static boolean requestsTaskGuidance(Optional<LaunchResources> resources) {
+        return resources.flatMap(LaunchResources::taskGuidance).isPresent();
+    }
+
+    /**
+     * Whether this launch requests a resource that is a path on THIS host
+     * (an extra working directory, or the task guidance): the remote/eval
+     * refusal predicate, since neither context can see host paths. An
+     * absent resource set is no request: remote and eval launches without
+     * resources keep exactly today's command.
+     */
+    private static boolean requestsHostPathResource(Optional<LaunchResources> resources) {
+        return requestsExtraDirectories(resources) || requestsTaskGuidance(resources);
+    }
+
+    /**
+     * The guidance directory as a safely quoted {@code --plugin-dir} option,
+     * rendered on the task-tool gate the coordinator granted: the launch
+     * carries the guidance location AND MCP access (the credential file).
+     * The TASK_TOOLS intersection itself stays upstream, in whoever attaches
+     * the guidance -- no tool list is restated here. Position follows the
+     * {@link #addDirFlags} precedent: an option, before any {@code --}/
+     * positional prompt, so it is never eaten as prompt text. Empty
+     * whenever the gate does not hold -- guidance absent, or a launch
+     * without MCP access -- leaving the command byte-identical to today's;
+     * the flag is additive, never a launch blocker.
+     */
+    private static String pluginDirFlag(Optional<LaunchResources> resources, Optional<Path> mcpCredential) {
+        if (mcpCredential.isEmpty()) {
+            return "";
+        }
+        return resources.flatMap(LaunchResources::taskGuidance)
+                .map(dir -> " --plugin-dir " + AgentCommands.shellQuote(dir.toString()))
+                .orElse("");
+    }
+
+    private String activitySettingsFlag(ClaudeCapabilities caps) {
+        Optional<Path> settings = activityReporter.settingsFile();
+        if (!caps.supportsSettings() || settings.isEmpty()) {
+            return "";
+        }
+        return " --settings " + AgentCommands.shellQuote(settings.get().toString());
+    }
+
+    /**
+     * Adds {@code --mcp-config <file>} so the session can call back into this
+     * app (see {@code app.drydock.mcp.McpServer}). Empty whenever the installed
+     * {@code claude} does not advertise the flag, or no per-session config file
+     * was minted for this launch -- a session without Drydock tools is strictly
+     * better than one that fails to launch.
+     *
+     * <p>No {@code --strict-mcp-config}: that would suppress the user's own MCP
+     * servers, and Drydock's tools are an addition to their setup, not a
+     * replacement.</p>
+     *
+     * <p>Only reached after each builder's remote early-return: {@code claude}
+     * runs on the remote host and cannot reach this machine's loopback
+     * address, so a remote session never receives a local config path; its remote bridge
+     * config arrives only through {@link RemoteLaunchSupport}.</p>
+     */
+    private static String mcpConfigFlag(ClaudeCapabilities caps, Optional<Path> mcpConfig) {
+        if (!caps.supportsMcpConfig() || mcpConfig.isEmpty()) {
+            return "";
+        }
+        return " --mcp-config " + AgentCommands.shellQuote(mcpConfig.get().toString());
+    }
+
+    /**
+     * The stdio MCP servers as one inline {@code --mcp-config} JSON argument.
+     * Inline rather than a file: these entries carry no credential (unlike
+     * drydock's own server, whose token must stay off the command line), and
+     * no file means nothing to write, clean up or race on.
+     */
+    private static String stdioMcpConfigFlag(ClaudeCapabilities caps, List<StdioMcpServer> servers) {
+        if (!caps.supportsMcpConfig() || servers.isEmpty()) {
+            return "";
+        }
+        JsonValue.JsonObject entries = JsonValue.JsonObject.empty();
+        for (StdioMcpServer server : servers) {
+            JsonValue.JsonObject env = JsonValue.JsonObject.empty();
+            server.env().forEach((key, value) -> env.put(key, new JsonValue.JsonString(value)));
+            entries.put(server.name(), JsonValue.JsonObject.empty()
+                    .put("command", new JsonValue.JsonString(server.command()))
+                    .put("args", JsonValue.JsonArray.of(server.args().stream()
+                            .<JsonValue>map(JsonValue.JsonString::new).toList()))
+                    .put("env", env));
+        }
+        String json = JsonWriter.write(JsonValue.JsonObject.empty().put("mcpServers", entries)).strip();
+        return " --mcp-config " + AgentCommands.shellQuote(json);
+    }
+
+    /**
+     * Claude's read-only mode: {@code --permission-mode plan}, which lets the
+     * session read and plan but holds back every edit behind an approval the
+     * read-only session never gives.
+     *
+     * <p>Empty when the installed {@code claude} does not advertise both the
+     * flag and the {@code plan} choice: an unlisted choice is a startup error,
+     * and a read-only session that refuses to launch is worse than one the UI
+     * has to call unenforced. {@link #enforcesReadOnly()} reports the same
+     * probe, so the strip never claims an enforcement this returned nothing
+     * for.</p>
+     */
+    private static String planModeFlag(ClaudeCapabilities caps, boolean readOnly) {
+        if (!readOnly || !caps.supportsPlanMode()) {
+            return "";
+        }
+        return " --permission-mode plan";
+    }
+
+}

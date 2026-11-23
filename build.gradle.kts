@@ -1,220 +1,301 @@
-// Root build file.
+// Drydock IntelliJ plugin build — v1 ("sessions") on the IntelliJ Platform
+// Gradle Plugin 2.x.
 //
-// This project remains a single Gradle module (`app`) during the Phase 0
-// feasibility spike (see docs/implementation-plan.md section 5 and 28).
-// It will be split into `terminal-api`, `terminal-ghostty`, and
-// `native-host` modules once the terminal prototype works.
+//   core         = src/main/java          headless core, JBR-21 floor, ZERO
+//                                            platform classpath (proven by
+//                                            compileCoreJava, not by grep)
+//   main         = src/platform/java      plugin glue, compiles against the
+//                  src/platform/resources  platform; plugin.xml lives here
+//   test         = src/test/java          the core suite (JUnit 5)
+//                                            + the platform glue tests
+//                                            (BasePlatformTestCase via the
+//                                            Vintage engine); the plugin
+//                                            configures this task as a
+//                                            platform test
+
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
-    // Applied only in subprojects; declared here (with apply false) so the
-    // version is resolved once for the whole build.
-    id("org.openjfx.javafxplugin") version "0.1.0" apply false
+    id("java")
+    id("org.jetbrains.intellij.platform") version "2.19.0"
 }
 
-// Central Portal publishing is configured on the :app module via the
-// com.vanniktech.maven.publish.base plugin (Central Portal Publisher API).
-// The root group/version are kept in sync with app/build.gradle.kts by the
-// release workflow's prepare job.
 group = "io.btrace"
-version = "0.4.0"
+version = "0.1.0"
 
-// Alias for the plan's literal Gate 0B task name
-// (":terminal-ghostty:ffmSmokeTest") -- the project is still a single
-// module ("app") during the Phase 0 feasibility spike (see section 5), so
-// the real task lives at :app:ffmSmokeTest; this just makes the top-level
-// spelling from section 7 / 28 work too: `./gradlew ffmSmokeTest`.
-tasks.register("ffmSmokeTest") {
-    group = "verification"
-    description = "Alias for :app:ffmSmokeTest (Gate 0B: libghostty FFM smoke test)."
-    dependsOn(":app:ffmSmokeTest")
-}
-
-// Alias for the plan's literal top-level command name (section 6.3, 7
-// "Gate 0F", 28 "Task 8"): `./gradlew runtimeImage`. The real task lives
-// at :app:runtimeImage (see app/build.gradle.kts for the full jlink
-// image-assembly logic and docs/runtime-image.md for the report).
-tasks.register("runtimeImage") {
-    group = "distribution"
-    description = "Alias for :app:runtimeImage (Gate 0F: jlink runtime image)."
-    dependsOn(":app:runtimeImage")
-}
-
-tasks.register("runtimeImageAllArches") {
-    group = "distribution"
-    description = "Alias for :app:runtimeImageAllArches (cross-links both macOS architectures in one pass)."
-    dependsOn(":app:runtimeImageAllArches")
-}
-
-// Windows runtime image alias: `./gradlew windowsRuntimeImage`. The real
-// task lives at :app:windowsRuntimeImage and is registered (by the
-// drydock.packaging plugin) only on non-macOS hosts. The alias follows
-// the same gating: registered only on non-macOS hosts, so on Mac neither
-// the alias nor the underlying task exists (and `./gradlew tasks` simply
-// does not list it), and on Windows both are registered together. A
-// runtime call on the wrong OS would otherwise fail with a confusing
-// "Task with name 'windowsRuntimeImage' not found" -- gating the
-// alias's registration is clearer.
-val isMacOsHostRoot = System.getProperty("os.name", "").let {
-    it.startsWith("Mac OS X") || it.startsWith("macOS")
-}
-if (!isMacOsHostRoot) {
-    tasks.register("windowsRuntimeImage") {
-        group = "distribution"
-        description = "Alias for :app:windowsRuntimeImage (Windows jlink runtime image + drydock.bat launcher)."
-        dependsOn(":app:windowsRuntimeImage")
+java {
+    toolchain {
+        // IntelliJ 2026.3 runs on JBR 25 and its class files are version 69,
+        // which a JDK 21 compiler cannot read.
+        languageVersion.set(JavaLanguageVersion.of(25))
     }
 }
 
-// Plan section 6.3 also lists appImage / macApp / dmg as required
-// top-level command aliases. appImage/macApp are real (Stage 3, plan
-// section 23.4): a self-contained ad-hoc-signed .app bundle assembled by
-// :app:appImage at build/dist/Drydock.app. dmg (Stage 4) is now real too:
-// :app:dmg wraps that .app into build/dist/Drydock.dmg (and depends on
-// appImage, so `./gradlew dmg` builds the bundle first, in one step).
-// Only Developer ID signing/notarization (Stages 5-6) remain out of scope
-// -- see docs/runtime-image.md "Packaging implications".
-listOf("appImage", "macApp").forEach { name ->
-    tasks.register(name) {
-        group = "distribution"
-        description = "Alias for :app:appImage (Stage 3: self-contained macOS .app bundle)."
-        dependsOn(":app:appImage")
-    }
-}
-tasks.register("dmg") {
-    group = "distribution"
-    description = "Alias for :app:dmg (Stage 4: distributable .dmg wrapping the .app bundle)."
-    dependsOn(":app:dmg")
-}
-
-tasks.register<Exec>("verifyEnvironment") {
-    group = "verification"
-    description = "Runs scripts/verify-environment.sh to check local dev prerequisites."
-    commandLine("bash", "${rootDir}/scripts/verify-environment.sh")
-}
-
-// Builds libghostty for both supported macOS architectures (arm64 and
-// x86_64 -- see the "Supported platforms" deviation in README.md) from the
-// pinned third_party/ghostty submodule.
-//
-// Delegates to scripts/build-ghostty.sh, which:
-//   - requires Zig 0.15.x (not whatever newer/older `zig` may be on PATH)
-//     and a full Xcode install with the Metal Toolchain component, failing
-//     with a clear, actionable message if either is missing;
-//   - fails clearly if the third_party/ghostty submodule is not initialized;
-//   - shells out to `zig build -Dxcframework-target=universal` (the only
-//     mode that produces an aarch64-macos slice on an x86_64 host, and vice
-//     versa -- see docs/native-integration.md), then splits the resulting
-//     universal static library into one archive per architecture.
-//
-// Declaring explicit inputs/outputs lets Gradle skip this task entirely
-// (UP-TO-DATE) when nothing relevant has changed; even when it does run,
-// Zig's own build cache (third_party/ghostty/.zig-cache) makes a no-op
-// rebuild fast (a few seconds) rather than a full rebuild (several minutes).
-val ghosttyNativeOutputDir = layout.buildDirectory.dir("native")
-val ghosttyGeneratedDir = layout.buildDirectory.dir("generated")
-
-// CI builds each macOS arch slice natively on its own runner (arm64 on
-// macos-14, x86_64 on the Intel macos-13) and the fan-in stage job downloads
-// both into build/native/. With -Pnatives.prebuilt=true the two native build
-// tasks are skipped and checkPrebuiltNatives verifies the downloaded dylibs are
-// present, so jbangJar consumes them without re-running the (cross-compiling)
-// native build. Unset -> unchanged local behavior (both slices built on host).
-val nativesPrebuilt = providers.gradleProperty("natives.prebuilt")
-    .map { it.toBoolean() }.orElse(false)
-
-// The dylibs jbangJar actually bundles (per arch). checkPrebuiltNatives asserts
-// these exist when natives are supplied pre-built by upstream CI jobs.
-val prebuiltNativeDylibs = listOf("macos-arm64", "macos-x86_64").flatMap { arch ->
-    listOf("libghostty.dylib", "libdrydockterminalhost.dylib", "libdrydockwebviewhost.dylib").map { lib ->
-        ghosttyNativeOutputDir.map { it.dir(arch).file(lib) }
+repositories {
+    mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
     }
 }
 
-tasks.register("checkPrebuiltNatives") {
-    group = "native"
-    description = "Verifies pre-built native dylibs are present (for -Pnatives.prebuilt=true)."
-    onlyIf { nativesPrebuilt.get() }
-    doLast {
-        val missing = prebuiltNativeDylibs.map { it.get().asFile }.filterNot { it.isFile }
-        if (missing.isNotEmpty()) {
-            throw GradleException(
-                "natives.prebuilt=true but expected native libraries are missing:\n" +
-                    missing.joinToString("\n") { "  - $it" } +
-                    "\nEach must be downloaded from the per-arch native build job into build/native/<arch>/."
-            )
+sourceSets {
+    main {
+        java.setSrcDirs(listOf("src/platform/java"))
+        resources.setSrcDirs(listOf("src/platform/resources"))
+    }
+    create("core") {
+        java.setSrcDirs(listOf("src/main/java"))
+        resources.setSrcDirs(listOf("src/main/resources"))
+    }
+    // `test` keeps the Gradle default: it extends `main` (the platform
+    // glue) and therefore sees core (via main's implementation), the glue
+    // classes, and the resolved IDE on its compile classpath. The platform
+    // glue tests (BasePlatformTestCase subclasses) live in the same source
+    // set as the core suite; the core suite still never touches platform
+    // APIs (enforced by the import grep + the pure coreCompileClasspath
+    // gates), it merely runs in a JVM that also has them available.
+    // An earlier design kept the glue tests in a separate `platformTest`
+    // source set driven by a custom testIde entry, but the platform plugin's
+    // runtime-fix wiring for such entries is Kotlin-internal to the plugin:
+    // a BasePlatformTestCase boot could not resolve the IDE's lib/modules
+    // descriptors (NPE creating the app MessageBus), and no external hook
+    // reaches it. The standard source set gets the full wiring for free.
+}
+
+// The headless core is packaged as its own jar: `main` compiles against it and
+// the platform plugin packs it into the plugin zip next to the glue jar.
+val coreJar = tasks.register<Jar>("coreJar") {
+    archiveBaseName.set("drydock-core")
+    archiveVersion.set("")
+    from(sourceSets["core"].output)
+    // patchPluginXml drops the patched plugin descriptor into EVERY source
+    // set's resources output (build/resources/core, .../test, ...); the
+    // plugin zip would carry two descriptors (drydock-core.jar + the glue
+    // jar) and the Plugin Verifier rejects that structure. The core jar is
+    // a library: it must not ship a descriptor.
+    exclude("META-INF/plugin.xml")
+}
+
+// Lazy file dependency on the core jar (carries the task dependency on
+// coreJar; resolved as a FileCollection, a notation DependencyHandler accepts).
+val coreJarDependency = files(coreJar.map { it.archiveFile })
+
+configurations {
+    // `main` (glue) compiles and runs against the core jar + core's own
+    // third-party dependencies; the IntelliJ Platform Gradle plugin adds the
+    // resolved IDE and the bundled terminal plugin to `implementation`.
+    named("implementation") {
+        extendsFrom(configurations["coreImplementation"])
+    }
+}
+
+dependencies {
+    // Structural parsing for the review change graph (tree-sitter) and
+    // bounded parsing of task front matter (snakeyaml) — the ONLY third-party
+    // dependencies of the headless core. The tree-sitter artifacts are the
+    // same versions as app/build.gradle.kts; a missing grammar degrades to
+    // the lexical path (GrammarRegistry), it is not an error. snakeyaml is
+    // pinned explicitly (not an IntelliJ transitive jar) and is used only
+    // through its bounded-load node-composition API, never as an arbitrary
+    // object constructor. Declared on the core's own
+    // configuration so compileCoreJava's classpath provably holds no platform
+    // jar; `main` picks them up transitively and the platform plugin packs
+    // them into the plugin zip.
+    "coreImplementation"("io.github.bonede:tree-sitter:0.25.3")
+    "coreImplementation"("io.github.bonede:tree-sitter-java:0.23.4")
+    "coreImplementation"("io.github.bonede:tree-sitter-kotlin:0.3.8.1")
+    "coreImplementation"("io.github.bonede:tree-sitter-python:0.23.4")
+    "coreImplementation"("io.github.bonede:tree-sitter-javascript:0.23.1")
+    "coreImplementation"("io.github.bonede:tree-sitter-typescript:0.23.2")
+    "coreImplementation"("io.github.bonede:tree-sitter-go:0.23.3")
+    "coreImplementation"("io.github.bonede:tree-sitter-rust:0.23.1")
+    "coreImplementation"("io.github.bonede:tree-sitter-c:0.23.2")
+    "coreImplementation"("io.github.bonede:tree-sitter-cpp:0.23.4")
+    "coreImplementation"("org.yaml:snakeyaml:2.5")
+
+    "implementation"(coreJarDependency)
+
+    // Test suite: JUnit 5 (junit-bom 5.11.4, as in the probe and the app
+    // build) plus the Vintage engine so JUnit3-style BasePlatformTestCase
+    // tests run on the same task; junit:junit provides the junit.framework
+    // TestCase API those tests are compiled against (the IDE distribution
+    // ships no junit4 jar).
+    "testImplementation"(platform("org.junit:junit-bom:5.11.4"))
+    "testImplementation"("org.junit.jupiter:junit-jupiter")
+    "testImplementation"("junit:junit:4.13.2")
+    // Behavioral tests for the generated pi extensions: the generated
+    // TypeScript-stripped JS runs on GraalVM Polyglot's embedded JS engine
+    // against a mock pi (there is no node/npm toolchain in this repo).
+    // polyglot is the API jar the test code compiles against; js-language is
+    // the engine jar. NOT org.graalvm.polyglot:js-community / org.graalvm.js:js
+    // -- both are <packaging>pom</packaging> aggregators, and Gradle resolves
+    // their .pom FILES onto the test classpath, where the worker JVM's
+    // ServiceLoader scan dies opening them (ExceptionInInitializerError in
+    // BootstrapLogger). js-language brings regex/truffle transitively.
+    // Test-scope ONLY -- the core purity gates must never see it.
+    "testImplementation"("org.graalvm.polyglot:polyglot:25.0.4")
+    "testImplementation"("org.graalvm.js:js-language:25.0.4")
+    "testRuntimeOnly"("org.junit.vintage:junit-vintage-engine")
+    "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
+
+    intellijPlatform {
+        // 2026.3 (release build 263.7307.200): its terminal renders agent TUIs
+        // (Claude, Codex, Pi) correctly, where 2025.3's did not. since-build
+        // follows, so 263. The release build, not an EAP: an EAP build expires
+        // and the sandbox IDE then closes itself on start.
+        intellijIdeaUltimate("263.7307.200")
+        bundledPlugin("org.jetbrains.plugins.terminal")
+        // The New task dialog's start-point picker is Git's own (GitRefDialog).
+        bundledPlugin("Git4Idea")
+        // From 2026.3 VCS classes ship as modules: the core types (Change,
+        // ContentRevision, VcsException) in the platform's
+        // intellij.platform.vcs.core and .shared, and VcsUtil, ShowDiffAction and the DVCS
+        // repository manager in the bundled Version Control plugin. plugin.xml
+        // declares the same modules for the runtime classloader.
+        bundledPlugin("com.intellij.platform.vcs")
+        bundledModule("intellij.platform.vcs.core")
+        bundledModule("intellij.platform.vcs.shared")
+        bundledModule("intellij.platform.vcs")
+        bundledModule("intellij.platform.vcs.impl")
+        bundledModule("intellij.platform.vcs.impl.shared")
+        bundledModule("intellij.platform.vcs.dvcs.impl")
+        // COMPILE-ONLY: com.intellij.diff ships as internal-visibility product
+        // modules in 2026.3 (visibility="internal"), so plugin.xml must NOT
+        // declare them -- the plugin would be refused at load. The classes
+        // are expected to stay reachable at runtime through the public
+        // intellij.platform.vcs.impl module, which depends on diff.impl.
+        // Whether that holds live is exactly what the spike tests.
+        bundledModule("intellij.platform.diff")
+        bundledModule("intellij.platform.diff.impl")
+        // P3's finding inlays: EditorComponentInlaysUtilKt.insertComponentAfter
+        // (Java-callable, needs a non-null renderer factory on 263) lives in
+        // this product module. Compile dependency only, exactly like the
+        // diff modules above: plugin.xml declares nothing for it, and no
+        // Kotlin source set or coroutine dependency is added.
+        bundledModule("intellij.platform.collaborationTools.shared")
+        // Optional at runtime (plugin.xml): IdeMcpServer routes the IDE's
+        // bundled MCP server to each launched agent's worktree.
+        bundledPlugin("com.intellij.mcpServer")
+        // testFramework declared in the dependencies block is what wires the
+        // standard `test` task: BasePlatformTestCase + the full test-runtime
+        // environment (sandbox dirs, idea.home.path, the platform classpath)
+        // without any custom testIde entry.
+        testFramework(TestFrameworkType.Platform)
+    }
+}
+
+intellijPlatform {
+    pluginVerification {
+        ides {
+            recommended()
         }
     }
 }
 
-tasks.register<Exec>("buildGhosttyNative") {
-    // Skipped when the natives are supplied pre-built (CI fan-in); the
-    // checkPrebuiltNatives task verifies their presence instead.
-    onlyIf { !nativesPrebuilt.get() }
-
-    group = "native"
-    description = "Builds libghostty (macOS arm64 + x86_64) via scripts/build-ghostty.sh."
-
-    inputs.file("${rootDir}/scripts/build-ghostty.sh")
-    // Fingerprint the submodule by its pinned commit hash rather than by
-    // hashing its entire working tree (tens of thousands of files, which
-    // made every up-to-date check slow). Local uncommitted edits inside
-    // third_party/ghostty therefore do NOT retrigger this task -- commit
-    // (or run with --rerun-tasks) to pick them up.
-    val ghosttyCommit = providers.exec {
-        commandLine("git", "-C", "${rootDir}/third_party/ghostty", "rev-parse", "HEAD")
-    }.standardOutput.asText.map { it.trim() }
-    inputs.property("ghosttyCommit", ghosttyCommit)
-
-    // Outputs are the specific files/dirs the script produces, NOT all of
-    // build/native: buildNativeHost writes libdrydockterminalhost.dylib into
-    // the same build/native/<arch>/ directories, and claiming the whole
-    // root as this task's output made the two tasks' outputs overlap,
-    // silently disabling caching and up-to-date checks for both.
-    listOf("macos-x86_64", "macos-arm64").forEach { arch ->
-        outputs.file(ghosttyNativeOutputDir.map { it.dir(arch).file("libghostty.dylib") })
-        outputs.file(ghosttyNativeOutputDir.map { it.dir(arch).file("libghostty.a") })
+// buildSearchableOptions launches a headless IDE to index the plugin's
+// configurable search texts; this plugin has no searchable configurables,
+// and the headless instance exits 255 on this host. The task only feeds
+// Marketplace search indexing -- disabling it does not affect the plugin zip.
+tasks {
+    named("buildSearchableOptions") {
+        enabled = false
     }
-    outputs.dir(ghosttyNativeOutputDir.map { it.dir("include") })
-    outputs.file(ghosttyGeneratedDir.map { it.file("ghostty-version.properties") })
-
-    // System.getenv("ZIG_BIN") lets a developer pin a different Zig 0.15.x
-    // location than the script's own auto-detection
-    // (/usr/local/opt/zig@0.15/bin/zig); left unset here to defer entirely
-    // to the script's documented defaults/detection.
-    commandLine("bash", "${rootDir}/scripts/build-ghostty.sh")
+    // The sandbox IDE keeps its own registered-projects list: trying the
+    // tool window out must not add scratch repositories to the list the
+    // user's real Drydock app and IDE share (~/.drydock/projects.json).
+    // Seeding still reads the real app's list, read-only.
+    named<JavaExec>("runIde") {
+        val sandboxProjects = layout.buildDirectory.file("sandbox-projects/projects.json")
+        // drydock.tasksDirectory: same sandbox isolation for the task store's
+        // per-user root (T12a), so a sandbox IDE never touches ~/.drydock/tasks.
+        val sandboxTasks = layout.buildDirectory.file("sandbox-tasks/tasks")
+        jvmArgumentProviders.add(CommandLineArgumentProvider {
+            listOf("-Ddrydock.projectsFile=" + sandboxProjects.get().asFile.absolutePath,
+                    "-Ddrydock.tasksDirectory=" + sandboxTasks.get().asFile.absolutePath)
+        })
+    }
 }
 
-// Builds the tiny AppKit host shim (native-host/DrydockTerminalHost.{h,m}, plan
-// section 8) for both supported macOS architectures. See
-// scripts/build-native-host.sh and docs/native-integration.md.
-tasks.register<Exec>("buildNativeHost") {
-    group = "native"
-    description = "Builds libdrydockterminalhost (macOS arm64 + x86_64) via scripts/build-native-host.sh."
-    // Skipped when the natives are supplied pre-built (CI fan-in).
-    onlyIf { !nativesPrebuilt.get() }
-
-    inputs.file("${rootDir}/scripts/build-native-host.sh")
-    inputs.dir("${rootDir}/native-host")
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libdrydockterminalhost.dylib") })
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockterminalhost.dylib") })
-
-    commandLine("bash", "${rootDir}/scripts/build-native-host.sh")
+/**
+ * Host-isolation contract for every test task (same as app/build.gradle.kts
+ * and the probe build): the git integration tests must not inherit the
+ * developer's global git config (signing agents, hooks) or every fixture
+ * commit becomes a host problem. GIT_CONFIG_* env injection overrides file
+ * config (global/local) but is itself overridden by an explicit `-c`, so it
+ * cannot mask a test that deliberately enables signing. Set for the whole
+ * JVM, so every spawned git child inherits it.
+ *
+ * The pinned fixture identity matters as much as the isolation: with user.*
+ * unset, git auto-detects the committer (getpwuid + a hostname lookup) for
+ * every reflog write, and on a host whose hostname does not resolve that
+ * costs ~5s per spawned git child — three children per `worktree add` —
+ * which trips the 15s command timeout and fails the worktree tests
+ * (btraceio--drydock/main/drydock-intellij/
+ * find-git-worktree-timeout-root-cause-ident-hostname-lookup). Losing this
+ * block re-times-out the worktree tests.
+ */
+fun Test.withGitHostIsolation() {
+    val isolatedGlobalGitConfig = temporaryDir.resolve("global-gitconfig")
+    environment("GIT_CONFIG_GLOBAL", isolatedGlobalGitConfig.absolutePath)
+    environment("GIT_CONFIG_COUNT", "3")
+    environment("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    environment("GIT_CONFIG_VALUE_0", "false")
+    environment("GIT_CONFIG_KEY_1", "user.name")
+    environment("GIT_CONFIG_VALUE_1", "Drydock Fixture")
+    environment("GIT_CONFIG_KEY_2", "user.email")
+    environment("GIT_CONFIG_VALUE_2", "fixture@drydock.invalid")
+    doFirst {
+        isolatedGlobalGitConfig.parentFile.mkdirs()
+        isolatedGlobalGitConfig.writeText("")
+    }
 }
 
-// Builds the WKWebView embedding shim (native-host/DrydockWebviewHost.{h,m})
-// for both supported macOS architectures. WebKit is a macOS system framework,
-// so this is build plumbing only -- no bundling, no installation.
-// See scripts/build-webview-host.sh and the webview spike.
-tasks.register<Exec>("buildWebviewHost") {
-    group = "native"
-    description = "Builds libdrydockwebviewhost (macOS arm64 + x86_64) via scripts/build-webview-host.sh."
-    // Skipped when the natives are supplied pre-built (CI fan-in).
-    onlyIf { !nativesPrebuilt.get() }
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+    // JBR 25 is the floor for IntelliJ 2026.3: the extracted core must not use
+    // anything newer, or the port silently depends on a runtime the IDE can
+    // never provide.
+    options.release.set(25)
+}
 
-    inputs.file("${rootDir}/scripts/build-webview-host.sh")
-    inputs.dir("${rootDir}/native-host")
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-x86_64").file("libdrydockwebviewhost.dylib") })
-    outputs.file(ghosttyNativeOutputDir.map { it.dir("macos-arm64").file("libdrydockwebviewhost.dylib") })
-
-    commandLine("bash", "${rootDir}/scripts/build-webview-host.sh")
+tasks.test {
+    // The IntelliJ Platform Gradle Plugin preconfigures the standard `test`
+    // task as a PLATFORM test (sandbox classpath, instrumented test code,
+    // JBR launcher, system properties like
+    // java.system.class.loader=PathClassLoader): BasePlatformTestCase
+    // subclasses in this source set need exactly that. An earlier design
+    // reverted the takeover so the core suite would run platform-free in a
+    // separate task; the suites are merged now (see the sourceSets comment)
+    // and the takeover stays.
+    useJUnitPlatform()
+    withGitHostIsolation()
+    // A platform test starts the real DrydockPluginService, which seeds and
+    // follows the shared projects list. Without this it seeded the user's
+    // real ~/.drydock/projects.json from their app's state.
+    val testProjects = layout.buildDirectory.file("test-projects/projects.json")
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf("-Ddrydock.projectsFile=" + testProjects.get().asFile.absolutePath)
+    })
+    // The task store's per-user root is redirected the same way (T12a): the
+    // real DrydockPluginService the platform tests start owns a task service,
+    // and it must never touch the developer's ~/.drydock/tasks.
+    val testTasks = layout.buildDirectory.file("test-tasks/tasks")
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf("-Ddrydock.tasksDirectory=" + testTasks.get().asFile.absolutePath)
+    })
+    // The IDE's restClient plugin bundles its own older GraalJS
+    // (intellij.libraries.graalvm.js.jar). On the platform test classpath it
+    // shadows the pinned polyglot test dependency: truffle 25.0.4 engine
+    // classes then fail to define against the old jar's Shape
+    // (sealed-subclass check) and every polyglot behavioral test aborts with
+    // IncompatibleClassChangeError. The platform suite never uses the
+    // bundled engine; the behavioral tests need exactly the pinned one.
+    classpath = classpath.filter { !it.name.startsWith("intellij.libraries.graalvm.js") }
+    // Truffle's multi-release sanity check reads the engine jar's manifest
+    // through the caller's classloader; the platform test worker's
+    // PathClassLoader does not surface jar manifests, so the check fails
+    // even though the pinned jars are the unmodified official artifacts.
+    // Disable the heuristic -- the real sealed-hierarchy conflict it also
+    // guards against is already handled by the classpath filter above.
+    jvmArgs("-Dpolyglotimpl.DisableMultiReleaseCheck=true")
 }
