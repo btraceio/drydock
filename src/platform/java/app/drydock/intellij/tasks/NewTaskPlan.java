@@ -356,6 +356,15 @@ public final class NewTaskPlan {
                 choice.tiers(), choice.subagentModelRule().isPresent())).initialPrompt();
     }
 
+    /** The framing a non-slash launch carries, exposed for the batch triage prompt composer. */
+    static String clarifyFirst() {
+        return CLARIFY_FIRST;
+    }
+
+    static String titleGuidance() {
+        return TITLE_GUIDANCE;
+    }
+
     private static String defaultFraming(Choice choice) {
         return choice.subagentModelRule()
                 .map(rule -> CLARIFY_FIRST + TITLE_GUIDANCE + rule + "\n\n")

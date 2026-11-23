@@ -831,6 +831,104 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         };
+        AnAction triageAll = new DumbAwareAction("Triage Untriaged…",
+                "Run the triage skill on every issue here that is not labeled 'triaged', N sessions at a time",
+                AllIcons.Actions.Execute) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                TaskNode node = e.getData(SELECTED_NODE);
+                TaskActions.present(e, node instanceof GitHubNode || node instanceof JiraNode);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (selected == null || root == null || selected.isRemote()) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.triageGitHub(project, selected, root);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.triageJira(project, selected, root);
+                }
+            }
+        };
+        AnAction cancelTriage = new DumbAwareAction("Cancel Triage Batch",
+                "Stop launching triage sessions; the queued issues stay resumable",
+                AllIcons.Actions.Suspend) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                BatchTriageService service =
+                        e.getProject() == null ? null : e.getProject().getService(BatchTriageService.class);
+                TaskNode node = e.getData(SELECTED_NODE);
+                boolean active = service != null
+                        && (node instanceof GitHubNode && service.activeGitHub()
+                                || node instanceof JiraNode && service.activeJira());
+                TaskActions.present(e, active);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                if (selected == null) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.cancelGitHub(project, selected);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.cancelJira(project, selected);
+                }
+            }
+        };
+        AnAction resumeTriage = new DumbAwareAction("Resume Triage Batch…",
+                "Continue the paused batch triage from its stored queue",
+                AllIcons.Actions.Restart) {
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                TaskNode node = e.getData(SELECTED_NODE);
+                BatchTriageService service =
+                        e.getProject() == null ? null : e.getProject().getService(BatchTriageService.class);
+                boolean resumable = selected != null && service != null
+                        && (node instanceof GitHubNode
+                                && !service.activeGitHub()
+                                && BatchTriageService.hasPaused(selected.id(), "github")
+                                || node instanceof JiraNode
+                                        && !service.activeJira()
+                                        && BatchTriageService.hasPaused(selected.id(), "jira"));
+                TaskActions.present(e, resumable);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.BGT;
+            }
+
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                SharedProject selected = e.getData(SELECTED_PROJECT);
+                Path root = e.getData(SELECTED_PROJECT_ROOT);
+                if (selected == null || root == null || selected.isRemote()) {
+                    return;
+                }
+                if (e.getData(SELECTED_NODE) instanceof GitHubNode) {
+                    BatchTriageService.resumeGitHub(project, selected, root);
+                } else if (e.getData(SELECTED_NODE) instanceof JiraNode) {
+                    BatchTriageService.resumeJira(project, selected, root);
+                }
+            }
+        };
         // One repository-settings action for every row that offers it — an
         // issue, a project, a listings section, or a ghost node: it opens the
         // single sectioned dialog (Jira, GitHub, workspace box, agent
@@ -915,6 +1013,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.REVIEW_IN_SPHINX, reviewInSphinx);
         menuActions.put(TaskMenu.Item.IMPLEMENT, implement);
         menuActions.put(TaskMenu.Item.TRIAGE, triage);
+        menuActions.put(TaskMenu.Item.TRIAGE_ALL, triageAll);
+        menuActions.put(TaskMenu.Item.CANCEL_TRIAGE, cancelTriage);
+        menuActions.put(TaskMenu.Item.RESUME_TRIAGE, resumeTriage);
         menuActions.put(TaskMenu.Item.REPOSITORY_SETTINGS, repositorySettings);
         menuActions.put(TaskMenu.Item.OPEN_IN_JIRA, JiraTreeActions.openInJira());
         menuActions.put(TaskMenu.Item.OPEN_MIRRORED_TASK, openMirroredTask);

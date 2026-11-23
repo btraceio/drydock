@@ -287,6 +287,22 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
             5. Report what conflicted, how each conflict was resolved, and the verification run.
             """;
 
+    /** The triage methodology the batch triage composes into each issue's prompt. */
+    static String triageSteps() {
+        return TRIAGE_STEPS;
+    }
+
+    /** The triage prompt's identity half for one GitHub issue: the header line and the URL. */
+    static String triageIdentity(OpenIssue issue) {
+        String identity = "Triage GitHub issue #" + issue.number() + ": " + issue.title();
+        return issue.url().map(url -> identity + "\n\n" + url).orElse(identity);
+    }
+
+    /** The triage prompt's identity half for one Jira issue: the header line and the URL. */
+    static String triageIdentity(JiraIssue issue) {
+        return "Triage Jira issue " + issue.key() + ": " + issue.summary() + "\n\n" + issue.url();
+    }
+
     static NewTaskPreset triage(OpenIssue issue) {
         String reference = "#" + issue.number();
         String name = "Triage " + reference + " " + issue.title();
