@@ -447,7 +447,7 @@ public class DelayedTaskTreePlatformTest extends BasePlatformTestCase {
     /** The group the inbox shows the row titled {@code title} in, or null. */
     private InboxModel.GroupKind groupOf(String title) {
         for (InboxList.Entry entry : inbox.entries()) {
-            if (entry instanceof InboxList.Row row && row.item().title().equals(title)) {
+            if (entry instanceof InboxList.Row row && row.group() != null && row.item().title().equals(title)) {
                 return row.group().kind();
             }
         }

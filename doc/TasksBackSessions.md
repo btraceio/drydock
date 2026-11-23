@@ -5,8 +5,10 @@ code that shows it.
 
 ## Problem
 
-A session launched from the New Task dialog has no task. A task exists only
-when the user chooses "save" instead of "launch". Three things follow:
+A session launched from the New Task dialog has no task. From that dialog a
+task exists only when the user chooses "save" instead of "launch" (tasks are
+also created through the task MCP tools, which this design does not
+change). Three things follow:
 
 - **Mirroring needs a task.** Mirror addresses (GitHub issues, Jira tickets)
   are stored on the task (`TaskDocument.mirrors`). `TaskMirroring.mirrorsOfSession`
@@ -26,12 +28,12 @@ when the user chooses "save" instead of "launch". Three things follow:
 | --- | --- |
 | "Save" creates the task through the task service and stores the body as notes. It registers no session, creates no worktree and spawns no agent. | `TaskLauncher.saveTask` (javadoc and body) |
 | "Start" on an existing task launches through the same chain as an ad-hoc launch, with a list of `TaskLaunchBinding`. An empty list is the "byte-identical no-binding chain". | `TaskLauncher.start(..., List<TaskLaunchBinding>)` |
-| A binding runs before anything spawns: it reserves the run receipt and writes the session link and the `started` status into the task. A refused bind prevents the launch. A failed launch removes the link, and sets the task back to `open` only when no other session remains and the status is still `started`. | `TaskLaunchBinding` class javadoc, `startable`, `reconcileFailed` |
-| The tree attaches a started task to its live session's row. | `DelayedTaskRows.attachedSession` |
-| A launch on a workspace box refuses a task-bound launch: "A task-bound launch cannot run on a workspace box". | `TaskLauncher.remoteLaunchRefusal` |
-| The ssh-remote arm (`startOnSshRemote`) takes no bindings. | `TaskLauncher.start`, remote-project branch |
+| A binding runs before anything spawns: it reserves the run receipt and writes the session link and the `started` status into the task. A refused bind prevents the launch. A failed launch removes the link only while the task is still `started` (a later done or review is never undone), and sets the task back to `open` only when no other session remains. | `TaskLaunchBinding` class javadoc, `startable`, `reconcileFailed` |
+| The tree attaches a task to the first of its live sessions whose row the window shows; the inbox then lists a started task under that session instead of as a row of its own. A live session whose row this window does not show attaches nothing. | `DelayedTaskRows.attachedSession`, `InboxModel.place` |
+| A launch on a workspace box (reached when the dialog's box checkbox is set) refuses a task-bound launch: "A task-bound launch cannot run on a workspace box". | `TaskLauncher.remoteLaunchRefusal`, `startRemote` |
+| The ssh-remote arm (`startOnSshRemote`, taken when the project is remote) takes no bindings: `start` calls it without them and nothing refuses a non-empty list, so a binding passed to it is dropped silently. | `TaskLauncher.start`, remote-project branch |
 | Other session sources call `SessionDialogs.launchSession`, which takes a `List<TaskLaunchBinding>`. The worktree review session passes an empty list, so it has no task. | `SessionDialogs.launchSession`, `WorktreeReview` (call at line 536) |
-| A babysitter is a session with its own role and refusal rules. A terminal session runs no agent. | `BabysitStartRefusal` |
+| A terminal session runs no agent and cannot be babysat; a babysitter cannot itself be babysat. How a babysitter is launched was not audited for this draft. | `BabysitStartRefusal` |
 
 ## Proposal
 
@@ -53,8 +55,10 @@ when the user chooses "save" instead of "launch". Three things follow:
 ### Launch path
 
 - The dialog's launch result already carries a title-like `Choice.name` and
-  the project; the save result carries `title`, `after`, `bodyNotes` and the
-  project. The launch path needs the same fields as the save path, so the
+  the project; the save result (`NewTaskPlan`) carries `title`, `body`, `after`,
+  `doneBy` and the project root and name. `saveTask` passes the title,
+  `after` and project to `tasks.create` and stores the body as notes; it does
+  not pass `doneBy`. The launch path needs the same fields as the save path, so the
   dialog returns one plan that both outcomes share. The save-only fields
   (`after`, notes) are optional on launch.
 - Task creation reuses `TaskLauncher.saveTask(SharedProjectsService,
@@ -75,8 +79,10 @@ when the user chooses "save" instead of "launch". Three things follow:
   or is excluded.
 - Options, in order of preference:
   1. Keep both remote arms unbacked in the first version. A remote launch
-     creates no task; "Make task" adopts it afterwards. This changes no
-     remote code.
+     creates no task; "Make task" adopts it afterwards. The new task-creation
+     step must skip both arms explicitly: the box arm would refuse the
+     binding, but the ssh arm would drop it and leave a task that no session
+     ever links to.
   2. Create the task before a remote launch and link the session after the
      remote session id is known. This needs the receipt and reconcile rules
      of `TaskLaunchBinding` redone for a session that does not exist locally
@@ -97,8 +103,8 @@ when the user chooses "save" instead of "launch". Three things follow:
 
 ### Sessions that stay unbacked
 
-Babysitters, review sessions, terminal sessions and remote launches (version
-one) have no task. The inbox already handles a session without a task:
+Review sessions (the worktree review passes an empty binding list), terminal
+sessions, babysitters and remote launches (version one) have no task. The inbox already handles a session without a task:
 `DelayedTaskRows.attachedSession` returns no match and the row stays a plain
 session row. No inbox change is required for them.
 
@@ -107,8 +113,9 @@ session row. No inbox change is required for them.
 - A backed session shows its task's mirrors through `mirrorsOfSession`, the
   same as a session started from a saved task.
 - The mirror flows copy a task and its prerequisite closure
-  (`TaskMirroring` javadoc). Auto-created tasks have no `after` references,
-  so a mirror of one covers that task alone.
+  (`TaskMirroring` javadoc). A task created at launch has only the
+  prerequisites the launch supplies, so with none a mirror covers that task
+  alone.
 - A repository-level default for "mirror new tasks" is out of scope here.
   Adding it later does not change this design.
 
@@ -129,11 +136,13 @@ session row. No inbox change is required for them.
 
 ## Open questions
 
-1. Should the task title come from `Choice.name`, or from a separate title
+1. Should a task created at launch honour the dialog's `doneBy`? `saveTask`
+   does not pass it to `tasks.create` today.
+2. Should the task title come from `Choice.name`, or from a separate title
    field in the dialog? The dialog's current fields were not audited for
    this draft.
-2. Should "Make task" offer to attach the session to an existing open task
+3. Should "Make task" offer to attach the session to an existing open task
    instead of always creating one?
-3. What does an existing user's history look like? Sessions started before
+4. What does an existing user's history look like? Sessions started before
    this change stay unbacked. Whether a one-time "adopt all running sessions"
    action is worth building is open.

@@ -207,6 +207,128 @@ class InboxModelTest {
     }
 
     @Test
+    void aTaskARunningSessionOwnsIsNoGraphMemberButShowsInWhatItsDependentsWaitOn() {
+        DelayedTaskRow ready = task("Ready", Presentation.READY);
+        DelayedTaskRow running = task("Running q", Presentation.STARTED, TaskStatus.STARTED, Optional.empty(),
+                List.of("live-session"));
+        DelayedTaskRow blocked = task("Blocked z", Presentation.BLOCKED);
+        after(blocked, ready, running);
+
+        Inbox inbox = inbox(Query.NONE);
+
+        InboxModel.Graph graph = inbox.graphs().get(0);
+        assertEquals(List.of("Ready", "Blocked z"), graphTitles(graph));
+        assertEquals(List.of("Ready", "Running q"), graph.nodes().get(1).waitsOn());
+        assertEquals(List.of("Running q"), titles(inbox.graphed(), GroupKind.RUNNING),
+                "the running task stays where it was");
+    }
+
+    @Test
+    void aCycleWithATailIsStuckHasNoStartTargetAndNeverListsATaskBeforeDepthZero() {
+        DelayedTaskRow one = task("B one", Presentation.BLOCKED);
+        DelayedTaskRow two = task("C two", Presentation.BLOCKED);
+        DelayedTaskRow down = task("A down", Presentation.BLOCKED);
+        after(one, two);
+        after(two, one);
+        after(down, two);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertTrue(graph.stuck());
+        assertEquals(List.of(), graph.startTargets());
+        assertEquals(List.of(0, 0, 0), graph.nodes().stream().map(InboxModel.GraphNode::depth).toList());
+    }
+
+    @Test
+    void onlyOpenSinksAreStartTargets() {
+        DelayedTaskRow root = task("Root", Presentation.READY);
+        DelayedTaskRow open = task("Open sink", Presentation.BLOCKED);
+        DelayedTaskRow review = task("Review sink", Presentation.REVIEW, TaskStatus.REVIEW, Optional.empty(),
+                List.of());
+        after(open, root);
+        after(review, root);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of("Open sink", "Review sink"),
+                graph.sinks().stream().map(Item::title).sorted().toList());
+        assertEquals(List.of("Open sink"), graph.startTargets().stream().map(Item::title).toList());
+    }
+
+    @Test
+    void graphedTakesTasksInReviewOutOfTheirGroupAndDropsTheGroupWhenItEmpties() {
+        DelayedTaskRow root = task("Root", Presentation.READY);
+        DelayedTaskRow review = task("In review", Presentation.REVIEW, TaskStatus.REVIEW, Optional.empty(),
+                List.of());
+        after(review, root);
+        Inbox inbox = inbox(Query.NONE);
+        assertEquals(List.of(GroupKind.IN_REVIEW, GroupKind.READY), kinds(inbox));
+
+        assertEquals(List.of(), kinds(inbox.graphed()));
+    }
+
+    @Test
+    void selfReferencesAndRepeatedReferencesAreOneEdgeAndDroppedPrerequisitesAreNotDone() {
+        DelayedTaskRow first = task("First", Presentation.READY);
+        DelayedTaskRow second = task("Second", Presentation.BLOCKED);
+        DelayedTaskRow dropped = task("Dropped", Presentation.TERMINAL, TaskStatus.DROPPED, Optional.empty(),
+                List.of());
+        after(first, first, dropped);
+        after(second, first, first);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of("First"), graph.nodes().get(1).waitsOn());
+        assertEquals(1, graph.nodes().get(0).unblocks());
+        assertEquals(0, graph.done());
+        assertEquals(2, graph.total());
+    }
+
+    @Test
+    void severalGraphsFollowTheirFirstTaskInSortedOrderAndTwoRootsShareOneGraph() {
+        DelayedTaskRow b = task("B root", Presentation.READY);
+        DelayedTaskRow a = task("A root", Presentation.READY);
+        DelayedTaskRow join = task("Join", Presentation.BLOCKED);
+        after(join, a, b);
+        DelayedTaskRow x = task("X root", Presentation.READY);
+        DelayedTaskRow y = task("Y next", Presentation.BLOCKED);
+        after(y, x);
+
+        List<InboxModel.Graph> graphs = inbox(Query.NONE).graphs();
+
+        assertEquals(2, graphs.size());
+        assertEquals(List.of("A root", "B root", "Join"), graphTitles(graphs.get(0)));
+        assertEquals(List.of("X root", "Y next"), graphTitles(graphs.get(1)));
+        assertEquals("a-root", graphs.get(0).key());
+    }
+
+    @Test
+    void aShortEdgeProcessedFirstDoesNotLowerADeeperTasksDepth() {
+        DelayedTaskRow top = task("A top", Presentation.READY);
+        DelayedTaskRow mid = task("B mid", Presentation.BLOCKED);
+        DelayedTaskRow end = task("C end", Presentation.BLOCKED);
+        after(mid, top);
+        after(end, top, mid);
+
+        InboxModel.Graph graph = inbox(Query.NONE).graphs().get(0);
+
+        assertEquals(List.of(0, 1, 2), graph.nodes().stream().map(InboxModel.GraphNode::depth).toList());
+    }
+
+    @Test
+    void referenceTermsAndProjectFiltersAndTextOnAnyMemberDecideWhetherAGraphShows() {
+        DelayedTaskRow first = task("First", Presentation.READY);
+        DelayedTaskRow second = task("Second", Presentation.BLOCKED);
+        after(second, first);
+
+        assertEquals(1, inbox(new Query(Optional.empty(), "second")).graphs().size());
+        assertEquals(List.of(), inbox(new Query(Optional.empty(), "pr:12")).graphs());
+        assertEquals(List.of(), inbox(new Query(Optional.empty(), "issue:5")).graphs());
+        assertEquals(1, inbox(new Query(Optional.of(ALPHA), "")).graphs().size());
+        assertEquals(List.of(), inbox(new Query(Optional.of(BETA), "")).graphs());
+    }
+
+    @Test
     void searchTermsOtherThanPlainTextShowNoGraphs() {
         DelayedTaskRow first = task("First", Presentation.READY);
         DelayedTaskRow second = task("Second", Presentation.BLOCKED);

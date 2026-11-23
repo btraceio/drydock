@@ -244,12 +244,15 @@ final class InboxModel {
     }
 
     /**
-     * A connected set of at least two unfinished tasks joined by {@code after} references. {@code nodes}
-     * are in display order (a task before the tasks that wait on it, each task once); {@code sinks} are the
-     * unfinished tasks nothing unfinished waits on, the targets whose start plan covers the whole graph;
-     * {@code done} counts the finished prerequisites the graph's tasks name.
+     * A connected set of at least two tasks joined by {@code after} references; tasks a live session is
+     * running are no members (their session row shows them) but stay in a member's {@code waitsOn}.
+     * {@code nodes} are in display order (a task before the tasks that wait on it, each task once) except
+     * the tasks in or behind a dependency cycle, which {@code stuck} marks: they follow the rest in
+     * {@link DelayedTaskRows#sorted} order at depth 0. {@code sinks} are the members nothing waits on, the
+     * targets whose start plan covers the whole graph; {@code done} counts the prerequisites the members
+     * name whose status is done.
      */
-    record Graph(String key, List<GraphNode> nodes, List<TaskItem> sinks, int done) {
+    record Graph(String key, List<GraphNode> nodes, List<TaskItem> sinks, int done, boolean stuck) {
         Graph {
             Objects.requireNonNull(key, "key");
             nodes = List.copyOf(nodes);
@@ -261,9 +264,12 @@ final class InboxModel {
             return done + nodes.size();
         }
 
-        /** The sinks that can still be started: open tasks, ready or blocked. */
+        /**
+         * The sinks that can still be started: open tasks, ready or blocked, as the Start action allows.
+         * Empty for a stuck graph: the start planner refuses work that contains a cycle.
+         */
         List<TaskItem> startTargets() {
-            return sinks.stream().filter(sink -> sink.row().presentation() == TaskState.Presentation.READY
+            return stuck ? List.of() : sinks.stream().filter(sink -> sink.row().presentation() == TaskState.Presentation.READY
                     || sink.row().presentation() == TaskState.Presentation.BLOCKED).toList();
         }
 
@@ -421,13 +427,16 @@ final class InboxModel {
     /**
      * The dependency graphs of the unfinished tasks: connected components of two or more tasks over the
      * resolved {@code after} edges, ordered by their first task in {@link DelayedTaskRows#sorted} order.
-     * Finished tasks are no members and join nothing; a dependency cycle never loops the ordering (its
-     * tasks follow the rest, at depth 0).
+     * Finished tasks and tasks a live session runs are no members and join nothing (a running prerequisite
+     * still shows in its dependents' {@code waitsOn}); a dependency cycle never loops the ordering.
      */
     static List<Graph> graphs(Inputs in) {
         Map<TaskId, DelayedTaskRow> unfinished = new LinkedHashMap<>();
+        Map<TaskId, DelayedTaskRow> running = new LinkedHashMap<>();
         for (DelayedTaskRow row : DelayedTaskRows.sorted(in.tasks())) {
-            if (!row.terminal()) {
+            if (row.presentation() == TaskState.Presentation.STARTED) {
+                running.put(row.id(), row);
+            } else if (!row.terminal()) {
                 unfinished.put(row.id(), row);
             }
         }
@@ -464,7 +473,7 @@ final class InboxModel {
                 }
             }
             if (component.size() >= 2) {
-                graphs.add(graphOf(in, unfinished, waitsOn, dependents, component));
+                graphs.add(graphOf(in, unfinished, running, waitsOn, dependents, component));
             }
         }
         return graphs;
@@ -477,7 +486,7 @@ final class InboxModel {
     }
 
     private static Graph graphOf(Inputs in, Map<TaskId, DelayedTaskRow> unfinished,
-                                 Map<TaskId, List<TaskId>> waitsOn, Map<TaskId, List<TaskId>> dependents,
+                                 Map<TaskId, DelayedTaskRow> running, Map<TaskId, List<TaskId>> waitsOn, Map<TaskId, List<TaskId>> dependents,
                                  List<TaskId> component) {
         // Component order is by discovery; display order is by the global sorted order.
         List<TaskId> members = unfinished.keySet().stream().filter(component::contains).toList();
@@ -522,9 +531,12 @@ final class InboxModel {
                 }
             }
         }
+        boolean stuck = false;
         for (TaskId id : members) {
             if (placed.add(id)) {
                 order.add(id);
+                depth.put(id, 0);
+                stuck = true;
             }
         }
         List<GraphNode> nodes = new ArrayList<>();
@@ -533,19 +545,25 @@ final class InboxModel {
         for (TaskId id : order) {
             DelayedTaskRow row = unfinished.get(id);
             TaskItem item = new TaskItem(row, projectOf(in, row));
-            nodes.add(new GraphNode(item, depth.getOrDefault(id, 0),
-                    waitsOn.get(id).stream().map(prerequisite -> unfinished.get(prerequisite).title()).toList(),
-                    dependents.get(id).size()));
+            List<String> waiting = new ArrayList<>(waitsOn.get(id).stream()
+                    .map(prerequisite -> unfinished.get(prerequisite).title()).toList());
+            for (TaskId prerequisite : in.prerequisites().getOrDefault(id, List.of())) {
+                if (running.containsKey(prerequisite)) {
+                    waiting.add(running.get(prerequisite).title());
+                }
+            }
+            nodes.add(new GraphNode(item, depth.get(id), waiting, dependents.get(id).size()));
             if (dependents.get(id).isEmpty()) {
                 sinks.add(item);
             }
             for (TaskId prerequisite : in.prerequisites().getOrDefault(id, List.of())) {
-                if (!unfinished.containsKey(prerequisite) && in.documents().containsKey(prerequisite)) {
+                TaskDocument document = in.documents().get(prerequisite);
+                if (document != null && document.status() == TaskStatus.DONE) {
                     finished.add(prerequisite);
                 }
             }
         }
-        return new Graph(order.get(0).text(), nodes, sinks, finished.size());
+        return new Graph(order.get(0).text(), nodes, sinks, finished.size(), stuck);
     }
 
     static Optional<GroupKind> kindOf(String token) {

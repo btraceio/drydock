@@ -20,8 +20,9 @@ import java.util.Set;
 /**
  * The inbox's view state for one IDE project, in its workspace file: the
  * groups the user collapsed or expanded, the groups showing all their
- * rows, the project filter, and whether the "Add open project" offer was
- * dismissed. Cosmetic state, so decoding is lenient: an unknown group name
+ * rows, the project filter, whether the "Add open project" offer was
+ * dismissed, and whether the user switched off the dependency-graph view
+ * ({@code byState}). Cosmetic state, so decoding is lenient: an unknown group name
  * or an unreadable filter path is dropped, never a failure. EDT.
  */
 @State(name = "DrydockInbox", storages = @Storage(StoragePathMacros.WORKSPACE_FILE))

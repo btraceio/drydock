@@ -15,6 +15,7 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.tasks.TaskState.Presentation;
 import app.drydock.ui.AgentLabels;
 import com.intellij.icons.AllIcons;
 import com.intellij.ui.JBColor;
@@ -349,7 +350,7 @@ final class InboxList extends JBList<InboxList.Entry> {
             boolean isCollapsed = isCollapsed(group.kind());
             boolean hasGraphs = withGraphs && group.kind() == GroupKind.READY;
             entries.addElement(new Header(group, isCollapsed, group.items().size()
-                    + (hasGraphs ? shown.graphs().stream().mapToInt(graph -> graph.nodes().size()).sum() : 0)));
+                    + (hasGraphs ? readyInGraphs(shown) : 0)));
             if (isCollapsed) {
                 continue;
             }
@@ -371,12 +372,21 @@ final class InboxList extends JBList<InboxList.Entry> {
             if (entry instanceof Row row && selectedKeys.contains(key(row.item()))
                     || lead instanceof Header header && entry instanceof Header now
                             && now.group().kind() == header.group().kind()
+                    || lead instanceof GraphHeader graph && entry instanceof GraphHeader now
+                            && now.graph().key().equals(graph.graph().key())
                     || lead instanceof More more && entry instanceof More now
                             && now.group().kind() == more.group().kind()) {
                 indices.add(i);
             }
         }
         setSelectedIndices(indices.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    /** The graph tasks that are ready to start (or interrupted, which the group lists as ready); blocked and in-review ones are not counted. */
+    private static int readyInGraphs(Inbox shown) {
+        return (int) shown.graphs().stream().flatMap(graph -> graph.nodes().stream())
+                .filter(node -> node.item().row().presentation() == Presentation.READY
+                        || node.item().row().presentation() == Presentation.INTERRUPTED).count();
     }
 
     private void addGraphs(Inbox shown) {
@@ -441,13 +451,9 @@ final class InboxList extends JBList<InboxList.Entry> {
                 || !(entries.get(index) instanceof Row row)) {
             return null;
         }
-        String text = tooltip(row.item(), Instant.now());
-        if (row.node() == null || row.node().waitsOn().isEmpty()) {
-            return text;
-        }
-        return text.replace("</html>", "<br>Waits on: " + String.join(", ", row.node().waitsOn().stream()
-                .map(title -> title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")).toList())
-                + "</html>");
+        String waits = row.node() == null || row.node().waitsOn().isEmpty() ? ""
+                : "\nWaits on: " + String.join(", ", row.node().waitsOn());
+        return htmlTooltip(tooltipText(row.item(), Instant.now()) + waits);
     }
 
     /**
@@ -459,6 +465,11 @@ final class InboxList extends JBList<InboxList.Entry> {
      * request, then its full description (with session notes).
      */
     static String tooltip(Item item, Instant now) {
+        return htmlTooltip(tooltipText(item, now));
+    }
+
+    /** {@link #tooltip} before it is escaped into HTML. */
+    private static String tooltipText(Item item, Instant now) {
         StringBuilder text = new StringBuilder();
         switch (item) {
             case SessionItem session -> {
@@ -502,7 +513,7 @@ final class InboxList extends JBList<InboxList.Entry> {
                 text.append(TaskTreeRenderer.descriptionHover(row.body()));
             }
         }
-        return htmlTooltip(text.toString());
+        return text.toString();
     }
 
     /**

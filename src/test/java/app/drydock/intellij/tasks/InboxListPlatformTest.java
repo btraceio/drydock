@@ -593,7 +593,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
 
         assertEquals(List.of("v Ready to start", "v graph first-task", "  First task", "  Second task",
                 "  Alone task"), describe(list.entries()));
-        assertEquals("the header counts the graph's tasks and the standalone one", 3,
+        assertEquals("the header counts what is ready: the graph's first task and the standalone one", 2,
                 ((InboxList.Header) list.entries().get(0)).count());
         assertEquals(Optional.of("unblocks 1"), InboxList.graphChip(
                 ((InboxList.Row) list.entries().get(2)).node()));
@@ -612,6 +612,54 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertEquals(1, startedGraphs.size());
         assertEquals("first-task", startedGraphs.get(0).key());
         assertEquals("a Start graph click does not collapse the graph", 5, list.entries().size());
+    }
+
+    /** A graph of two tasks that wait on each other: stuck, so with no outcome to start. */
+    private Inbox stuckGraphInbox() {
+        TaskId oneId = TaskId.of("one-task");
+        TaskId twoId = TaskId.of("two-task");
+        DelayedTaskRow one = new DelayedTaskRow(new TaskView(oneId, Presentation.BLOCKED, List.of(), List.of()),
+                "One task", TASKS, List.of());
+        DelayedTaskRow two = new DelayedTaskRow(new TaskView(twoId, Presentation.BLOCKED, List.of(), List.of()),
+                "Two <b> task", TASKS, List.of());
+        Map<TaskId, TaskDocument> documents = new HashMap<>();
+        for (DelayedTaskRow row : List.of(one, two)) {
+            documents.put(row.id(), new TaskDocument(row.id(), TASKS, row.title(), TaskStatus.OPEN, DoneBy.HUMAN,
+                    Optional.empty(), List.of(), List.of(), "", ""));
+        }
+        return InboxModel.build(new InboxModel.Inputs(List.of(), List.of(ALPHA_PROJECT), List.of(one, two),
+                documents, Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC,
+                Map.of(oneId, List.of(twoId), twoId, List.of(oneId))), Query.NONE);
+    }
+
+    public void testAStuckGraphHasNoStartGraphLinkAndStillGetsAReadyGroup() {
+        list.show(stuckGraphInbox(), false);
+
+        assertEquals(List.of("v Ready to start", "v graph one-task", "  One task", "  Two <b> task"),
+                describe(list.entries()));
+        assertFalse(hitsAcross(1).contains(Hit.START_GRAPH));
+        assertEquals("nothing in it is ready", 0, ((InboxList.Header) list.entries().get(0)).count());
+    }
+
+    public void testTheTooltipOfAGraphTaskEscapesTheTitlesItWaitsOn() {
+        list.show(stuckGraphInbox(), false);
+
+        String tooltip = list.getToolTipText(new MouseEvent(list, MouseEvent.MOUSE_MOVED, 0, 0,
+                list.getCellBounds(2, 2).x + 2, list.getCellBounds(2, 2).y + 2, 0, false));
+
+        assertTrue(tooltip, tooltip.contains("Waits on: Two &lt;b&gt; task"));
+        assertFalse(tooltip, tooltip.contains("<b>"));
+    }
+
+    public void testASelectedGraphHeaderStaysSelectedAcrossARebuildAndAnotherInbox() {
+        list.show(graphInbox(), false);
+        list.setSelectedIndex(1);
+
+        list.toggleGraph("first-task");
+        assertTrue(list.getSelectedValue() instanceof InboxList.GraphHeader);
+
+        list.show(graphInbox(), false);
+        assertTrue(list.getSelectedValue() instanceof InboxList.GraphHeader);
     }
 
     public void testClickingAGraphHeaderElsewhereCollapsesItAndTheViewToggleRestoresStateGroups() {
