@@ -32,6 +32,40 @@ class JiraSearchResponseTest {
         assertEquals("https://acme.atlassian.net/browse/PROJ-123", issue.url());
         assertEquals(List.of("profiling", "bug"), issue.labels());
         assertEquals(Instant.parse("2026-10-20T10:15:30Z"), issue.updatedAt().orElseThrow());
+        assertTrue(issue.priority().isEmpty(), "a body without a priority field parses to no priority");
+    }
+
+    @Test
+    void parsesThePriorityNameWhenTheBodyNamesOne() {
+        JiraIssueListing listing = JiraSearchResponse.parse("""
+                {"issues": [{"key": "PROJ-9",
+                             "fields": {"summary": "Fix allocation accounting",
+                                        "priority": {"name": "Highest", "id": "1"}}}]}
+                """, "https://acme.atlassian.net");
+
+        JiraIssue issue = assertInstanceOf(JiraIssueListing.Listed.class, listing).issues().getFirst();
+        assertEquals(Optional.of("Highest"), issue.priority());
+    }
+
+    @Test
+    void aPriorityWithoutANameOrABlankOneIsNoPriority() {
+        JiraIssueListing listing = JiraSearchResponse.parse("""
+                {"issues": [
+                    {"key": "A-1", "fields": {"summary": "Object priority, nameless",
+                                               "priority": {"id": "1"}}},
+                    {"key": "A-2", "fields": {"summary": "Blank name",
+                                               "priority": {"name": "   "}}},
+                    {"key": "A-3", "fields": {"summary": "String priority", "priority": "High"}},
+                    {"key": "A-4", "fields": {"summary": "Named", "priority": {"name": "Critical"}}}
+                ]}
+                """, "https://jira.example.com");
+
+        List<JiraIssue> issues = assertInstanceOf(JiraIssueListing.Listed.class, listing).issues();
+        assertEquals(4, issues.size());
+        assertTrue(issues.get(0).priority().isEmpty());
+        assertTrue(issues.get(1).priority().isEmpty());
+        assertTrue(issues.get(2).priority().isEmpty());
+        assertEquals(Optional.of("Critical"), issues.get(3).priority());
     }
 
     @Test
