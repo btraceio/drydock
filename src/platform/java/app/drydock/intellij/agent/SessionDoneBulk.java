@@ -1,6 +1,7 @@
 package app.drydock.intellij.agent;
 
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.PrState;
 import app.drydock.git.WorktreeService;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.DrydockPluginService;
@@ -95,7 +96,12 @@ public final class SessionDoneBulk {
      * deepest listed worktree whose root contains it (a session started in
      * a subdirectory still resolves to its worktree, the same rule the
      * tree's branch lookup applies) -- and that worktree must pass
-     * {@link SessionDonePlan#doneSession}. The running predicate is
+     * {@link SessionDonePlan#doneSession(WorktreeService.Worktree, boolean)
+     * doneSession}: the branch merged by ancestry, or the session's
+     * persisted pull-request state MERGED (what the pull-request poll
+     * records when it observes the merge -- a squash or rebase merge leaves
+     * commits "ahead" of the base), or the worktree prunable or detached.
+     * The running predicate is
      * injected so tests need no registry.
      */
     static List<Done> select(List<ManagedAgentSession> sessions, List<Worktree> worktrees,
@@ -108,10 +114,11 @@ public final class SessionDoneBulk {
         List<Done> done = new ArrayList<>();
         for (ManagedAgentSession session : sessions) {
             Path directory = WorktreeService.canonical(session.workingDirectory());
+            boolean prMerged = session.prState() == PrState.MERGED;
             candidates.stream()
                     .filter(cw -> directory.startsWith(cw.canonical()))
                     .max(Comparator.comparingInt(cw -> cw.worktree().path().getNameCount()))
-                    .filter(cw -> SessionDonePlan.doneSession(cw.worktree()))
+                    .filter(cw -> SessionDonePlan.doneSession(cw.worktree(), prMerged))
                     .ifPresent(cw -> done.add(new Done(session, cw.worktree(), running.test(session))));
         }
         return List.copyOf(done);
