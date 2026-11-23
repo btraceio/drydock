@@ -212,6 +212,32 @@ class GhCliBranchPullRequestsTest {
 
     @EnabledOnOs({OS.MAC, OS.LINUX})
     @Test
+    void aTruncatedResponseRetriesTheBadgesWithoutTheHeavyFields(@TempDir Path dir) throws Exception {
+        // GitHub's gateway often truncates the oversized heavy response instead
+        // of answering 5xx: gh exits 1 with a Go JSON decode error, and without
+        // recognising it the listing read as "no badges" until the next cycle.
+        Path receipt = dir.resolve("receipt.txt");
+        Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"
+                + "case \"$*\" in\n"
+                + "  *statusCheckRollup*) echo 'unexpected end of JSON input' >&2\n"
+                + "    exit 1 ;;\n"
+                + "  *) printf '%s' '[{\"number\":5,\"state\":\"OPEN\",\"headRefName\":\"h\","
+                + "\"title\":\"t\"}]' ;;\n"
+                + "esac\n");
+
+        Map<String, BranchPullRequest> byBranch = GhCliService.branchPullRequestsWith(Optional.of(gh), dir,
+                Optional.empty(), Duration.ofSeconds(15));
+
+        List<String> calls = Files.readAllLines(receipt);
+        assertEquals(2, calls.size(), "a truncated response gets exactly one reduced-field retry");
+        assertTrue(calls.get(1).contains("isCrossRepository") && !calls.get(1).contains("mergeable"),
+                calls::toString);
+        assertEquals(new BranchPullRequest(5, PrLifecycle.OPEN, false, "h", "t", Optional.empty(),
+                false, Set.of()), byBranch.get("h"));
+    }
+
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
     void aRateLimitDoesNotRetryTheBranchListing(@TempDir Path dir) throws Exception {
         Path receipt = dir.resolve("receipt.txt");
         Path gh = scriptedGh(dir, "printf 'args=%s\\n' \"$*\" >> " + receipt + "\n"

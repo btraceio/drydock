@@ -490,16 +490,19 @@ public final class GhCliService implements AutoCloseable {
 
     /**
      * Whether a failed {@code gh pr list} looks like GitHub's side buckling
-     * rather than the command being wrong: a 5xx gateway error. Rate-limit
-     * failures are not retried because reducing the query cannot dodge quota
-     * exhaustion. (A timeout is signaled separately, by the run's outcome, so a
-     * gh that could not even launch is not retried.) These are the failures
-     * the reduced field set can dodge; an auth or repository error would
-     * only fail twice as slow if retried.
+     * rather than the command being wrong: a 5xx gateway error, or the response
+     * body cut off mid-transfer -- gh then exits 1 with a Go JSON decode error
+     * ("unexpected end of JSON input"), no HTTP status in sight, which is how
+     * the gateway's buckling often actually lands (observed 2026-11-23 on the
+     * heavy badge listing). Rate-limit failures are not retried because
+     * reducing the query cannot dodge quota exhaustion. (A timeout is signaled
+     * separately, by the run's outcome, so a gh that could not even launch is
+     * not retried.) These are the failures the reduced field set can dodge; an
+     * auth or repository error would only fail twice as slow if retried.
      */
     private static boolean serverSideFailure(String message) {
         String lower = message.toLowerCase(Locale.ROOT);
-        return lower.contains("http 5");
+        return lower.contains("http 5") || lower.contains("unexpected end of json input");
     }
 
     /**
