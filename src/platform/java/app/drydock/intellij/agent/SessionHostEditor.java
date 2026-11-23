@@ -72,7 +72,12 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
         ActionToolbar toolbar = ActionManager.getInstance().createActionToolbar(
                 TOOLBAR_PLACE, toolbarGroup(), true);
         toolbar.setTargetComponent(root);
-        root.add(toolbar.getComponent(), BorderLayout.NORTH);
+        // Right-aligned: the bar's commands (Hold Current Session, Close Held,
+        // Previous) are window-level actions, so they read as window chrome
+        // and sit at the window's trailing edge, away from the pane content.
+        JPanel toolbarRow = new JPanel(new BorderLayout());
+        toolbarRow.add(toolbar.getComponent(), BorderLayout.EAST);
+        root.add(toolbarRow, BorderLayout.NORTH);
         root.add(body, BorderLayout.CENTER);
         emptyPrimary.add(new JBLabel("No session shown", SwingConstants.CENTER), BorderLayout.CENTER);
         allSessionsSlot.setName("allSessionsSlot");
