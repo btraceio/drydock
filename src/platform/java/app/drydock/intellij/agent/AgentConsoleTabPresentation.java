@@ -195,10 +195,30 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
 
     @Override
     public Icon getIcon(VirtualFile file, int flags, Project project) {
+        if (file instanceof SessionHostFile) {
+            // The host tab wears the mark of the session it is showing —
+            // the same decision that session's own tab paints. With nothing
+            // shown (no session yet, or the window closed) the mark falls
+            // back to the neutral idle one: the file names no platform file
+            // type, so returning null here would leave IntelliJ's
+            // unknown-file placeholder on the tab.
+            return hostSession(project)
+                    .map(session -> sessionIcon(session, project))
+                    .orElseGet(() -> SessionDots.drydockIcon(SessionStatus.IDLE, Optional.empty()));
+        }
         ManagedAgentSession session = sessionOf(file);
         if (session == null || project == null) {
             return null;
         }
+        return sessionIcon(session, project);
+    }
+
+    /**
+     * The tab mark for one loaded session — the decision shared by the
+     * session's own console tab and the host tab while it shows that
+     * session. Memory reads only: safe from a paint.
+     */
+    private static Icon sessionIcon(ManagedAgentSession session, Project project) {
         boolean runningHere = AgentExecutionService.getInstance(project).isRunning(session.id());
         if (session.workspaceBox().isPresent()) {
             // A remote row paints liveness, never activity: the local
@@ -246,7 +266,7 @@ public final class AgentConsoleTabPresentation implements EditorTabTitleProvider
     /**
      * The status and activity the tab icon paints for a session, as pure
      * functions of the live facts and the persisted row — the one decision
-     * {@link #getIcon} makes, extracted so a test can pin it without an IDE.
+     * {@link #sessionIcon} makes, extracted so a test can pin it without an IDE.
      *
      * <p>A detached live session — running somewhere in this IDE, not in
      * this window — gets the strip's generic live rule (A6): RUNNING with
