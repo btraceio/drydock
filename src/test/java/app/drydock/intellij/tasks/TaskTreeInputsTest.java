@@ -764,6 +764,17 @@ class TaskTreeInputsTest {
     }
 
     @SuppressWarnings("unchecked")
+    private static void seedBranchPullRequestRows(TaskTreeInputs inputs, Path root, Optional<String> repository,
+                                                  CompletableFuture<Map<String, BranchPullRequest>> lookup,
+                                                  Map<String, BranchPullRequest> previous)
+            throws ReflectiveOperationException {
+        Map<Object, Object> cache = (Map<Object, Object>) field(inputs, "branchPullRequestRowCache");
+        cache.put(record("PullRequestKey", root, repository),
+                record("CachedBranchPullRequests", System.nanoTime() + TimeUnit.MINUTES.toNanos(5), lookup,
+                        previous));
+    }
+
+    @SuppressWarnings("unchecked")
     private static void seedCheckouts(TaskTreeInputs inputs, Path directory, Checkout checkout)
             throws ReflectiveOperationException {
         ((Map<Path, Object>) field(inputs, "checkoutCache")).put(directory,
@@ -884,6 +895,11 @@ class TaskTreeInputsTest {
             AtomicInteger rebuilds = new AtomicInteger();
             inputs.onLateData(rebuilds::incrementAndGet);
             seedCheckouts(inputs, wt, new Checkout(main, Optional.of("fix/branch")));
+            // The badge join reads the light listing; the heavy cache only
+            // decorates. Both are seeded with the same rows, so the published
+            // answer is the row itself.
+            seedBranchPullRequestRows(inputs, main, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("fix/branch", healthy)), Map.of());
             seedBranchPullRequests(inputs, main, Optional.of("o/r"),
                     CompletableFuture.completedFuture(Map.of("fix/branch", healthy)), Map.of());
 
@@ -895,6 +911,8 @@ class TaskTreeInputsTest {
             join(inputs, List.of(session), sources);
             assertEquals(1, rebuilds.get(), "an unchanged completion requests no rebuild: no self-sustaining loop");
 
+            seedBranchPullRequestRows(inputs, main, Optional.of("o/r"),
+                    CompletableFuture.completedFuture(Map.of("fix/branch", failing)), Map.of());
             seedBranchPullRequests(inputs, main, Optional.of("o/r"),
                     CompletableFuture.completedFuture(Map.of("fix/branch", failing)), Map.of());
             join(inputs, List.of(session), sources);

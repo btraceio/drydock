@@ -134,6 +134,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
+    /** The badge join's own listing: the light field set, keyed like the heavy cache it decorates from. */
+    private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestRowCache = new ConcurrentHashMap<>();
     /** Each project's latest search-scoped pull-request fetch, keyed by its main-checkout root. */
     private final Map<Path, CachedSearchPullRequests> searchPullRequestCache = new ConcurrentHashMap<>();
     /** Each project's latest search-scoped issue fetch, keyed by its main-checkout root. */
@@ -294,6 +296,7 @@ final class TaskTreeInputs implements AutoCloseable {
         issueCache.clear();
         pullRequestCache.clear();
         branchPullRequestCache.clear();
+        branchPullRequestRowCache.clear();
         searchPullRequestCache.clear();
         searchIssueCache.clear();
         exactPullRequestCache.clear();
@@ -346,6 +349,7 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        branchPullRequestRowCache.keySet().removeIf(key -> key.root().equals(root));
         searchPullRequestCache.remove(root);
         exactPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         listingAnswers.forget(root);
@@ -640,7 +644,7 @@ final class TaskTreeInputs implements AutoCloseable {
         }
         CompletableFuture
                 .supplyAsync(() -> sessionPullRequests(sessions, sources, this::checkoutOf,
-                                source -> branchPullRequestsNow(source.root(), source.repository())),
+                                this::sessionBadgeRows),
                         badgeJoinExecutor)
                 .thenAccept(matched -> {
                     if (!publishedSessionPullRequests.equals(matched)) {
@@ -717,6 +721,56 @@ final class TaskTreeInputs implements AutoCloseable {
 
     /**
      * The head-branch PR map for {@code root} as far as it is known now.
+     * A missing or expired entry starts a lookup whose completion calls
+     * {@link #lateData}; until it completes the previous answer is served.
+     * The badge listing refreshes on {@link #BADGE_CACHE_NANOS}, not the
+     * listings' one-minute TTL: it is the heavy fetch every light listing's
+     * conflict and CI signals join from.
+     */
+    private Map<String, BranchPullRequest> branchPullRequestRowsNow(Path root, Optional<String> repository) {
+        PullRequestKey key = new PullRequestKey(root, repository);
+        long now = System.nanoTime();
+        CachedBranchPullRequests cached = branchPullRequestRowCache.get(key);
+        if (cached == null || cached.expiresAt() <= now) {
+            Map<String, BranchPullRequest> previous = cached == null ? Map.of() : current(cached);
+            CompletableFuture<Map<String, BranchPullRequest>> lookup = github.branchPullRequestRows(root, repository);
+            cached = new CachedBranchPullRequests(now + BADGE_CACHE_NANOS, lookup, previous);
+            branchPullRequestRowCache.put(key, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((answer, failure) -> lateData.run());
+            }
+        }
+        return current(cached);
+    }
+
+    /**
+     * The join's per-source fetch: light rows for identity and state, with
+     * the heavy listing's conflict/CI signals joined in by branch where the
+     * heavy answer exists. The heavy fetch keeps running here (it is what
+     * fed the join before the light split) so a session row's hover keeps
+     * its health text without the PR node ever being opened; when GitHub
+     * drops the heavy query the badge still stands, undecorated.
+     */
+    private Map<String, BranchPullRequest> sessionBadgeRows(BadgeSource source) {
+        Map<String, BranchPullRequest> rows = branchPullRequestRowsNow(source.root(), source.repository());
+        // The heavy answer as of now (the previous map while a refresh runs):
+        // the same call the tree's pull-request section badges from.
+        Map<String, BranchPullRequest> health = branchPullRequestsNow(source.root(), source.repository());
+        if (rows.isEmpty() || health.isEmpty()) {
+            return rows;
+        }
+        Map<String, BranchPullRequest> decorated = new HashMap<>(rows);
+        rows.forEach((branch, row) -> {
+            BranchPullRequest full = health.get(branch);
+            if (full != null && (full.conflicting() || !full.ciFailures().isEmpty())) {
+                decorated.put(branch, new BranchPullRequest(row.number(), row.state(), row.draft(),
+                        row.headRefName(), row.title(), row.url(), full.conflicting(), full.ciFailures()));
+            }
+        });
+        return decorated;
+    }
+
+    /**
      * A missing or expired entry starts a lookup whose completion calls
      * {@link #lateData}; until it completes the previous answer is served.
      * The badge listing refreshes on {@link #BADGE_CACHE_NANOS}, not the
