@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentRegistry;
 import app.drydock.delayedtasks.DelayedTaskService;
 import app.drydock.delayedtasks.TaskStoreWatcher;
 import app.drydock.domain.SessionStatus;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.CiFailure;
@@ -13,6 +14,7 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -211,6 +213,36 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                 }
                 append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
                 append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+            }
+            case BranchRow branch -> {
+                BranchRef ref = branch.branch();
+                append(ref.name(), ref.remote() ? SimpleTextAttributes.GRAYED_ATTRIBUTES
+                        : SimpleTextAttributes.REGULAR_ATTRIBUTES);
+                Optional<Path> holder = ref.checkedOutAt();
+                if (holder.isPresent()) {
+                    // A held branch's start lives with its holder worktree;
+                    // the row says where that is, and how the holder is
+                    // escapeable, the same words the worktree rows use.
+                    Path at = holder.get();
+                    append("  " + (at.equals(branch.mainRoot()) ? "in main checkout"
+                            : "in worktree " + at.getFileName()),
+                            SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    if (ref.locked()) {
+                        append(" · locked", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    }
+                    if (ref.prunable()) {
+                        append(" · stale", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    }
+                    append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+                } else {
+                    if (ref.remote()) {
+                        append("  remote", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    }
+                    append("  no worktree", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    append(" · ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES);
+                    append("Start ▸", SimpleTextAttributes.LINK_ATTRIBUTES, LINK);
+                }
             }
             case IssueRow issue -> {
                 sourceIcon(issue).ifPresent(this::setIcon);

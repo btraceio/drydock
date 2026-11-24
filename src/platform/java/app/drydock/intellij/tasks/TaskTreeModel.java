@@ -5,6 +5,8 @@ import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.BranchCatalog;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.BranchPullRequest;
@@ -14,6 +16,7 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.agent.SessionCommands;
+import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
@@ -136,7 +139,8 @@ public final class TaskTreeModel {
                          Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot,
                          Set<Path> pendingIssueRoots,
                          Set<ListingExpansionTracker.GroupKey> pendingJiraGroups,
-                         Map<ManagedSessionId, SessionBabysit> babysitBySession) {
+                         Map<ManagedSessionId, SessionBabysit> babysitBySession,
+                         Map<Path, BranchCatalog> branchesByMainRoot) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -177,6 +181,7 @@ public final class TaskTreeModel {
             pendingIssueRoots = Set.copyOf(pendingIssueRoots);
             pendingJiraGroups = Set.copyOf(pendingJiraGroups);
             babysitBySession = Map.copyOf(babysitBySession);
+            branchesByMainRoot = Map.copyOf(branchesByMainRoot);
         }
 
         /** The shape before sessions carried their babysitting engagement: none known. */
@@ -208,7 +213,7 @@ public final class TaskTreeModel {
                     openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
                     pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms,
                     focusRoot, resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
-                    pendingIssueRoots, pendingJiraGroups, Map.of());
+                    pendingIssueRoots, pendingJiraGroups, Map.of(), Map.of());
         }
 
         /** Compatibility with the previous full constructor, before item search references were carried. */
@@ -247,7 +252,7 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
-                    pendingIssueRoots, pendingJiraGroups, babysitBySession);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot);
         }
 
         /** These inputs with item references available to the scoped search matcher. Pure. */
@@ -259,7 +264,7 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessions, looseTasks,
-                    pendingIssueRoots, pendingJiraGroups, babysitBySession);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot);
         }
 
         /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
@@ -361,7 +366,8 @@ public final class TaskTreeModel {
                     .filter(babysitter -> hiddenBabysitterIds.contains(babysitter.session().id()))
                     .toList();
             Children classified = children(in, project.root(),
-                    tasksByMain.getOrDefault(project.root(), List.of()), hiddenForProject, itemFilter);
+                    tasksByMain.getOrDefault(project.root(), List.of()), hiddenForProject, itemFilter,
+                    !in.filter().isEmpty() || termsConstrain);
             if (termsConstrain && !classified.termsMatched() && !nameMatch) {
                 continue;
             }
@@ -551,7 +557,7 @@ public final class TaskTreeModel {
     }
 
     private static Children children(Inputs in, Path main, List<TaskRow> tasks,
-                                     List<TaskRow> hiddenBabysitters, String itemFilter) {
+                                     List<TaskRow> hiddenBabysitters, String itemFilter, boolean constrained) {
         List<TaskNode> children = new ArrayList<>();
         List<TaskRow> visibleTasks = sorted(tasks).stream()
                 .filter(task -> matches(itemFilter, task))
@@ -611,6 +617,28 @@ public final class TaskTreeModel {
         } else if (!sessionlessWorktrees.isEmpty()) {
             children.add(new Section(SectionKind.WORKTREES, sessionlessWorktrees));
         }
+        // The Branches section: the repository's branches with their worktree
+        // occupancy, served from the same gather and the same listing cadence
+        // as the Worktrees section. A branch a worktree (or the main checkout)
+        // holds is shown held — its start lives with the holder, git refuses
+        // a second checkout — and every other branch offers a new worktree on
+        // it and a sub-branch cut from it.
+        BranchCatalog branches = in.branchesByMainRoot().get(main);
+        if (!constrained && in.worktreeContainers().contains(main) && branches == null) {
+            // Only unconstrained: a search or a pr:/issue: term must never
+            // introduce a loading husk that keeps a nothing-matches project
+            // row alive.
+            children.add(new Section(SectionKind.BRANCHES,
+                    List.of(new TaskNode.Deferred("Loading branches…"))));
+        } else if (branches != null) {
+            List<TaskNode> branchRows = branches.branches().stream()
+                    .filter(ref -> itemFilter.isEmpty() || contains(ref.name(), itemFilter))
+                    .map(ref -> (TaskNode) new BranchRow(main, ref, branches.localName(ref)))
+                    .toList();
+            if (!branchRows.isEmpty()) {
+                children.add(new Section(SectionKind.BRANCHES, branchRows));
+            }
+        }
         // The Issues and Pull Requests sections render with only the search
         // text narrowing the rows inside (a project whose name matches keeps
         // all of them, as with its tasks), plus the pr:/issue: terms, which
@@ -666,6 +694,7 @@ public final class TaskTreeModel {
                 case Placeholder ignored -> List.of();
                 case Ghost ignored -> List.of();
                 case IdleWorktree ignored -> List.of();
+                case BranchRow ignored -> List.of();
                 case IssueRow ignored -> List.of();
                 case JiraIssueRow ignored -> List.of();
                 case PullRequestRow ignored -> List.of();

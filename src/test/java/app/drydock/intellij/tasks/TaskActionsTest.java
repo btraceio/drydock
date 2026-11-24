@@ -11,6 +11,7 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
@@ -284,6 +285,11 @@ class TaskActionsTest {
                 worktree,
                 new StaleWorktrees(List.of(worktree)),
                 new WorktreeGroup(Path.of("/wt/fix"), "fix", List.of()),
+                // The Branches rows: free and held, so their start items count as used.
+                new TaskNode.BranchRow(Path.of("/repo"), BranchRef.local("feature/login"), "feature/login"),
+                new TaskNode.BranchRow(Path.of("/repo"),
+                        new BranchRef("feature/held", false, Optional.of(Path.of("/wt/held")), false, false),
+                        "feature/held"),
                 new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
                 project(worktree));
         Set<TaskMenu.Item> used = new HashSet<>();

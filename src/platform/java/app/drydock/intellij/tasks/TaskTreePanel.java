@@ -277,6 +277,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The inbox's project filter (the {@code project:} chip), or null for every project. Written on the EDT. */
     private volatile Focus focus;
     private String displayedFilter = "";
+    /** Canonical working root used by the rows currently displayed; EDT-owned. */
+    private Optional<Path> appliedWorkingRoot = Optional.empty();
     /** Which lazy listing sections the user opened here, with the guard that keeps the
      * panel's own tree restoration from counting as such an open. */
     private final ListingExpansionTracker expansions =
@@ -1008,6 +1010,10 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.CLEANUP_DONE_SESSIONS, new CleanupDoneSessionsAction());
         menuActions.put(TaskMenu.Item.NEW_TASK, newTask);
         menuActions.put(TaskMenu.Item.NEW_TASK_IN_MAIN, newTaskInMain);
+        menuActions.putAll(BranchStart.actions(project, () -> {
+            inputs.invalidateWorktrees();
+            requestRebuild(true);
+        }));
         menuActions.put(TaskMenu.Item.OPEN_MAIN_CHECKOUT, openMainCheckout);
         menuActions.put(TaskMenu.Item.OPEN_IN_GITHUB, openInGitHub);
         menuActions.put(TaskMenu.Item.OPEN_PULL_REQUEST, openPullRequest);
@@ -1099,6 +1105,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     register(add);
                 } else if (node instanceof IdleWorktree idle && acts) {
                     startOn(path, idle, event);
+                } else if (node instanceof TaskNode.BranchRow branch && acts) {
+                    if (branch.held() && !onLink(path, event)) {
+                        revealBranchHolder(branch);
+                    } else {
+                        startOnBranch(path, branch, event);
+                    }
                 } else if (node instanceof StaleWorktrees stale && acts) {
                     projectRootOf(path).ifPresent(root ->
                             TaskActions.confirmAndRemove(project, root, stale.worktrees(), true,
@@ -1201,6 +1213,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     static Set<TaskMenu.Item> panelMenuItems() {
         return EnumSet.of(TaskMenu.Item.NEW_TASK, TaskMenu.Item.NEW_TASK_IN_MAIN,
                 TaskMenu.Item.OPEN_MAIN_CHECKOUT,
+                TaskMenu.Item.NEW_TASK_ON_BRANCH, TaskMenu.Item.NEW_TASK_ON_BRANCH_OWN_WINDOW,
+                TaskMenu.Item.START_SUB_BRANCH,
                 TaskMenu.Item.OPEN_IN_GITHUB, TaskMenu.Item.OPEN_IN_JIRA, TaskMenu.Item.OPEN_MIRRORED_TASK,
                 TaskMenu.Item.OPEN_PULL_REQUEST, TaskMenu.Item.OPEN_GITHUB_TICKETS, TaskMenu.Item.OPEN_JIRA_TICKETS,
                 TaskMenu.Item.SHOW_TASK, TaskMenu.Item.SHOW_PULL_REQUEST, TaskMenu.Item.SHOW_SESSION,
@@ -1551,6 +1565,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         return switch (node) {
             case WorktreeGroup group -> Optional.of(new NewTaskPlan.FixedWorktree(group.worktree(), group.branch()));
             case IdleWorktree idle -> Optional.of(new NewTaskPlan.FixedWorktree(idle.worktree(), idle.branch()));
+            case TaskNode.BranchRow branch when branch.held() ->
+                    Optional.of(new NewTaskPlan.FixedWorktree(branch.branch().checkedOutAt().orElseThrow(),
+                            branch.worktreeBranch()));
             case TaskRow task when task.branch().isPresent() && !task.session().workingDirectory().equals(mainRoot) ->
                     Optional.of(new NewTaskPlan.FixedWorktree(task.session().workingDirectory(), task.branch().get()));
             case null, default -> Optional.empty();
@@ -1610,6 +1627,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case ProjectRow ignored -> Optional.of(new NewTaskTarget(mainRoot, Optional.empty()));
             case WorktreeGroup ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case IdleWorktree ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
+            // A held branch's New Task is fixed to its worktree; a free one
+            // targets the project — its own starts are the branch menu's.
+            case TaskNode.BranchRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case TaskRow ignored -> Optional.of(new NewTaskTarget(mainRoot, worktreeOf(node, mainRoot)));
             case IssueRow ignoredIssue -> Optional.empty();
             case JiraIssueRow ignored -> Optional.empty();
@@ -2035,6 +2055,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     Set.copyOf(expansions.requestedGitHubIssues()),
                     Set.copyOf(expansions.requestedJiraGroups()),
                     Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS)),
+                    Set.copyOf(expansions.requested(SectionKind.BRANCHES)),
                     new TaskTreeInputs.ListingSearch(terms.pullRequestSearchQuery(), terms.issueSearchQuery(),
                             terms.pullRequestNumbers()));
             // Only a completed gather knows which groups still exist: a deleted
@@ -2101,14 +2122,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(
                     () -> {
-                        finishRebuild(requestedVersion, requestedFilter, nodes, treeNodes, tasks, builtInbox, null);
+                        finishRebuild(requestedVersion, requestedFilter, nodes, treeNodes, tasks, builtInbox,
+                                gathered.currentWorkingRoot(), null);
                         doneOffers.forEach(offer -> PullRequestDoneOffers.notify(project, offer));
                     },
                     ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, List.of(), List.of(), TaskLayer.EMPTY,
-                            null, failure),
+                            null, Optional.empty(), failure),
                     ModalityState.any(), project.getDisposed());
             return null;
         });
@@ -2117,7 +2139,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
     private void finishRebuild(long requestedVersion, String requestedFilter,
                                List<TaskNode> nodes, List<TaskNode> treeNodes, TaskLayer tasks,
-                               InboxModel.Inbox builtInbox, Throwable failure) {
+                               InboxModel.Inbox builtInbox, Optional<Path> workingRoot, Throwable failure) {
         boolean newerPassPending = requestedVersion != refreshRequests.version();
         if (failure != null) {
             // Never silent: an empty tree with no reason given is the worst
@@ -2138,6 +2160,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
+            appliedWorkingRoot = workingRoot;
             apply(nodes, treeNodes, tasks, builtInbox, requestedFilter);
         }
         refreshRequests.finishPass();
@@ -2291,6 +2314,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 case SESSIONS, ACTIVE, INACTIVE -> true;
                 case WORKTREES -> root != null
                         && expansions.requested(SectionKind.WORKTREES).contains(root);
+                case BRANCHES -> root != null
+                        && expansions.requested(SectionKind.BRANCHES).contains(root);
                 case ISSUES -> root != null
                         && expansions.requestedIssueSections().contains(root);
                 case PULL_REQUESTS -> root != null
@@ -2537,14 +2562,68 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             return;
         }
         String repo = repoOf(path).orElse(idle.worktree().getFileName().toString());
-        // Lexical, not canonical: this is the EDT. A miss only offers "Start
-        // in this window", which does the same thing on the window's own worktree.
-        boolean ownWorktree = Optional.ofNullable(project.getBasePath())
-                .map(base -> Path.of(base).toAbsolutePath().normalize().equals(idle.worktree()))
-                .orElse(false);
+        // TaskTreeInputs canonicalizes this root and listed worktree paths before
+        // applying them, so this EDT comparison is purely in-memory.
+        boolean ownWorktree = isHolder(appliedWorkingRoot, Optional.of(idle.worktree()));
         StartMenu.show(new RelativePoint(event), StartMenu.items(repo, idle.branch(), ownWorktree),
                 item -> TaskLauncher.open(project, root, Optional.of(fixed),
                         NewTaskPreset.start(item.openIn(), item.mode())));
+    }
+
+    /**
+     * {@code Start} on a Branches-section row (F1 or the "Start ▸" link):
+     * the branch start menu — a held branch starts in its worktree, a free
+     * one in a new worktree on it, either way a sub-branch can be cut from
+     * it — or with ⌥ held the own-window item straight away. EDT.
+     */
+    private void startOnBranch(TreePath path, TaskNode.BranchRow branch, MouseEvent event) {
+        String repo = repoOf(path).orElse(branch.mainRoot().getFileName().toString());
+        if (event.isAltDown()) {
+            List<BranchStart.Item> items = BranchStart.items(branch, repo, ownWorktree(branch));
+            startBranchItem(branch,
+                    items.stream().filter(item -> item.openIn() == NewTaskPlan.OpenIn.OWN_WINDOW).findFirst()
+                            // An occupied branch held by this window's own
+                            // worktree has no own-window item; ⌥ then means
+                            // plain full access here.
+                            .orElse(items.get(0)));
+            return;
+        }
+        BranchStart.show(new RelativePoint(event), BranchStart.items(branch, repo, ownWorktree(branch)),
+                item -> startBranchItem(branch, item));
+    }
+
+    /**
+     * Reveals what a held branch's holder shows: the session working in it,
+     * else the sessionless worktree row — never nothing silently, a miss
+     * just leaves the tree as it is. EDT.
+     */
+    private void revealBranchHolder(TaskNode.BranchRow branch) {
+        Path holder = branch.branch().checkedOutAt().orElseThrow();
+        Optional<Object> target = TaskLinks.sessionOf(branch, displayedNodes).map(row -> (Object) row)
+                .or(() -> displayedNodes.stream()
+                        .filter(IdleWorktree.class::isInstance).map(IdleWorktree.class::cast)
+                        .filter(idle -> idle.worktree().equals(holder))
+                        .map(row -> (Object) row)
+                        .findFirst());
+        target.ifPresent(wanted -> revealRow(wanted::equals));
+    }
+
+    /** Whether {@code branch}'s holder worktree is this window's own project directory. EDT. */
+    private boolean ownWorktree(TaskNode.BranchRow branch) {
+        return isHolder(appliedWorkingRoot, branch.branch().checkedOutAt());
+    }
+
+    /** Compares paths already canonicalized during gathering; absent paths are never this window's worktree. */
+    static boolean isHolder(Optional<Path> root, Optional<Path> holder) {
+        return root.isPresent() && holder.isPresent() && root.get().equals(holder.get());
+    }
+
+    /** EDT: dispatches one picked branch-start item. */
+    private void startBranchItem(TaskNode.BranchRow branch, BranchStart.Item item) {
+        BranchStart.launch(project, branch, item, () -> {
+            inputs.invalidateWorktrees();
+            requestRebuild(true);
+        });
     }
 
     /** The display name of the project row above {@code path}. */
@@ -2684,6 +2763,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     private Optional<?> sessionTarget(Object lead) {
         if (lead instanceof PullRequestRow pullRequest) {
             return TaskLinks.sessionOf(pullRequest, displayedNodes);
+        }
+        if (lead instanceof TaskNode.BranchRow branch) {
+            return TaskLinks.sessionOf(branch, displayedNodes);
         }
         if (lead instanceof DelayedTaskRow task) {
             return TaskLinks.sessionOf(task, displayedNodes);

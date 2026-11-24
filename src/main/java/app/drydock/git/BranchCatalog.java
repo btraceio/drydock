@@ -25,6 +25,13 @@ import java.util.concurrent.CompletableFuture;
  */
 public record BranchCatalog(List<BranchRef> branches, List<String> remotes) {
 
+    /**
+     * The catalog a failed or interrupted listing answers, for that pass
+     * only: the tree renders no Branches section from it and the next
+     * gather re-lists — the same failure rule the worktree listing follows.
+     */
+    public static final BranchCatalog EMPTY = new BranchCatalog(List.of(), List.of());
+
     public BranchCatalog {
         branches = List.copyOf(Objects.requireNonNull(branches, "branches"));
         remotes = List.copyOf(Objects.requireNonNull(remotes, "remotes"));

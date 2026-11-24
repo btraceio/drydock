@@ -76,6 +76,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
     /** Main roots whose lazy sections the user opened in this panel. */
     private final Set<Path> worktrees = ConcurrentHashMap.newKeySet();
     private final Set<Path> pullRequests = ConcurrentHashMap.newKeySet();
+    private final Set<Path> branches = ConcurrentHashMap.newKeySet();
     /** Main roots whose project row the user opened: restore state only (opening one records its listings). */
     private final Set<Path> projects = ConcurrentHashMap.newKeySet();
     /** Main roots whose Issues section the user opened: restore state only, never a fetch. */
@@ -105,7 +106,8 @@ final class ListingExpansionTracker implements TreeExpansionListener {
 
     /**
      * The roots whose lazily fetched section of {@code kind} the user opened
-     * here. Only WORKTREES and PULL_REQUESTS are tracked by kind; the Issues
+     * here. Only WORKTREES, PULL_REQUESTS and BRANCHES are tracked by kind;
+     * the Issues
      * section's state is {@link #requestedIssueSections()} and its fetch
      * triggers are {@link #requestedGitHubIssues()} and {@link
      * #requestedJiraGroups()} (restore state: {@link #requestedJiraNodes()}).
@@ -116,6 +118,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
         return switch (kind) {
             case WORKTREES -> worktrees;
             case PULL_REQUESTS -> pullRequests;
+            case BRANCHES -> branches;
             default -> throw new IllegalArgumentException("No lazily fetched listing for section " + kind);
         };
     }
@@ -229,7 +232,8 @@ final class ListingExpansionTracker implements TreeExpansionListener {
             }
         } else if (node.getUserObject() instanceof TaskNode.Section section
                 && (section.kind() == TaskNode.SectionKind.WORKTREES
-                    || section.kind() == TaskNode.SectionKind.PULL_REQUESTS)) {
+                    || section.kind() == TaskNode.SectionKind.PULL_REQUESTS
+                    || section.kind() == TaskNode.SectionKind.BRANCHES)) {
             Path r = root.orElse(null);
             if (r != null && !programmatic && requested(section.kind()).add(r)) {
                 requester.requestRebuild(false);
@@ -268,6 +272,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
         githubIssues.remove(root);
         pullRequests.remove(root);
         worktrees.remove(root);
+        branches.remove(root);
         closeJiraUnder(root);
     }
 
@@ -287,6 +292,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
             }
             case PULL_REQUESTS -> pullRequests.remove(root);
             case WORKTREES -> worktrees.remove(root);
+            case BRANCHES -> branches.remove(root);
             default -> { }
         }
     }

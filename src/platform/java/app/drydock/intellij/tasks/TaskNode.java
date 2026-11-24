@@ -2,6 +2,7 @@ package app.drydock.intellij.tasks;
 
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
@@ -24,6 +25,7 @@ public sealed interface TaskNode {
         ACTIVE("Active"),
         INACTIVE("Inactive"),
         WORKTREES("Worktrees"),
+        BRANCHES("Branches"),
         ISSUES("Issues"),
         PULL_REQUESTS("Pull Requests");
 
@@ -260,6 +262,30 @@ public sealed interface TaskNode {
         public boolean isThisWindow() {
             return placement instanceof TaskPlacement.ThisWindow
                     || placement instanceof TaskPlacement.Idle idle && idle.thisWindow();
+        }
+    }
+
+    /**
+     * One branch of the repository, local or remote-tracking, with the local
+     * branch name a new worktree on it would carry: the ref itself for a
+     * local branch, the remote prefix stripped for a remote one. Occupancy
+     * travels on the ref ({@link BranchRef#checkedOutAt()}): a held branch
+     * mirrors its holder worktree's start, a free one offers a new worktree
+     * on it and a sub-branch cut from it. Git refuses a second checkout of a
+     * held branch, so at most one worktree holds it.
+     */
+    record BranchRow(Path mainRoot, BranchRef branch, String worktreeBranch) implements TaskNode {
+        public BranchRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(branch, "branch");
+            if (worktreeBranch == null || worktreeBranch.isBlank()) {
+                throw new IllegalArgumentException("worktreeBranch must not be blank");
+            }
+        }
+
+        /** Whether a worktree (or the main checkout) already holds this branch. */
+        public boolean held() {
+            return branch.checkedOutAt().isPresent();
         }
     }
 

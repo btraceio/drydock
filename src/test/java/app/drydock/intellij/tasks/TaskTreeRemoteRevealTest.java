@@ -99,7 +99,7 @@ class TaskTreeRemoteRevealTest {
 
         // The panel is a reviewability budget (per-source cap discipline): every
         // feature that grows it bumps this baseline deliberately, never silently.
-        assertTrue(Files.readAllLines(panel).size() <= 2_891, "line baseline 2,891");
-        assertTrue(Files.size(panel) <= 141_233, "byte baseline 141,233");
+        assertTrue(Files.readAllLines(panel).size() <= 2_973, "line baseline 2,973");
+        assertTrue(Files.size(panel) <= 145_736, "byte baseline 145,736");
     }
 }

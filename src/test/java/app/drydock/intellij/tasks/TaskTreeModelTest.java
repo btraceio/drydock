@@ -12,6 +12,8 @@ import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
+import app.drydock.git.BranchCatalog;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.IssueListing;
@@ -23,6 +25,7 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -93,6 +96,7 @@ class TaskTreeModelTest {
         final Map<Path, List<JiraGroups.Listing>> jiraGroups = new HashMap<>();
         final Map<Path, PullRequestListing> pullRequests = new HashMap<>();
         final Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
+        final Map<Path, BranchCatalog> branches = new HashMap<>();
         Map<ManagedSessionId, Boolean> resumable = Map.of();
         final Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession = new HashMap<>();
         Optional<String> problem = Optional.empty();
@@ -106,7 +110,22 @@ class TaskTreeModelTest {
             worktrees.computeIfAbsent(root, r -> new ArrayList<>()).add(main(root, "main"));
             worktreeContainers.add(root);
             mainRootOf.put(root, root);
+            // The gather serves a branch listing with the worktree one; the
+            // default is the served-but-empty shape (the section stays out),
+            // and a test that wants the loading state removes the entry.
+            branches.put(root, new BranchCatalog(List.of(), List.of()));
             return this;
+        }
+
+        /** The project's merged branch catalog, as the gather serves it for an opened Branches section. */
+        In catalog(Path root, BranchRef... refs) {
+            branches.put(root, new BranchCatalog(List.of(refs), List.of("origin")));
+            return this;
+        }
+
+        /** The catalog for the single project; the tests' one-project shape. */
+        In catalog(BranchRef... refs) {
+            return catalog(projects.get(0).root(), refs);
         }
 
         /** GitHub issues enabled with a configured repository: the real, lazy node. */
@@ -153,7 +172,7 @@ class TaskTreeModelTest {
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter,
                     List.of(), List.of(), Optional.empty(),
                     resumable, pullRequestsBySession, Map.of(), Map.of(),
-                    pendingIssueRoots, pendingJiraGroups, babysit);
+                    pendingIssueRoots, pendingJiraGroups, babysit, branches);
         }
     }
 
@@ -1415,5 +1434,75 @@ class TaskTreeModelTest {
 
         assertEquals(sessions, scoped.sessionRefs());
         assertEquals(loose, scoped.looseTaskRefsByMainRoot());
+    }
+
+    // ---- the Branches section ----------------------------------------------
+
+    /** A catalog the way the gather merges it: free, held and remote branches, locals first. */
+    private static BranchCatalog catalog(BranchRef... refs) {
+        return new BranchCatalog(List.of(refs), List.of("origin"));
+    }
+
+    private static List<TaskNode> branchNodes(ProjectRow row) {
+        return section(row, SectionKind.BRANCHES).orElseThrow().children();
+    }
+
+    private static List<String> branchNames(ProjectRow row) {
+        return branchNodes(row).stream().map(node -> ((BranchRow) node).branch().name()).toList();
+    }
+
+    @Test
+    void theBranchesSectionListsEveryBranchWithItsOccupancy() {
+        In in = new In().project(DRYDOCK)
+                .catalog(BranchRef.local("main"),
+                        new BranchRef("feature/x", false, Optional.of(Path.of("/wt/drydock--x")), false, false),
+                        BranchRef.remote("origin/feature/y"));
+
+        ProjectRow project = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+        List<TaskNode> rows = branchNodes(project);
+
+        assertEquals(List.of("main", "feature/x", "origin/feature/y"), branchNames(project));
+        BranchRow held = rows.stream().map(BranchRow.class::cast)
+                .filter(row -> row.branch().name().equals("feature/x")).findFirst().orElseThrow();
+        assertTrue(held.held(), "a branch a worktree holds is shown held");
+        assertEquals("feature/x", held.worktreeBranch());
+        BranchRow remote = rows.stream().map(BranchRow.class::cast)
+                .filter(row -> row.branch().remote()).findFirst().orElseThrow();
+        assertFalse(remote.held());
+        assertEquals("feature/y", remote.worktreeBranch(), "a remote branch's worktree branch drops the prefix");
+    }
+
+    @Test
+    void theBranchesSectionNarrowsWithTheSearchFilter() {
+        In in = new In().project(DRYDOCK)
+                .catalog(BranchRef.local("main"), BranchRef.local("feature/login"),
+                        BranchRef.remote("origin/feature/login"));
+        in.filter = "login";
+
+        assertEquals(List.of("feature/login", "origin/feature/login"),
+                branchNames(projectRow(TaskTreeModel.build(in.build()), DRYDOCK)));
+    }
+
+    @Test
+    void theBranchesSectionShowsLoadingUntilTheListingArrivesAndOmitsAnEmptyOne() {
+        In loading = new In().project(DRYDOCK);
+        loading.branches.remove(DRYDOCK);
+        assertEquals(List.of("Loading branches…"),
+                branchNodes(projectRow(TaskTreeModel.build(loading.build()), DRYDOCK)).stream()
+                        .map(node -> ((TaskNode.Deferred) node).message()).toList());
+
+        In empty = new In().project(DRYDOCK).catalog();
+        assertTrue(section(projectRow(TaskTreeModel.build(empty.build()), DRYDOCK), SectionKind.BRANCHES).isEmpty(),
+                "an empty listing shows no section, the same rule the worktree listing follows");
+    }
+
+    @Test
+    void aBranchFilterMatchingNothingOmitsTheSection() {
+        In in = new In().project(DRYDOCK).current(DRYDOCK, DRYDOCK)
+                .catalog(BranchRef.local("main"), BranchRef.remote("origin/feature/login"));
+        in.filter = "nothing-matches";
+
+        ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
+        assertTrue(section(row, SectionKind.BRANCHES).isEmpty());
     }
 }
