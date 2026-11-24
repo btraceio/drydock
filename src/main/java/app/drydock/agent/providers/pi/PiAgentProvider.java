@@ -26,6 +26,7 @@ import app.drydock.agent.providers.pi.internal.PiSessionStore;
 import app.drydock.agent.providers.pi.internal.PiSphinxProbe;
 import app.drydock.agent.providers.pi.internal.PiVersionProbe;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.app.LoginShellEnvironment;
 import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
 
@@ -337,8 +338,16 @@ public final class PiAgentProvider implements AgentProvider {
         return command;
     }
 
+    /**
+     * A PATH value for a directly spawned pi child, without shell quoting.
+     * Unlike the shell-embedded {@code PATH='<dir>':"$PATH"} form, there is no
+     * launching shell to defer to, so the real child PATH --
+     * {@link LoginShellEnvironment#currentRealPath()}, the login shell's PATH
+     * the IDE probed, not the JVM's frozen bare snapshot -- rides along after
+     * the node directory.
+     */
     private static String pathWithNode(Path node) {
-        String inherited = System.getenv("PATH");
+        String inherited = LoginShellEnvironment.currentRealPath();
         if (inherited == null || inherited.isBlank()) {
             inherited = "/usr/bin:/bin";
         }
@@ -370,14 +379,24 @@ public final class PiAgentProvider implements AgentProvider {
      * case the resolved host Node directory is prepended to PATH instead of
      * feeding the shell script to Node.
      *
+     * <p>When the pi file is a shell launcher and {@code node} also resolves,
+     * the invocation is a deferred {@code PATH='<node-dir>':"$PATH" pi}: the
+     * node directory rides in front of the launching shell's PATH, which is
+     * the authoritative one -- {@code ShellCommandAdapter} has already put
+     * the dogbrew shims there and the user's rc files repaired the rest. The
+     * expansion must be deferred because this is the last PATH assignment
+     * before pi: a literal snapshot of the IDE's PATH (the JVM's frozen
+     * environment, launchd's bare {@code /usr/bin:/bin:...} for a
+     * Finder/Dock launch) would win over both and silently drop the shims
+     * and everything else the rc files added.
+     *
      * <p>When the pi file is not a Node script, or either side is
      * unresolved, falls back to the {@code pi} path alone (or bare
-     * {@code "pi"}) and relies on the shebang plus a merged PATH -- the
-     * original behaviour, correct once the login-shell merge has landed.
-     * {@code node} is resolved by {@link HostBinaryLocator} against the live
-     * (post-merge) PATH, so the node chosen is the user's shell node (Volta,
-     * nvm) when the merge succeeded, and a fallback homebrew node only when
-     * the PATH is bare.
+     * {@code "pi"}) and relies on the shebang plus the launching shell's
+     * PATH -- the original behaviour. {@code node} is resolved by
+     * {@link HostBinaryLocator} against the live PATH, so the node chosen is
+     * the user's shell node (Volta, nvm) when the merge succeeded, and a
+     * fallback homebrew node only when the PATH is bare.
      */
     private String piBinary() {
         Optional<Path> pi = locator.locate();
@@ -388,11 +407,23 @@ public final class PiAgentProvider implements AgentProvider {
                         + " " + AgentCommands.shellQuote(pi.get().toString());
             }
             if (node.isPresent()) {
-                return "PATH=" + AgentCommands.shellQuote(pathWithNode(node.get()))
-                        + " " + AgentCommands.shellQuote(pi.get().toString());
+                // Deferred, not a snapshot: ShellCommandAdapter has already
+                // prefixed the dogbrew shims and the user's rc files repaired
+                // the rest, and this being the last PATH assignment before pi
+                // means a literal value would silently drop all of it (that
+                // is how a drydock-held pi lost ddtool from PATH and could
+                // not resolve its models.json !ddtool apiKey, while the same
+                // pi in a terminal worked).
+                return "PATH=" + AgentCommands.shellQuote(nodeDirectory(node.get()) + ":")
+                        + "\"$PATH\" " + AgentCommands.shellQuote(pi.get().toString());
             }
         }
         return pi.map(p -> AgentCommands.shellQuote(p.toString())).orElse("pi");
+    }
+
+    /** The absolute directory of an interpreter path. */
+    private static String nodeDirectory(Path node) {
+        return node.toAbsolutePath().getParent().toString();
     }
 
     /**
