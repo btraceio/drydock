@@ -369,6 +369,39 @@ class PiAgentProviderTest {
     }
 
     /**
+     * A shell launcher's PATH assignment must defer to the launching shell:
+     * {@code ShellCommandAdapter} has already prefixed the dogbrew shims and
+     * the user's rc files repaired the rest, and this being the last PATH
+     * assignment before pi means a literal snapshot of the IDE's frozen
+     * PATH would win over both and silently drop them (that is how a
+     * drydock-held pi lost ddtool from PATH and could not resolve its
+     * models.json {@code !ddtool} apiKey, while the same pi in a terminal
+     * worked).
+     */
+    @Test
+    void aShellLauncherDefersPathToTheLaunchingShell(@TempDir Path dir) throws Exception {
+        Path nodeDirectory = Files.createDirectory(dir.resolve("node-bin"));
+        Path fakeNode = Files.createFile(nodeDirectory.resolve("node"));
+        Path fakePi = Files.writeString(dir.resolve("pi"), "#!/bin/sh\n");
+        Files.setPosixFilePermissions(fakePi, PosixFilePermissions.fromString("rwxr-xr-x"));
+        HostBinaryLocator nodeLocator = new HostBinaryLocator("node", List.of()) {
+            @Override protected Optional<Path> discover() { return Optional.of(fakeNode); }
+        };
+        PiAgentProvider p = new PiAgentProvider(new PiExecutableLocator(fakePi), nodeLocator,
+                () -> PiCapabilities.of("1.3.0"));
+        p.init(new AgentContext(dir, dir.resolve("activity"), ForkJoinPool.commonPool()));
+        String command = p.buildCreateCommand(
+                new CreateContext("S", "x", Path.of("/repo"), Optional.empty(), Optional.empty())).command();
+
+        String expected = "PATH='" + nodeDirectory + ":'\"$PATH\" ";
+        assertTrue(command.contains(expected),
+                "the node directory must be prepended with a deferred $PATH tail: " + command);
+        // No second, literal PATH assignment anywhere in the command.
+        assertEquals(1, command.split("PATH=").length - 1,
+                "exactly one PATH assignment, the deferred one: " + command);
+    }
+
+    /**
      * The real managed-install shape: the located pi path is a symlink to
      * the shell launcher. The shebang must be read through the link -- a
      * check on the link itself finds no file content and would wrongly keep
