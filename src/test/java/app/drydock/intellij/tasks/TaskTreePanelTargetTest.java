@@ -376,7 +376,8 @@ class TaskTreePanelTargetTest {
         ListingExpansionTracker tracker = new ListingExpansionTracker(changed -> { },
                 TaskTreePanel::projectRootOf);
         for (SectionKind kind : SectionKind.values()) {
-            if (kind == SectionKind.WORKTREES || kind == SectionKind.PULL_REQUESTS) {
+            if (kind == SectionKind.WORKTREES || kind == SectionKind.PULL_REQUESTS
+                    || kind == SectionKind.BRANCHES) {
                 continue;
             }
             assertThrows(IllegalArgumentException.class, () -> tracker.requested(kind), kind.toString());
@@ -386,6 +387,8 @@ class TaskTreePanelTargetTest {
         assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
         tracker.requested(SectionKind.WORKTREES).add(REGISTERED_ROOT);
         assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.WORKTREES));
+        tracker.requested(SectionKind.BRANCHES).add(REGISTERED_ROOT);
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.BRANCHES));
     }
 
     @Test

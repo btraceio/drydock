@@ -10,6 +10,9 @@ import app.drydock.domain.Repository;
 import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionActivity;
+import app.drydock.git.BranchCatalog;
+import app.drydock.git.BranchListing;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.IssueListing;
@@ -18,6 +21,7 @@ import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
+import app.drydock.git.GitStatusService;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
@@ -113,6 +117,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private static final long WORKTREE_CACHE_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final WorktreeService worktrees = new WorktreeService();
+    /** The branch listing behind the Branches section: one {@code for-each-ref} per project, cached like the worktrees. */
+    private final GitStatusService gitStatus = new GitStatusService();
     /** Runs the session→PR badge join off the gather's thread; owned and shut down by close(). */
     private final ExecutorService badgeJoinExecutor =
             Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("drydock-badge-join-", 0).factory());
@@ -130,6 +136,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<Path, CachedWorktrees> worktreeCache = new ConcurrentHashMap<>();
     /** Each session directory's checkout, under the worktree lists' TTL and invalidation. */
     private final Map<Path, CachedCheckout> checkoutCache = new ConcurrentHashMap<>();
+    /** Each project's merged branch catalog, under the worktree lists' TTL and invalidation. */
+    private final Map<Path, CachedBranches> branchCache = new ConcurrentHashMap<>();
     /** Last-activity stamps, computed only for the Worktrees section, with the listing's TTL cadence. */
     private final Map<Path, CachedActivity> activityCache = new ConcurrentHashMap<>();
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
@@ -262,6 +270,14 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     record CachedWorktrees(long expiresAt, List<Worktree> listed) { }
 
+    /**
+     * One root's merged branch catalog with its expiry stamp: re-listed after
+     * the worktree lists' TTL so a new or deleted branch surfaces without
+     * {@link #invalidateWorktrees()}. Seam surface (package-private): the
+     * same-package tests construct it.
+     */
+    record CachedBranches(long expiresAt, BranchCatalog listed) { }
+
     private record CachedCheckout(long expiresAt, Checkout checkout) { }
 
     /** One worktree's last-activity stamp with its expiry: recomputed after the TTL, never eagerly. */
@@ -290,6 +306,7 @@ final class TaskTreeInputs implements AutoCloseable {
         worktreeCache.clear();
         checkoutCache.clear();
         activityCache.clear();
+        branchCache.clear();
         resumability.clear();
         publishedSessionPullRequests = Map.of();
     }
@@ -376,7 +393,8 @@ final class TaskTreeInputs implements AutoCloseable {
     TaskTreeModel.Inputs gather(Project here, String filter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
                                 Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
-                                Set<Path> requestedPullRequests, ListingSearch search) {
+                                Set<Path> requestedPullRequests, Set<Path> requestedBranches,
+                                ListingSearch search) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
         Map<Path, List<Worktree>> byMain = new HashMap<>();
@@ -398,6 +416,7 @@ final class TaskTreeInputs implements AutoCloseable {
         Set<Path> jiraRoots = new HashSet<>();
         Set<Path> jiraGhostRoots = new HashSet<>();
         Map<Path, List<Worktree>> pullRequestDedupWorktrees = new HashMap<>();
+        Map<Path, BranchCatalog> branches = new HashMap<>();
         Map<Path, BadgeSource> badgeSources = new HashMap<>();
         Set<Path> missing = new HashSet<>();
         // Resolved once per pass, not once per project: remote detection reuses it.
@@ -490,11 +509,16 @@ final class TaskTreeInputs implements AutoCloseable {
                     }
                 }
             }
-            if (requestedWorktrees.contains(root)) {
+            // One listing pass serves both sections: the Worktrees trigger
+            // (its own section) and the Branches section share the same
+            // listing cadence, and the branch merge reuses this worktree
+            // list for occupancy instead of a second `git worktree list`.
+            if (requestedWorktrees.contains(root) || requestedBranches.contains(root)) {
                 List<Worktree> list = worktreesOf(root);
                 fillActivity(list);
                 byMain.put(root, list);
                 list.forEach(worktree -> mainRootOf.put(worktree.path(), root));
+                branches.put(root, branchesOf(root, list));
             }
         }
 
@@ -598,7 +622,7 @@ final class TaskTreeInputs implements AutoCloseable {
                 openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
                 filter, List.of(), List.of(), Optional.empty(), resumable, sessionPullRequests,
-                Map.of(), Map.of(), pendingIssues, pendingJiraGroups, babysit);
+                Map.of(), Map.of(), pendingIssues, pendingJiraGroups, babysit, branches);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
@@ -1336,6 +1360,41 @@ final class TaskTreeInputs implements AutoCloseable {
         }
     }
 
+    /**
+     * {@code root}'s branches merged with the worktree occupancy, canonical
+     * holder paths; the {@link BranchCatalog#EMPTY} stand-in when git cannot
+     * answer (for this pass only — a failed listing is never cached, the
+     * same rule the worktree listing follows). The worktree list is the one
+     * already gathered for the project, so the merge costs no second
+     * {@code git worktree list}.
+     */
+    private BranchCatalog branchesOf(Path root, List<Worktree> worktreeList) {
+        long now = System.nanoTime();
+        CachedBranches cached = branchCache.get(root);
+        if (cached != null && cached.expiresAt() > now) {
+            return cached.listed();
+        }
+        try {
+            BranchListing listing = gitStatus.listBranches(root)
+                    .get(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            List<Worktree> canonical = worktreeList.stream()
+                    .map(worktree -> new Worktree(RepositoryCatalog.canonicalize(worktree.path()),
+                            worktree.branch(), worktree.mainCheckout(), worktree.detached(), worktree.prunable(),
+                            worktree.locked(), worktree.lockReason(), worktree.merged()))
+                    .toList();
+            BranchCatalog merged = BranchCatalog.merge(listing, canonical);
+            branchCache.put(root, new CachedBranches(now + WORKTREE_CACHE_NANOS, merged));
+            return merged;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.log(Level.DEBUG, () -> "No branches for " + root + ": interrupted; not cached");
+            return BranchCatalog.EMPTY;
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            LOG.log(Level.DEBUG, () -> "No branches for " + root + ": " + e);
+            return BranchCatalog.EMPTY;
+        }
+    }
+
     /** The fresh activity stamps, for the model's staleness display. */
     private Map<Path, Instant> freshActivity() {
         long now = System.nanoTime();
@@ -1480,6 +1539,7 @@ final class TaskTreeInputs implements AutoCloseable {
         unsubscribe.run();
         badgeJoinExecutor.shutdown();
         worktrees.close();
+        gitStatus.close();
         github.close();
         jira.close();
     }

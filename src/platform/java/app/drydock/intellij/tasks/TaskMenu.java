@@ -83,6 +83,12 @@ final class TaskMenu {
         /** Switch to the session a babysitter watches; a babysitter only. */
         SHOW_WATCHED,
         NEW_TASK,
+        /** Create a worktree on the selected free branch and start a task in it, shown in this window. */
+        NEW_TASK_ON_BRANCH,
+        /** As NEW_TASK_ON_BRANCH, in the worktree's own window. */
+        NEW_TASK_ON_BRANCH_OWN_WINDOW,
+        /** Cut a new branch from the selected branch in a new worktree and start a task there. */
+        START_SUB_BRANCH,
         DEACTIVATE_AND_CLOSE,
         DONE_WITH_TASK,
         /** Resume, or Start when there is no conversation to resume into. */
@@ -262,6 +268,16 @@ final class TaskMenu {
                     List.of(Item.NEW_TASK, Item.QUICK_REVIEW, Item.REVIEW, Item.REVIEW_IN_SPHINX),
                     // Locked or open worktrees cannot be removed from here.
                     section(TaskActions.removable(idleWorktree).isEmpty() ? null : Item.REMOVE_WORKTREE)));
+            // A held branch's New Task is fixed to its worktree (the same
+            // NEW_TASK entry a worktree row offers); a free one creates its
+            // worktree first. Either way a sub-branch can be cut from it,
+            // and a held branch with a shown session offers the reveal.
+            case TaskNode.BranchRow branch -> nonEmpty(List.of(
+                    branch.held()
+                            ? List.of(Item.NEW_TASK)
+                            : List.of(Item.NEW_TASK_ON_BRANCH, Item.NEW_TASK_ON_BRANCH_OWN_WINDOW),
+                    List.of(Item.START_SUB_BRANCH),
+                    facts.showSession() != null ? List.of(Item.SHOW_SESSION) : List.of()));
             case StaleWorktrees ignored -> List.of(List.of(Item.REMOVE_STALE_WORKTREES));
             case WorktreeGroup ignored -> List.of(List.of(Item.NEW_TASK));
             // The Sessions node is where the project's bulk cleanup lives.
@@ -429,6 +445,8 @@ final class TaskMenu {
                         .flatMap(document -> delayedRowOf(document, displayed, tasks)).orElse(null);
                 showSession = TaskLinks.sessionOf(pullRequest, displayed).orElse(null);
             }
+            case TaskNode.BranchRow branch ->
+                showSession = TaskLinks.sessionOf(branch, displayed).orElse(null);
             case IssueRow issue -> showTask = TaskLinks.taskOf(issue, displayed, tasks).orElse(null);
             case JiraIssueRow jira -> showTask = TaskLinks.taskOf(jira, displayed, tasks).orElse(null);
             default -> {

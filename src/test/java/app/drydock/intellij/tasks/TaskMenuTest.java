@@ -10,6 +10,7 @@ import app.drydock.domain.PullRequestTarget;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
+import app.drydock.git.BranchRef;
 import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.JiraIssue;
@@ -381,6 +382,28 @@ class TaskMenuTest {
                 TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), NO_TRANSFER));
         assertFalse(TaskMenu.sections(task(false, new TaskPlacement.Idle(false)), List.of(), NO_TRANSFER)
                 .stream().anyMatch(section -> section.contains(TaskMenu.Item.DEACTIVATE)));
+    }
+
+    @Test
+    void aFreeBranchRowOffersWorktreeOnBranchSubBranchAndNoRemove() {
+        TaskNode.BranchRow free = new TaskNode.BranchRow(ROOT,
+                BranchRef.local("feature/login"), "feature/login");
+
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK_ON_BRANCH, TaskMenu.Item.NEW_TASK_ON_BRANCH_OWN_WINDOW),
+                List.of(TaskMenu.Item.START_SUB_BRANCH)),
+                sectionsOf(free));
+    }
+
+    @Test
+    void aHeldBranchRowMirrorsItsWorktreeAndOffersTheSubBranch() {
+        TaskNode.BranchRow held = new TaskNode.BranchRow(ROOT,
+                new BranchRef("feature/login", false, Optional.of(WORKTREE), false, false), "feature/login");
+
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.NEW_TASK),
+                List.of(TaskMenu.Item.START_SUB_BRANCH)),
+                sectionsOf(held));
     }
 
     @Test

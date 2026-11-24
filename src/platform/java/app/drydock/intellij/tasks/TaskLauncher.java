@@ -900,10 +900,24 @@ public final class TaskLauncher {
                             prepareAndShow(from, Optional.of(repositoryRoot), Optional.of(in.worktree()), Optional.empty(),
                                     NewTaskPreset.empty());
                     case BranchTaskEntry.StartFrom branchOff ->
-                            prepareAndShow(from, Optional.of(repositoryRoot), Optional.empty(),
-                                    Optional.of(branchOff.startPoint()), NewTaskPreset.empty());
+                            openFromStartPoint(from, repositoryRoot, branchOff.startPoint());
                     case null -> LOG.log(Level.DEBUG, "No task entry for " + fullRefName);
                 }
+            }
+        });
+    }
+
+    /**
+     * Opens the New task dialog with {@code startPoint} preset as the From
+     * (branch-off) start point: the dialog generates a new branch cut from
+     * it, in a new worktree. EDT entry.
+     */
+    public static void openFromStartPoint(Project from, Path repositoryRoot, String startPoint) {
+        ProgressManager.getInstance().run(new Task.Backgroundable(from, "Preparing new task…", true) {
+            @Override
+            public void run(@NotNull ProgressIndicator indicator) {
+                prepareAndShow(from, Optional.of(repositoryRoot), Optional.empty(),
+                        Optional.of(startPoint), NewTaskPreset.empty());
             }
         });
     }

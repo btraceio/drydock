@@ -95,6 +95,20 @@ final class TaskLinks {
     }
 
     /**
+     * The session working in the worktree that holds {@code branch}'s branch,
+     * within the branch's own shown project — the Branches row's Show Session
+     * target. A free branch (nothing holds it) has no session to reveal.
+     */
+    static Optional<TaskRow> sessionOf(TaskNode.BranchRow branch, List<TaskNode> nodes) {
+        return branch.branch().checkedOutAt().flatMap(holder ->
+                nodes.stream()
+                        .filter(TaskRow.class::isInstance)
+                        .map(TaskRow.class::cast)
+                        .filter(row -> row.session().workingDirectory().equals(holder))
+                        .findFirst());
+    }
+
+    /**
      * The session's explicit target, else its discovered branch PR, within
      * its own shown project. Explicit targets match by full URL when the row
      * has one, or by number only when the row URL is absent.
