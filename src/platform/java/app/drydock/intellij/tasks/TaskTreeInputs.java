@@ -15,6 +15,7 @@ import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.IssueListing;
 import app.drydock.git.GhCliService.OpenIssue;
 import app.drydock.git.GhCliService.OpenPullRequest;
+import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.GhCliService.PullRequestListing;
 import app.drydock.git.GitExecutableLocator;
 import app.drydock.git.JiraIssueListing;
@@ -27,6 +28,7 @@ import app.drydock.intellij.agent.AgentConsoles;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.HostedLifecycle;
 import app.drydock.intellij.project.ProjectIdentity;
+import app.drydock.intellij.startup.DrydockStartupActivity;
 import app.drydock.process.ProcessResult;
 import app.drydock.process.ProcessRunner;
 import app.drydock.process.ProcessTimeoutException;
@@ -134,6 +136,8 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
+    /** The badge join's own listing: the light field set, keyed like the heavy cache it decorates from. */
+    private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestRowCache = new ConcurrentHashMap<>();
     /** Each project's latest search-scoped pull-request fetch, keyed by its main-checkout root. */
     private final Map<Path, CachedSearchPullRequests> searchPullRequestCache = new ConcurrentHashMap<>();
     /** Each project's latest search-scoped issue fetch, keyed by its main-checkout root. */
@@ -294,6 +298,7 @@ final class TaskTreeInputs implements AutoCloseable {
         issueCache.clear();
         pullRequestCache.clear();
         branchPullRequestCache.clear();
+        branchPullRequestRowCache.clear();
         searchPullRequestCache.clear();
         searchIssueCache.clear();
         exactPullRequestCache.clear();
@@ -346,6 +351,7 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        branchPullRequestRowCache.keySet().removeIf(key -> key.root().equals(root));
         searchPullRequestCache.remove(root);
         exactPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         listingAnswers.forget(root);
@@ -543,7 +549,7 @@ final class TaskTreeInputs implements AutoCloseable {
         // publishes its map and requests one more rebuild
         // through onLateData, exactly like the PR badge lookups it joins
         // with.
-        scheduleSessionPullRequestJoin(sessions, badgeSources);
+        scheduleSessionPullRequestJoin(sessions, badgeSources, here);
         Map<RepositoryId, Path> recordedRoots = new HashMap<>();
         for (Repository repository : plugin.stateStore().state().repositories()) {
             if (!repository.isRemote()) {
@@ -632,6 +638,13 @@ final class TaskTreeInputs implements AutoCloseable {
      */
     private void scheduleSessionPullRequestJoin(List<ManagedAgentSession> sessions,
                                                 Map<Path, BadgeSource> sources) {
+        // The test seam drives the join without a project: the discovery is
+        // derived and published, never persisted.
+        scheduleSessionPullRequestJoin(sessions, sources, null);
+    }
+
+    private void scheduleSessionPullRequestJoin(List<ManagedAgentSession> sessions,
+                                                Map<Path, BadgeSource> sources, Project here) {
         if (sources.isEmpty() || sessions.isEmpty()) {
             return;
         }
@@ -639,12 +652,26 @@ final class TaskTreeInputs implements AutoCloseable {
             return;
         }
         CompletableFuture
-                .supplyAsync(() -> sessionPullRequests(sessions, sources, this::checkoutOf,
-                                source -> branchPullRequestsNow(source.root(), source.repository())),
+                .supplyAsync(() -> sessionPullRequestJoin(sessions, sources, this::checkoutOf,
+                                this::sessionBadgeRows),
                         badgeJoinExecutor)
-                .thenAccept(matched -> {
-                    if (!publishedSessionPullRequests.equals(matched)) {
-                        publishedSessionPullRequests = Map.copyOf(matched);
+                .thenAccept(join -> {
+                    boolean changed = !publishedSessionPullRequests.equals(join.matched());
+                    if (changed) {
+                        publishedSessionPullRequests = Map.copyOf(join.matched());
+                    }
+                    // The discovery is applied only when it differs from the last
+                    // applied answer: the badge map renders from live rows either
+                    // way, and an unchanged pass must not pay a state-store scan
+                    // every badge cycle.
+                    Map<ManagedSessionId, Integer> discovered = join.discovered();
+                    Set<ManagedSessionId> stale = join.stale();
+                    if (!discovered.equals(appliedDiscovered) || !stale.equals(appliedStale)) {
+                        appliedDiscovered = Map.copyOf(discovered);
+                        appliedStale = Set.copyOf(stale);
+                        persistDiscoveredPullRequests(discovered, stale, here);
+                    }
+                    if (changed) {
                         lateData.run();
                     }
                 })
@@ -655,6 +682,42 @@ final class TaskTreeInputs implements AutoCloseable {
                         LOG.log(Level.WARNING, "The session pull-request badge join failed", failure);
                     }
                 });
+    }
+
+    /**
+     * The last discovery the session service was asked to apply: an unchanged
+     * answer (the steady state once every branch-carrying session's link is
+     * current) schedules no state-store pass at all.
+     */
+    private volatile Map<ManagedSessionId, Integer> appliedDiscovered = Map.of();
+    private volatile Set<ManagedSessionId> appliedStale = Set.of();
+
+    /**
+     * Persists what the join discovered through the session service's single
+     * writer: the open PR each branch-matched session's working branch now
+     * carries, and the sessions whose previously discovered open PR their
+     * branch no longer carries. Fire-and-forget: a failed write costs the
+     * session its persisted link until the next join pass re-derives the
+     * same answer, and the badge map never depended on it. A disposed window
+     * persists nothing -- its tree is going away, and the next window's
+     * gather re-derives and applies the same discovery.
+     */
+    private void persistDiscoveredPullRequests(Map<ManagedSessionId, Integer> discovered,
+                                               Set<ManagedSessionId> stale, Project here) {
+        if (here == null || here.isDisposed()) {
+            return;
+        }
+        try {
+            DrydockStartupActivity.sessions(here).recordDiscoveredPullRequests(discovered, stale)
+                    .exceptionally(failure -> {
+                        LOG.log(Level.WARNING, "Could not persist the discovered pull requests", failure);
+                        return false;
+                    });
+        } catch (RuntimeException e) {
+            // The plugin service can refuse before returning a future (a project
+            // tearing down mid-call): the same next-pass recovery applies.
+            LOG.log(Level.WARNING, "Could not persist the discovered pull requests", e);
+        }
     }
 
     /**
@@ -669,31 +732,145 @@ final class TaskTreeInputs implements AutoCloseable {
      * only, so an id-join revert is a compile error, and the tests below pin
      * the behavioral regression. A detached checkout has no branch, so no badge.
      */
+    /**
+     * The badge view of the join: the same map the tree has always rendered
+     * from. The persistence-relevant parts (which matches came from the
+     * branch, which sessions were evaluated at all) ride {@link
+     * #sessionPullRequestJoin}.
+     */
     static Map<ManagedSessionId, BranchPullRequest> sessionPullRequests(
             List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources,
             Function<Path, Optional<Checkout>> checkoutOf,
             Function<BadgeSource, Map<String, BranchPullRequest>> prsOf) {
+        return sessionPullRequestJoin(sessions, sources, checkoutOf, prsOf).matched();
+    }
+
+    /**
+     * One join pass's full answer: the badge map, and the raw material the
+     * persisted PR link is derived from.
+     *
+     * <p>{@code matched} is the badge answer -- branch match first, then the
+     * session's stored number or its {@code pr-<n>} alias -- unchanged from
+     * when it was the whole answer. {@code branchMatched} is the subset whose
+     * match came from the head branch itself: the only matches authoritative
+     * enough to persist, since a number-fallback match (a {@code pr-<n>}
+     * checkout, a stale stored number) says nothing about the working branch
+     * carrying the PR. {@code evaluated} is every session the pass actually
+     * examined with positive evidence -- directory present, checkout read,
+     * branch named, and a non-empty listing for a known badge source -- the
+     * set whose members may have their discovered-but-no-longer-branch-carried
+     * link cleared. The exclusions cut both ways: a session whose directory is
+     * gone or whose checkout is detached carries positive evidence that its
+     * branch can no longer back a PR (it joins {@code evaluated} without the
+     * listing), while a failed git probe, an unregistered project or an empty
+     * listing is no evidence at all and must never clear a link.
+     *
+     * <p>{@code discovered} maps each branch-matched session to the number of
+     * the OPEN PR its branch carries (rows of any other lifecycle suppress
+     * clearing but persist nothing -- a merged PR's link belongs to the merge
+     * flow, which records it with its own semantics). {@code stale} is the
+     * complementary evaluated set: sessions whose previously persisted OPEN
+     * link their branch no longer backs.
+     */
+    record SessionPullRequestJoin(Map<ManagedSessionId, BranchPullRequest> matched,
+                                  Map<ManagedSessionId, BranchPullRequest> branchMatched,
+                                  Set<ManagedSessionId> evaluated) {
+
+        SessionPullRequestJoin {
+            matched = Map.copyOf(matched);
+            branchMatched = Map.copyOf(branchMatched);
+            evaluated = Set.copyOf(evaluated);
+        }
+
+        /** Branch-matched sessions' open PR numbers, keyed by session. */
+        Map<ManagedSessionId, Integer> discovered() {
+            Map<ManagedSessionId, Integer> open = new HashMap<>();
+            branchMatched.forEach((id, pullRequest) -> {
+                if (pullRequest.state() == PrLifecycle.OPEN) {
+                    open.put(id, pullRequest.number());
+                }
+            });
+            return open;
+        }
+
+        /** Evaluated sessions whose working branch no longer carries their PR. */
+        Set<ManagedSessionId> stale() {
+            Set<ManagedSessionId> remaining = new HashSet<>(evaluated);
+            remaining.removeAll(branchMatched.keySet());
+            return remaining;
+        }
+    }
+
+    /**
+     * The session-to-badge join as a pure seam: the same join the instance
+     * method runs, with the two blocking edges injected -- the session
+     * directory's checkout ({@code checkoutOf}: canonical main checkout and
+     * branch, empty when git gives no answer) and the project's head-branch
+     * PR map ({@code prsOf}). Pure apart from the directory-existence check
+     * (a disk read, kept here so the gate stays tested with the join). The
+     * source is found by the checkout's main-checkout path, never by
+     * {@code session.repositoryId()}: the badge-source map is keyed by paths
+     * only, so an id-join revert is a compile error, and the tests below pin
+     * the behavioral regression. A detached checkout has no branch, so no badge.
+     */
+    static SessionPullRequestJoin sessionPullRequestJoin(
+            List<ManagedAgentSession> sessions, Map<Path, BadgeSource> sources,
+            Function<Path, Optional<Checkout>> checkoutOf,
+            Function<BadgeSource, Map<String, BranchPullRequest>> prsOf) {
+        Map<ManagedSessionId, BranchPullRequest> matched = new HashMap<>();
+        Map<ManagedSessionId, BranchPullRequest> branchMatched = new HashMap<>();
+        Set<ManagedSessionId> evaluated = new HashSet<>();
         if (sources.isEmpty()) {
-            return Map.of();
+            // No project lists pull requests, so nothing can be re-observed;
+            // a gone directory is still positive evidence its link is stale.
+            sessions.stream()
+                    .filter(session -> session.targetPullRequest().isEmpty())
+                    .filter(session -> !Files.isDirectory(session.workingDirectory()))
+                    .map(ManagedAgentSession::id)
+                    .forEach(evaluated::add);
+            return new SessionPullRequestJoin(matched, branchMatched, evaluated);
         }
         Map<Path, Map<String, BranchPullRequest>> byRoot = new HashMap<>();
-        Map<ManagedSessionId, BranchPullRequest> matched = new HashMap<>();
         for (ManagedAgentSession session : sessions) {
-            if (session.targetPullRequest().isPresent() || !Files.isDirectory(session.workingDirectory())) {
+            if (session.targetPullRequest().isPresent()) {
+                continue;
+            }
+            if (!Files.isDirectory(session.workingDirectory())) {
+                evaluated.add(session.id());
                 continue;
             }
             Optional<Checkout> checkout = checkoutOf.apply(session.workingDirectory());
-            Optional<BadgeSource> source = checkout.map(found -> sources.get(found.mainCheckout()));
-            Optional<String> branch = checkout.flatMap(Checkout::branch);
-            if (source.isEmpty() || branch.isEmpty()) {
+            if (checkout.isEmpty()) {
+                continue;
+            }
+            // A detached checkout's branch is definitively gone: it joins the
+            // stale set without consulting the listing, which has nothing to
+            // match a branchless checkout against.
+            Optional<String> branch = checkout.get().branch();
+            if (branch.isEmpty()) {
+                evaluated.add(session.id());
+                continue;
+            }
+            Optional<BadgeSource> source = Optional.ofNullable(sources.get(checkout.get().mainCheckout()));
+            if (source.isEmpty()) {
                 continue;
             }
             Map<String, BranchPullRequest> pullRequests = byRoot.computeIfAbsent(source.get().root(),
                     ignored -> prsOf.apply(source.get()));
+            if (pullRequests.isEmpty()) {
+                // An empty answer is no evidence: the listing may have failed
+                // or been truncated, and silence must never clear a link.
+                continue;
+            }
+            evaluated.add(session.id());
+            BranchPullRequest byBranch = pullRequests.get(branch.get());
+            if (byBranch != null) {
+                branchMatched.put(session.id(), byBranch);
+            }
             sessionPullRequest(pullRequests, branch.get(), session.pr().number())
                     .ifPresent(pullRequest -> matched.put(session.id(), pullRequest));
         }
-        return matched;
+        return new SessionPullRequestJoin(matched, branchMatched, evaluated);
     }
 
     /**
@@ -717,6 +894,56 @@ final class TaskTreeInputs implements AutoCloseable {
 
     /**
      * The head-branch PR map for {@code root} as far as it is known now.
+     * A missing or expired entry starts a lookup whose completion calls
+     * {@link #lateData}; until it completes the previous answer is served.
+     * The badge listing refreshes on {@link #BADGE_CACHE_NANOS}, not the
+     * listings' one-minute TTL: it is the heavy fetch every light listing's
+     * conflict and CI signals join from.
+     */
+    private Map<String, BranchPullRequest> branchPullRequestRowsNow(Path root, Optional<String> repository) {
+        PullRequestKey key = new PullRequestKey(root, repository);
+        long now = System.nanoTime();
+        CachedBranchPullRequests cached = branchPullRequestRowCache.get(key);
+        if (cached == null || cached.expiresAt() <= now) {
+            Map<String, BranchPullRequest> previous = cached == null ? Map.of() : current(cached);
+            CompletableFuture<Map<String, BranchPullRequest>> lookup = github.branchPullRequestRows(root, repository);
+            cached = new CachedBranchPullRequests(now + BADGE_CACHE_NANOS, lookup, previous);
+            branchPullRequestRowCache.put(key, cached);
+            if (!lookup.isDone()) {
+                lookup.whenComplete((answer, failure) -> lateData.run());
+            }
+        }
+        return current(cached);
+    }
+
+    /**
+     * The join's per-source fetch: light rows for identity and state, with
+     * the heavy listing's conflict/CI signals joined in by branch where the
+     * heavy answer exists. The heavy fetch keeps running here (it is what
+     * fed the join before the light split) so a session row's hover keeps
+     * its health text without the PR node ever being opened; when GitHub
+     * drops the heavy query the badge still stands, undecorated.
+     */
+    private Map<String, BranchPullRequest> sessionBadgeRows(BadgeSource source) {
+        Map<String, BranchPullRequest> rows = branchPullRequestRowsNow(source.root(), source.repository());
+        // The heavy answer as of now (the previous map while a refresh runs):
+        // the same call the tree's pull-request section badges from.
+        Map<String, BranchPullRequest> health = branchPullRequestsNow(source.root(), source.repository());
+        if (rows.isEmpty() || health.isEmpty()) {
+            return rows;
+        }
+        Map<String, BranchPullRequest> decorated = new HashMap<>(rows);
+        rows.forEach((branch, row) -> {
+            BranchPullRequest full = health.get(branch);
+            if (full != null && (full.conflicting() || !full.ciFailures().isEmpty())) {
+                decorated.put(branch, new BranchPullRequest(row.number(), row.state(), row.draft(),
+                        row.headRefName(), row.title(), row.url(), full.conflicting(), full.ciFailures()));
+            }
+        });
+        return decorated;
+    }
+
+    /**
      * A missing or expired entry starts a lookup whose completion calls
      * {@link #lateData}; until it completes the previous answer is served.
      * The badge listing refreshes on {@link #BADGE_CACHE_NANOS}, not the

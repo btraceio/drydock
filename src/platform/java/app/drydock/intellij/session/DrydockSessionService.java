@@ -2224,6 +2224,70 @@ public final class DrydockSessionService implements AgentExecutionListener {
     }
 
     /**
+     * Records what the session-to-branch pull-request join discovered, as one
+     * state transform on the plugin's background executor: {@code discovered}
+     * maps each session to the number of the OPEN PR its working branch now
+     * carries, {@code stale} names sessions whose previously discovered open
+     * PR their branch no longer backs. This is what makes the branch join's
+     * answer survive a restart and feed everything that reads the session's
+     * own PR link, instead of living only in the tree's per-gather badge map.
+     *
+     * <p>The boundaries are the join's own: an explicit target is never in the
+     * join's evaluated set, so a human association is never touched; a MERGED
+     * link is the merge flow's ({@link #recordPullRequestMerged}) and is never
+     * downgraded or renumbered here — the branch join's own rule that an open
+     * PR wins a branch from an earlier merged one means a genuinely new PR
+     * would flip the link back and forth with the merge flow's poll, so a
+     * merged session keeps its terminal link until a human associates
+     * otherwise; and a branch-matched PR of any other lifecycle suppresses the
+     * clearing without persisting anything. A no-op for sessions whose link
+     * already says exactly this, so the poll passes that re-observe the same
+     * answer cannot buy endless republishes. Unknown session ids are ignored.
+     */
+    public CompletableFuture<Boolean> recordDiscoveredPullRequests(Map<ManagedSessionId, Integer> discovered,
+                                                               Set<ManagedSessionId> stale) {
+        Objects.requireNonNull(discovered, "discovered");
+        Objects.requireNonNull(stale, "stale");
+        if (discovered.isEmpty() && stale.isEmpty()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return initialization.thenApplyAsync(unused -> {
+            boolean[] changed = new boolean[1];
+            stateStore.get().update(state -> {
+                List<ManagedAgentSession> updated = state.sessions().stream().map(existing -> {
+                    // Defence in depth on the join's own boundary: a session with
+                    // an explicit target never reaches the join's evaluated set,
+                    // so it must not be writable here either.
+                    if (existing.targetPullRequest().isPresent()) {
+                        return existing;
+                    }
+                    Integer found = discovered.get(existing.id());
+                    ManagedAgentSession next = existing;
+                    if (found != null && existing.prState() != PrState.MERGED) {
+                        boolean already = existing.prState() == PrState.OPEN
+                                && existing.prNumber().map(number -> number.intValue() == found).orElse(false);
+                        if (!already) {
+                            next = existing.withPr(PrState.OPEN, Optional.of(found));
+                        }
+                    } else if (found == null && stale.contains(existing.id())
+                            && existing.prState() == PrState.OPEN) {
+                        next = existing.withPr(PrState.NONE, Optional.empty());
+                    }
+                    if (next != existing) {
+                        changed[0] = true;
+                    }
+                    return next;
+                }).toList();
+                return changed[0] ? state.withSessions(updated) : state;
+            });
+            if (changed[0]) {
+                DrydockSessionsListener.publishChanged();
+            }
+            return changed[0];
+        }, executor);
+    }
+
+    /**
      * The agent's {@code session_rename}: refuses a human-pinned name,
      * refuses an unchanged title and a sibling collision as outcomes (the
      * router turns each into its own message), applies anything else, and
