@@ -5,6 +5,7 @@ import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskFilePatch;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskPriority;
 
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.DialogWrapper;
@@ -73,6 +74,8 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
     private final JBLabel titleReason = new JBLabel("A task needs a title.");
     /** The project the task is attached to: the store directory's project identity (D2). */
     private final ComboBox<ProjectChoice> project = new ComboBox<>();
+    /** The priority picker: the Jira names, urgency order; "Unprioritized" first as the default. */
+    private final ComboBox<TaskPriority> priority = new ComboBox<>();
     /** The honest policy sentence under the done_by radio row (D16). */
     private final JBLabel policy = new JBLabel();
     /** The exact values a confirmed OK accepted, captured before the dialog closes. */
@@ -122,19 +125,20 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
      * prerequisite hits, and the OK button saves instead of creating.
      */
     public record Prefill(TaskId task, String title, String body, List<String> after,
-                          DoneBy doneBy, ProjectChoice project) {
+                          DoneBy doneBy, TaskPriority priority, ProjectChoice project) {
 
         /** The task's stored values as the edit form's starting point. */
         public static Prefill edit(TaskDocument document, ProjectChoice project) {
             return new Prefill(document.id(), document.title(),
                     String.join("\n", TaskFilePatch.noteParagraphs(document.rawBody())),
-                    document.after(), document.doneBy(), project);
+                    document.after(), document.doneBy(),
+                    document.usablePriority().orElse(null), project);
         }
 
         /** The creation form: everything blank, the attachment defaulting to the
          * project the dialog was opened from. */
         public static Prefill none(ProjectChoice project) {
-            return new Prefill(null, null, null, null, null, project);
+            return new Prefill(null, null, null, null, null, null, project);
         }
     }
 
@@ -147,7 +151,7 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
      * refusal on OK).
      */
     public record Result(String title, String body, List<String> after, DoneBy doneBy,
-                         ProjectChoice project) {
+                         TaskPriority priority, ProjectChoice project) {
 
         /** A record cannot hold a null list, a null body or an absent policy. */
         public Result {
@@ -155,7 +159,14 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
             body = body == null ? "" : body;
             after = after == null ? List.of() : List.copyOf(after);
             doneBy = doneBy == null ? DoneBy.HUMAN : doneBy;
+            priority = priority == null ? TaskPriority.UNPRIORITIZED : priority;
             project = Objects.requireNonNull(project, "project");
+        }
+
+        /** The shape before the dialog offered a priority: unprioritized. */
+        public Result(String title, String body, List<String> after, DoneBy doneBy,
+                      ProjectChoice project) {
+            this(title, body, after, doneBy, null, project);
         }
 
         /** The visible reason a candidate title is refused; empty when it names a task. */
@@ -191,6 +202,15 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
         prerequisites.setReferences(prefill.after());
         if (prefill.doneBy() == DoneBy.AGENT) {
             doneByAgent.setSelected(true);
+        }
+        // Urgency order with the default first: picking nothing stays unprioritized.
+        priority.addItem(TaskPriority.UNPRIORITIZED);
+        for (TaskPriority value : List.of(TaskPriority.TOP, TaskPriority.HIGHEST, TaskPriority.HIGH,
+                TaskPriority.MEDIUM, TaskPriority.LOW, TaskPriority.LOWEST)) {
+            priority.addItem(value);
+        }
+        if (prefill.priority() != null) {
+            priority.setSelectedItem(prefill.priority());
         }
         for (ProjectChoice choice : projects) {
             project.addItem(choice);
@@ -258,6 +278,7 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
                 .addComponent(titleReason)
                 .addLabeledComponent("Body (optional):", ScrollPaneFactory.createScrollPane(body), true)
                 .addLabeledComponent("Project:", project)
+                .addLabeledComponent("Priority:", priority)
                 .addLabeledComponent("Prerequisites:", prerequisites.component(), true)
                 .addLabeledComponent("Done by:", doneByRow)
                 .addComponent(policy)
@@ -307,6 +328,7 @@ public final class NewDelayedTaskDialog extends DialogWrapper {
     protected void doOKAction() {
         accepted = new Result(title.getText(), body.getText(), prerequisites.references(),
                 doneByAgent.isSelected() ? DoneBy.AGENT : DoneBy.HUMAN,
+                (TaskPriority) priority.getSelectedItem(),
                 (ProjectChoice) project.getSelectedItem());
         super.doOKAction();
     }

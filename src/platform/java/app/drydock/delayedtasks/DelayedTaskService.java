@@ -34,6 +34,7 @@ import app.drydock.tasks.StackBranches;
 import app.drydock.tasks.StackUnits;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.TaskGraph;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskRun;
 import app.drydock.tasks.TaskRuns;
@@ -1226,9 +1227,20 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         });
     }
 
-    @Override
+    /**
+     * As {@link #create(String, List, RepositoryId, Optional)} with no
+     * priority: the shape before tasks carried one, kept for callers that
+     * predate priorities.
+     */
     public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repository) {
+        return create(title, after, repository, Optional.empty());
+    }
+
+    @Override
+    public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repository,
+            Optional<TaskPriority> priority) {
         List<String> prerequisites = after == null ? List.of() : List.copyOf(after);
+        Optional<TaskPriority> stored = priority == null ? Optional.empty() : Objects.requireNonNull(priority);
         return supply(store -> {
             try {
                 // Checked before anything is written: MCP cannot edit relations later, so an
@@ -1244,7 +1256,7 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                         }
                     }
                 }
-                TaskDocument created = store.create(stableRepository(repository), title, List.of());
+                TaskDocument created = store.create(stableRepository(repository), title, List.of(), stored);
                 // The core's create carries no prerequisites; the after refs land via one committed update.
                 return Outcome.committed(prerequisites.isEmpty() ? created
                         : store.update(created.id(),
@@ -1266,12 +1278,19 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
      * is refused by the edit itself, mirroring the dialog's own validation.
      */
     public record TaskEdit(TaskId task, String title, DoneBy doneBy, List<String> after,
-                           List<String> body, RepositoryId repository) {
+                           TaskPriority priority, List<String> body, RepositoryId repository) {
 
+        /** {@code priority} null leaves the stored priority unchanged. */
         public TaskEdit {
             title = title == null ? "" : title.strip();
             after = after == null ? List.of() : List.copyOf(after);
             body = body == null ? List.of() : List.copyOf(body);
+        }
+
+        /** The shape before tasks carried a priority: unchanged. */
+        public TaskEdit(TaskId task, String title, DoneBy doneBy, List<String> after,
+                        List<String> body, RepositoryId repository) {
+            this(task, title, doneBy, after, null, body, repository);
         }
     }
 
@@ -1318,7 +1337,8 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
                 return Outcome.refused(refused.get());
             }
             TaskDocument task = store.update(edit.task(), new TaskFilePatch.Updates(
-                    edit.title(), null, edit.doneBy(), null, edit.after(), null));
+                    edit.title(), null, edit.doneBy(), null, edit.after(), null, null, null,
+                    edit.priority()));
             if (!edit.repository().equals(current.repository())) {
                 task = store.move(edit.task(), edit.repository());
             }
@@ -1433,6 +1453,13 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
 
     @Override
     public CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status) {
+        return updateStatus(task, actor, status, Optional.empty());
+    }
+
+    @Override
+    public CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status,
+            Optional<TaskPriority> priority) {
+        Objects.requireNonNull(priority, "priority");
         return supply(store -> {
             TaskSnapshot snapshot = scanFresh();
             TaskState state = TaskState.of(snapshot, TaskGraph.of(snapshot, this::slugOf), liveSessions);
@@ -1442,8 +1469,10 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
             }
             // The rules ran on the fresh scan this future just took; the store re-reads under
             // its single-writer lock, so this is what was actually written.
-            return Outcome.committed(store.update(task,
-                    new TaskFilePatch.Updates(null, transition.resulting(), null, null, null, null)));
+            TaskFilePatch.Updates updates = new TaskFilePatch.Updates(
+                    null, transition.resulting(), null, null, null, null)
+                    .withPriority(priority.orElse(null));
+            return Outcome.committed(store.update(task, updates));
         });
     }
 
@@ -1469,6 +1498,20 @@ public final class DelayedTaskService implements TaskToolContext, AutoCloseable 
         return supply(store -> {
             try {
                 return Outcome.committed(store.appendNote(task, note));
+            } catch (IllegalArgumentException e) {
+                return Outcome.refused(e.getMessage());
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Outcome> setPriority(TaskId task, TaskPriority priority) {
+        Objects.requireNonNull(task, "task");
+        Objects.requireNonNull(priority, "priority");
+        return supply(store -> {
+            try {
+                return Outcome.committed(store.update(task,
+                        new TaskFilePatch.Updates(null, null, null, null, null, null, null, null, priority)));
             } catch (IllegalArgumentException e) {
                 return Outcome.refused(e.getMessage());
             }

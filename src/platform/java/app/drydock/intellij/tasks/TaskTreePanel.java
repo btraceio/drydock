@@ -1782,7 +1782,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     public static Optional<app.drydock.tasks.NewTaskPlan> savedTaskPlan(
             Optional<NewDelayedTaskDialog.Result> accepted, Path projectRoot, String projectName) {
         return accepted.map(result -> new app.drydock.tasks.NewTaskPlan(result.title(), result.body(),
-                result.after(), result.doneBy(), projectRoot, projectName));
+                result.after(), result.doneBy(), result.priority(), projectRoot, projectName));
     }
 
     /**

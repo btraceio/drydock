@@ -165,8 +165,8 @@ public final class TaskDialogFlows {
                 indicator.setText("Saving task \"" + result.title() + "\"");
                 try {
                     DelayedTaskService.TaskEdit edit = new DelayedTaskService.TaskEdit(edited,
-                            result.title(), result.doneBy(), result.after(), bodyLines(result),
-                            result.project().id().orElseThrow());
+                            result.title(), result.doneBy(), result.after(), result.priority(),
+                            bodyLines(result), result.project().id().orElseThrow());
                     TaskToolContext.Outcome outcome = plugin.taskService().edit(edit)
                             .get(60, TimeUnit.SECONDS);
                     if (outcome.refused()) {

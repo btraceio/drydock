@@ -26,7 +26,7 @@ Status: decisions confirmed except the items under "Open". Research:
 | D6 | Status changes: Drydock (started, link to session), Session Done dialog (mark done), the agent through Drydock MCP tools, and manual file edits. |
 | D7 | Start in one project = one session. The plan contains all open prerequisites in that project (all levels, dependency order) as work, done prerequisites as context, and direct follow-ups as "out of scope, keep in mind". |
 | D8 | Cross-project start: Drydock splits the open prerequisites into segments (one per project) and orders them in stages (P4). A plan dialog shows the stages and fixes the launch choices (agent, mode, branch, window) of every segment. On confirmation Drydock starts stage 1, all segments in parallel. When a stage is done, Drydock starts the next stage by itself, and finally the target task (P4). Each session stays a normal single-project Drydock session. |
-| D9 | Tasks subnode under each project: open tasks, ready first, then blocked with a "blocked by" hint; age shown, stale ones flagged; done and dropped hidden behind the filter ribbon. |
+| D9 | Tasks subnode under each project: open tasks, ready first, then blocked with a "blocked by" hint; within one state the priority orders — Top through Lowest, unprioritized last; age shown, stale ones flagged; done and dropped hidden behind the filter ribbon. A task's own priority badges its row (the Jira-mirror badge is the fallback); mirroring a task to Jira sends its priority. |
 | D10 | A started task leaves the Tasks list and shows under its session row (one child row per task in the chain). It stays there while the session exists, also when the session is idle or stopped. If the session is removed without Done, the unfinished tasks go back to Tasks, flagged "interrupted", with a link to the last session. |
 | D11 | A blocked task whose prerequisite is in a session shows "blocked by X (in session Y)", with an action to go to that session. |
 | D12 | The target task is the last stage and starts by itself like the others. A task that is not part of a confirmed plan never starts by itself; when it becomes ready, Drydock shows "X is ready" with a one-click Start. |
@@ -35,7 +35,7 @@ Status: decisions confirmed except the items under "Open". Research:
 | D14 | The agent may create tasks through the MCP tools (for example follow-ups it finds). |
 | D16 | Who may close a task: front matter `done_by: agent` or `done_by: human`, default `human`. With `human`, the agent's `task_update(done)` stores `status: review`; the plan does not advance, and a balloon "X awaits your confirmation" offers Confirm (done, plan continues) and Reopen (open, plan halts). Human confirmation = Session Done dialog, Confirm (balloon or tree), or a manual edit. The plan dialog shows a per-task "agent may close" check box and writes changes back to the task files. |
 | D17 | Harness guidance: a short paragraph in the MCP handshake for every session with the task tools, plus a full skill (tools and planning) shipped in the plugin and passed only at launch (P7a). |
-| N1 | Non-goal: no general coordinator. Drydock has exactly one rule: in a plan the user confirmed, "stage done" starts the next stage. Inside a project the harness orders the work (D15). No retries, no priorities, no scheduling of tasks outside a confirmed plan. |
+| N1 | Non-goal: no general coordinator. Drydock has exactly one rule: in a plan the user confirmed, "stage done" starts the next stage. Inside a project the harness orders the work (D15). No retries, no scheduling of tasks outside a confirmed plan. Priorities order the list (D9), they never schedule anything. |
 
 ## Details
 
@@ -46,6 +46,7 @@ Status: decisions confirmed except the items under "Open". Research:
 title: Fix login redirect
 status: open            # open | started | review | done | dropped
 done_by: human          # agent | human (default human)
+priority: High          # Top | Highest | High | Medium | Low | Lowest | Unprioritized
 created: 2026-10-29T10:12:00Z
 after: [api-schema-x81c, auth-lib:token-refresh-a2b0]
 sessions: []            # session ids, appended by Drydock
@@ -54,7 +55,10 @@ Free markdown. [[api-schema-x81c]] links are clickable but create no relation.
 ```
 
 - Only `title` is required. A missing `status` means `open`. A missing
-  `created` uses the file's creation time.
+  `created` uses the file's creation time. A missing `priority` — like an
+  unknown name or the explicit `Unprioritized` — means unprioritized: the
+  seven values are the registered Jira site's priorities, and a name Jira
+  does not know never fails the parse, it only loses its meaning.
 - "Interrupted" is not stored. It is computed: `status: started` and no
   session in `sessions:` exists in the catalog any more.
 - Unknown keys are kept as they are when Drydock rewrites the front matter.

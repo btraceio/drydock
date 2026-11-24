@@ -26,7 +26,7 @@ import java.util.Objects;
  * in that package reference this type by its qualified name.</p>
  */
 public record NewTaskPlan(String title, String body, List<String> after, DoneBy doneBy,
-                          Path projectRoot, String projectName) {
+                          TaskPriority priority, Path projectRoot, String projectName) {
 
     public NewTaskPlan {
         title = title == null ? "" : title.strip();
@@ -36,12 +36,19 @@ public record NewTaskPlan(String title, String body, List<String> after, DoneBy 
         body = body == null ? "" : body;
         after = after == null ? List.of() : List.copyOf(after);
         doneBy = doneBy == null ? DoneBy.HUMAN : doneBy;
+        priority = priority == null ? TaskPriority.UNPRIORITIZED : priority;
         projectRoot = Objects.requireNonNull(projectRoot, "projectRoot")
                 .toAbsolutePath().normalize();
         projectName = Objects.requireNonNull(projectName, "projectName").strip();
         if (projectName.isBlank()) {
             throw new IllegalArgumentException("A saved task needs its project's name");
         }
+    }
+
+    /** The shape before saved tasks carried a priority: unprioritized. */
+    public NewTaskPlan(String title, String body, List<String> after, DoneBy doneBy,
+                       Path projectRoot, String projectName) {
+        this(title, body, after, doneBy, null, projectRoot, projectName);
     }
 
     /** The OK button's label while the save-later box is checked (P5). */

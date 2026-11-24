@@ -22,6 +22,7 @@ import java.util.*;
 import java.util.concurrent.*;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -99,12 +100,19 @@ class TaskToolsTest {
         }
         @Override
         public CompletableFuture<Outcome> create(String title, List<String> after,
-                RepositoryId repository) {
+                RepositoryId repository, Optional<TaskPriority> priority) {
             return CompletableFuture.supplyAsync(() -> mutate(() -> {
-                TaskDocument document = store.create(repository, title, List.of());
+                TaskDocument document = store.create(repository, title, List.of(),
+                        priority == null ? Optional.empty() : priority);
                 return Outcome.committed(after.isEmpty() ? document : store.update(document.id(),
                         new TaskFilePatch.Updates(null, null, null, null, after, null)));
             }), executor);
+        }
+        @Override
+        public CompletableFuture<Outcome> setPriority(TaskId task, TaskPriority priority) {
+            return CompletableFuture.supplyAsync(() -> mutate(() -> Outcome.committed(
+                    store.update(task, new TaskFilePatch.Updates(null, null, null, null,
+                            null, null, null, null, priority)))), executor);
         }
         @Override
         public CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status) {
@@ -332,6 +340,63 @@ class TaskToolsTest {
         assertEquals("Drop is human-only: an agent may not set task '" + assigned.id().text()
                         + "' to dropped",
                 refusalOf("task_update", args("id", assigned.id().text(), "status", "dropped")));
+        assertEquals("Drop is human-only: an agent may not set task '" + assigned.id().text()
+                        + "' to dropped",
+                refusalOf("task_update", args("id", assigned.id().text(), "status", "dropped",
+                        "priority", "Top")));
+        assertTrue(fileText(alpha, assigned.id().text()).contains("status: open"));
+        assertFalse(fileText(alpha, assigned.id().text()).contains("priority:"),
+                "a refused status transition leaves the optional priority untouched");
+    }
+
+    /** A create may name a priority, an update may change it, and an unknown word refuses. */
+    @Test
+    void priorityTravelsThroughCreateAndUpdateAndRefusesUnknownNames() throws Exception {
+        JsonValue created = tools.call(caller, "task_create", args("title", "Urgent fix",
+                "priority", "top"));
+        TaskId id = TaskId.of(textOf(created, "id"));
+        assertEquals(Optional.of(TaskPriority.TOP),
+                TaskFileReader.parse(id, alpha, fileText(alpha, id.text()), null).document().priority(),
+                "the name is matched case-insensitively and stored canonical");
+
+        // task_update writes only this session's assigned tasks, so the change
+        // rides a seeded, assigned task.
+        TaskDocument assigned = seed(alpha, "Reprioritized fix", List.of(), caller.toString());
+        JsonValue updated = tools.call(caller, "task_update",
+                args("id", assigned.id().text(), "priority", "Lowest"));
+        assertEquals("Lowest", textOf(updated, "priority"));
+        assertEquals("open", textOf(updated, "status"), "an omitted status is left unchanged");
+        assertEquals(Optional.of(TaskPriority.LOWEST),
+                TaskFileReader.parse(assigned.id(), alpha, fileText(alpha, assigned.id().text()), null)
+                        .document().priority());
+
+        assertEquals("Argument 'priority' must be one of Top, Highest, High, Medium, Low,"
+                        + " Lowest, Unprioritized; got 'P0'.",
+                refusalOf("task_create", args("title", "T", "priority", "P0")));
+    }
+
+    @Test
+    void statuslessNoteAndCombinedUpdatesOnlyApplySuppliedFields() throws Exception {
+        TaskDocument finished = seed(alpha, "Priority does not reopen a finished task", List.of(), caller.toString());
+        context.updateStatus(finished.id(), Actor.HUMAN, TaskStatus.DONE).join();
+        JsonValue reprioritized = tools.call(caller, "task_update",
+                args("id", finished.id().text(), "priority", "High"));
+        assertEquals("done", textOf(reprioritized, "status"),
+                "a priority-only update must not run the done-to-review status rules");
+        assertEquals("High", textOf(reprioritized, "priority"));
+
+        TaskDocument noteOnly = seed(alpha, "Note without status", List.of(), caller.toString());
+        JsonValue noted = tools.call(caller, "task_update",
+                args("id", noteOnly.id().text(), "note", "Priority investigation complete."));
+        assertEquals("open", textOf(noted, "status"), "a note-only update leaves status unchanged");
+        assertTrue(fileText(alpha, noteOnly.id().text()).contains("Priority investigation complete."));
+
+        TaskDocument combined = seed(alpha, "Combined update", List.of(), caller.toString());
+        JsonValue changed = tools.call(caller, "task_update", args("id", combined.id().text(),
+                "status", "done", "priority", "Top", "note", "Ready for confirmation."));
+        assertEquals("review", textOf(changed, "status"));
+        assertEquals("Top", textOf(changed, "priority"));
+        assertTrue(fileText(alpha, combined.id().text()).contains("Ready for confirmation."));
     }
 
     // 7. A created body and 8. an update note land under '## Session notes'.

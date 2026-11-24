@@ -388,6 +388,57 @@ class TaskFilePatchTest {
         assertEquals(Optional.of(first), parse(TaskFilePatch.newFile(done)).document().doneAt());
     }
 
+    /**
+     * Priority reads, inserts and replaces like every other known key, the
+     * explicit Unprioritized is a real stored value (clearing needs no key
+     * removal), and a new file stores only named priorities.
+     */
+    @Test
+    void priorityIsReadInsertedReplacedAndWrittenByNewFileOnlyWhenNamed() throws Exception {
+        String source = "---\ntitle: T\nowner: jb   # kept\n---\nBody.\n";
+        assertEquals(Optional.empty(), parse(source).document().priority(), "a missing key is unset");
+
+        String inserted = TaskFilePatch.patch(parse(source), source,
+                up(null, null, null, null, null, null).withPriority(TaskPriority.HIGH));
+        assertEquals("---\ntitle: T\nowner: jb   # kept\npriority: High\n---\nBody.\n", inserted);
+        assertEquals(Optional.of(TaskPriority.HIGH), parse(inserted).document().priority());
+
+        String replaced = TaskFilePatch.patch(parse(inserted), inserted,
+                up(null, null, null, null, null, null).withPriority(TaskPriority.TOP));
+        assertEquals(inserted.replace("High", "Top"), replaced,
+                "the existing entry is replaced in place");
+
+        // Clearing is a write of the explicit value, not a key removal: the
+        // patcher never deletes, and Unprioritized sorts with unset anyway.
+        String cleared = TaskFilePatch.patch(parse(replaced), replaced,
+                up(null, null, null, null, null, null).withPriority(TaskPriority.UNPRIORITIZED));
+        assertEquals(Optional.of(TaskPriority.UNPRIORITIZED), parse(cleared).document().priority());
+        // A no-op clear of an already-unprioritized file changes nothing.
+        assertEquals(cleared, TaskFilePatch.patch(parse(cleared), cleared,
+                up(null, null, null, null, null, null).withPriority(TaskPriority.UNPRIORITIZED)));
+
+        assertFalse(TaskFilePatch.newFile(document("T", null, List.of(), "")).contains("priority"),
+                "a task with no priority gets no priority key");
+        TaskDocument named = new TaskDocument(ID, REPO, "T", TaskStatus.OPEN, DoneBy.HUMAN, Optional.empty(),
+                List.of(), List.of(), List.of(), Optional.empty(), Optional.of(TaskPriority.HIGHEST), "", "");
+        assertEquals(Optional.of(TaskPriority.HIGHEST),
+                parse(TaskFilePatch.newFile(named)).document().priority());
+        TaskDocument explicitUnprioritized = new TaskDocument(ID, REPO, "T", TaskStatus.OPEN, DoneBy.HUMAN,
+                Optional.empty(), List.of(), List.of(), List.of(), Optional.empty(),
+                Optional.of(TaskPriority.UNPRIORITIZED), "", "");
+        assertFalse(TaskFilePatch.newFile(explicitUnprioritized).contains("priority"),
+                "a new file never stores the explicit Unprioritized: unset is the same state");
+    }
+
+    @Test
+    void settingUnprioritizedOnAnUnsetTaskDoesNotMaterializeTheKey() throws Exception {
+        String source = "---\ntitle: T\nowner: jb   # preserved\n---\nBody.\n";
+        String unchanged = TaskFilePatch.patch(parse(source), source,
+                up(null, null, null, null, null, null).withPriority(TaskPriority.UNPRIORITIZED));
+        assertEquals(source, unchanged,
+                "unset priority to explicit Unprioritized is a semantic no-op and preserves bytes");
+    }
+
     /** The note extraction is exactly the inverse of what appendNote inserts. */
     @Test
     void noteParagraphsReadBackWhatAppendNoteWrote() throws Exception {

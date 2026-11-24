@@ -32,6 +32,13 @@ import java.util.Optional;
  * store last moved the task to {@link TaskStatus#DONE}. A missing key is
  * empty. The value is not cleared when the task is reopened, so it is
  * meaningful only while the status is {@code done}.</p>
+ *
+ * <p>{@code priority} is the stored {@code priority} name, one of
+ * {@link TaskPriority}'s Jira names. A missing key, an unknown name (another
+ * site's custom priority, a typo) and the explicit {@code Unprioritized} all
+ * parse to the same "no usable priority" state: empty, or
+ * {@link TaskPriority#UNPRIORITIZED} -- both sort below every named priority
+ * and wear no badge.</p>
  */
 public record TaskDocument(
         TaskId id,
@@ -44,6 +51,7 @@ public record TaskDocument(
         List<String> sessions,
         List<String> mirrors,
         Optional<Instant> doneAt,
+        Optional<TaskPriority> priority,
         String rawFrontMatter,
         String rawBody
 ) {
@@ -64,6 +72,15 @@ public record TaskDocument(
         sessions = sessions != null ? List.copyOf(sessions) : List.of();
         mirrors = mirrors != null ? List.copyOf(mirrors) : List.of();
         doneAt = doneAt != null ? doneAt : Optional.empty();
+        priority = priority != null ? priority : Optional.empty();
+    }
+
+    /** The shape before tasks carried a priority: unset. */
+    public TaskDocument(TaskId id, RepositoryId repository, String title, TaskStatus status, DoneBy doneBy,
+                        Optional<Instant> created, List<String> after, List<String> sessions,
+                        List<String> mirrors, Optional<Instant> doneAt, String rawFrontMatter, String rawBody) {
+        this(id, repository, title, status, doneBy, created, after, sessions, mirrors, doneAt,
+                Optional.empty(), rawFrontMatter, rawBody);
     }
 
     /** The shape before tasks recorded when they were done: no {@code done_at}. */
@@ -89,6 +106,12 @@ public record TaskDocument(
      */
     public TaskDocument withTitle(String newTitle) {
         return new TaskDocument(id, repository, newTitle, status, doneBy, created, after, sessions, mirrors,
-                doneAt, rawFrontMatter, rawBody);
+                doneAt, priority, rawFrontMatter, rawBody);
+    }
+
+    /** The usable priority: an unset one, an unknown one and the explicit
+     * {@code Unprioritized} all answer empty. */
+    public Optional<TaskPriority> usablePriority() {
+        return priority.filter(p -> p != TaskPriority.UNPRIORITIZED);
     }
 }

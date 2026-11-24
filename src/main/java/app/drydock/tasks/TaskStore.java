@@ -122,16 +122,29 @@ public final class TaskStore implements AutoCloseable {
      */
     public TaskDocument create(RepositoryId repository, String title, List<String> sessions)
             throws TaskStoreException {
+        return create(repository, title, sessions, Optional.empty());
+    }
+
+    /**
+     * As {@link #create(RepositoryId, String, List)}, with the task's
+     * priority stored in the new file's front matter. The explicit
+     * {@code Unprioritized} is never stored: unset is the same state.
+     */
+    public TaskDocument create(RepositoryId repository, String title, List<String> sessions,
+            Optional<TaskPriority> priority) throws TaskStoreException {
         Objects.requireNonNull(repository, "repository");
         Objects.requireNonNull(sessions, "sessions");
+        Objects.requireNonNull(priority, "priority");
         if (title == null || title.isBlank()) {
             throw new IllegalArgumentException("Task title is required (P1)");
         }
         List<String> ownSessions = List.copyOf(sessions);
+        Optional<TaskPriority> stored = priority.filter(p -> p != TaskPriority.UNPRIORITIZED);
         Committed committed = write(() -> {
             TaskId id = freeId(title, TaskFiles.scan(root));
             TaskDocument document = new TaskDocument(id, repository, title, TaskStatus.OPEN, DoneBy.HUMAN,
-                    Optional.of(Instant.now()), List.of(), ownSessions, "", "");
+                    Optional.of(Instant.now()), List.of(), ownSessions, List.of(), Optional.empty(), stored,
+                    "", "");
             Path target = root.resolve(repository.toString()).resolve(id.text() + ".md");
             if (guard.hasUnsavedContent(target)) {
                 throw new TaskStoreException(target + " has unsaved changes in the editor; "

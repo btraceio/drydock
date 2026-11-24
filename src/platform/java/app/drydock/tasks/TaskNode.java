@@ -43,11 +43,15 @@ public sealed interface TaskNode {
      * repository must not render a made-up name.
      * {@code body} is the document's raw body (the description with its
      * session notes), carried verbatim for the row's hover hint; blank when
-     * the task has none.
+     * the task has none. {@code priority} is the document's stored priority,
+     * carried for the row's badge and the priority-first order inside every
+     * presentation bucket; empty when unset, unknown or explicitly
+     * Unprioritized.
      */
     record DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
             Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
-            String project, Optional<OpenPullRequest> pullRequest, String body)
+            String project, Optional<OpenPullRequest> pullRequest, String body,
+            Optional<TaskPriority> priority)
             implements TaskNode {
 
         public DelayedTaskRow {
@@ -60,6 +64,15 @@ public sealed interface TaskNode {
             project = project != null && !project.isBlank() ? project : null;
             pullRequest = Objects.requireNonNullElse(pullRequest, Optional.empty());
             body = Objects.requireNonNull(body, "body");
+            priority = Objects.requireNonNullElse(priority, Optional.empty());
+        }
+
+        /** The shape before rows carried a priority: unset. */
+        public DelayedTaskRow(TaskState.TaskView view, String title, RepositoryId repository,
+                Optional<Instant> created, boolean stale, List<String> storedSessions, List<String> mirrors,
+                String project, Optional<OpenPullRequest> pullRequest, String body) {
+            this(view, title, repository, created, stale, storedSessions, mirrors, project, pullRequest, body,
+                    Optional.empty());
         }
 
         /** The shape before tasks could be mirrored: no mirror. */
@@ -88,7 +101,12 @@ public sealed interface TaskNode {
         /** This row with {@code pullRequest} carried; everything else unchanged. Pure. */
         public DelayedTaskRow withPullRequest(OpenPullRequest pullRequest) {
             return new DelayedTaskRow(view, title, repository, created, stale, storedSessions, mirrors, project,
-                    Optional.of(pullRequest), body);
+                    Optional.of(pullRequest), body, priority);
+        }
+
+        /** The carried priority's sort rank: unset (or Unprioritized) last. */
+        public int priorityRank() {
+            return priority.map(TaskPriority::rank).orElse(TaskPriority.UNPRIORITIZED.rank());
         }
 
         /**

@@ -1103,7 +1103,7 @@ final class NewTaskDialog extends DialogWrapper {
             // HUMAN policy.
             acceptedResult = NewTaskLauncherResult.savedTask(
                     new app.drydock.tasks.NewTaskPlan(taskName(), instructions.getText(), List.of(),
-                            DoneBy.HUMAN, inputs.project().root(), inputs.repoName()));
+                            DoneBy.HUMAN, null, inputs.project().root(), inputs.repoName()));
             close(OK_EXIT_CODE);
             return;
         }

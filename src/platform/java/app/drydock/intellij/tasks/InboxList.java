@@ -837,14 +837,16 @@ final class InboxList extends JBList<InboxList.Entry> {
                     if (!selected && needs) {
                         background = NEEDS_BACKGROUND;
                     }
-                    // The Jira priority badge rides a task row's own icon when one
-                    // of its mirrors names a Jira ticket with a known priority.
-                    Optional<TaskTreeRenderer.PriorityKind> jiraPriority =
-                            item instanceof TaskItem task
-                                    ? TaskTreeRenderer.jiraMirrorPriority(task.row().mirrors(),
-                                            jiraPriorities.get())
-                                    : Optional.empty();
-                    rowTitle.setIcon(TaskTreeRenderer.withPriorityBadge(icon(item), jiraPriority));
+                    // The priority badge rides a task row's own icon: the task's
+                    // stored priority when it names one, else the first Jira mirror's
+                    // ticket priority when a shown group listing has answered. A task
+                    // with neither wears no badge.
+                    Optional<TaskTreeRenderer.PriorityKind> rowPriority = item instanceof TaskItem task
+                            ? task.row().priority().isPresent()
+                                    ? task.row().priority().flatMap(TaskTreeRenderer::priorityKind)
+                                    : TaskTreeRenderer.jiraMirrorPriority(task.row().mirrors(), jiraPriorities.get())
+                            : Optional.empty();
+                    rowTitle.setIcon(TaskTreeRenderer.withPriorityBadge(icon(item), rowPriority));
                     rowTitle.setText(item.title());
                     rowTitle.setForeground(foreground);
                     Optional<PullRequestLabel> pr = pullRequestLabel(item);

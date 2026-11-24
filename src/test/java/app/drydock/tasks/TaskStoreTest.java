@@ -69,6 +69,23 @@ class TaskStoreTest {
         return "---\ntitle: \"" + title + "\"\nstatus: open\ndone_by: human\nafter: []\nsessions: []\n---\nBody.\n";
     }
 
+    /** A create with a priority stores it named; Unprioritized stores as unset. */
+    @Test
+    void createStoresNamedPriorityAndTreatsUnprioritizedAsUnset() throws Exception {
+        TaskStore store = store();
+        RepositoryId repo = RepositoryId.of(REPO_A);
+        TaskDocument named = store.create(repo, "Prioritized work", List.of(), Optional.of(TaskPriority.HIGH));
+        assertEquals(Optional.of(TaskPriority.HIGH), parse(REPO_A, named.id()).priority());
+        assertTrue(readTask(REPO_A, named.id().text()).contains("priority: High\n"),
+                "the front matter carries the Jira name verbatim");
+
+        TaskDocument unprioritized = store.create(repo, "Unprioritized work", List.of(),
+                Optional.of(TaskPriority.UNPRIORITIZED));
+        assertEquals(Optional.empty(), parse(REPO_A, unprioritized.id()).priority());
+        assertFalse(readTask(REPO_A, unprioritized.id().text()).contains("priority"),
+                "the canonical new file never stores the explicit Unprioritized");
+    }
+
     @Test
     void movingToDoneStampsDoneAtAndOtherUpdatesLeaveIt() throws Exception {
         writeTask(REPO_A, "stamp-task", validTask("Stamp task"));

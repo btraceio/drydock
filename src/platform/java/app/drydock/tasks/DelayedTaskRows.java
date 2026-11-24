@@ -242,20 +242,25 @@ public final class DelayedTaskRows {
             String project = projectSlugs.apply(document.repository());
             out.add(new TaskNode.DelayedTaskRow(view, document.title(), document.repository(),
                     document.created(), stale, document.sessions(), document.mirrors(), project, Optional.empty(),
-                    document.rawBody()));
+                    document.rawBody(), document.priority()));
         }
         return out;
     }
 
     /**
      * D9's ready-first order: ready, blocked, review, interrupted,
-     * started, terminal; ties break by task id, so two rows with equal rank
-     * always come out in the same deterministic order (and the sort itself
-     * is stable, so rows never swap between derivations).
+     * started, terminal. Within one bucket the priority decides -- highest
+     * urgency first, Top through Lowest, unprioritized tasks last -- so a
+     * human's P0 sits at the top of its bucket whatever its age. Ties break
+     * by task id, so two rows with equal rank always come out in the same
+     * deterministic order (and the sort itself is stable, so rows never swap
+     * between derivations).
      */
     public static List<TaskNode.DelayedTaskRow> sorted(Collection<TaskNode.DelayedTaskRow> rows) {
         List<TaskNode.DelayedTaskRow> copy = new ArrayList<>(rows);
-        copy.sort(Comparator.comparingInt(DelayedTaskRows::rank).thenComparing(row -> row.id().text()));
+        copy.sort(Comparator.comparingInt(DelayedTaskRows::rank)
+                .thenComparingInt(TaskNode.DelayedTaskRow::priorityRank)
+                .thenComparing(row -> row.id().text()));
         return copy;
     }
 
