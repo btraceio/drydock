@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskSnapshot;
 import app.drydock.tasks.TaskState;
 import app.drydock.tasks.TaskStatus;
@@ -30,10 +31,11 @@ import static app.drydock.mcp.TaskToolCodec.afterArg;
 import static app.drydock.mcp.TaskToolCodec.descriptor;
 import static app.drydock.mcp.TaskToolCodec.idArg;
 import static app.drydock.mcp.TaskToolCodec.paragraphArg;
+import static app.drydock.mcp.TaskToolCodec.priorityArg;
 import static app.drydock.mcp.TaskToolCodec.projectArg;
 import static app.drydock.mcp.TaskToolCodec.schemaString;
 import static app.drydock.mcp.TaskToolCodec.schemaStringArray;
-import static app.drydock.mcp.TaskToolCodec.statusArg;
+import static app.drydock.mcp.TaskToolCodec.optionalStatusArg;
 import static app.drydock.mcp.TaskToolCodec.titleArg;
 
 /**
@@ -89,21 +91,23 @@ public final class TaskTools {
                         JsonObject.empty().put("project", schemaString("Show only this project's"
                                 + " tasks; omit for every registered repository's."))),
                 descriptor("task_update",
-                        "Updates one task assigned to this session: its status, and optionally a"
-                                + " session note. Only status changes -- done_by, relations and other"
-                                + " body bytes never change through this tool, and dropped is"
-                                + " human-only. done on a done_by: human task stores review and"
-                                + " returns it; a human confirms.",
+                        "Updates one task assigned to this session. Provide one or more of status,"
+                                + " priority, or a session note. Status and priority only -- done_by,"
+                                + " relations and other body bytes never change through this tool,"
+                                + " and dropped is human-only. done on a done_by: human task stores"
+                                + " review and returns it; a human confirms.",
                         JsonObject.empty()
                                 .put("id", schemaString("Task id to update; must be assigned to"
                                         + " this session -- other tasks can be read with task_get"
                                         + " but not changed."))
-                                .put("status", schemaString("New status: open, started, review"
-                                        + " or done."))
+                                .put("status", schemaString("Optional new status: open, started,"
+                                        + " review or done."))
+                                .put("priority", schemaString("New priority: one of Top, Highest,"
+                                        + " High, Medium, Low, Lowest, Unprioritized."))
                                 .put("note", schemaString("One-paragraph session note appended"
                                         + " under '## Session notes', at most " + MAX_PARAGRAPH_CHARS
                                         + " characters.")),
-                        "id", "status"),
+                        "id"),
                 descriptor("task_create",
                         "Creates a task. done_by always defaults to human -- prose cannot grant"
                                 + " agent-close -- so this session's own done reports land in"
@@ -115,6 +119,9 @@ public final class TaskTools {
                                 .put("body", schemaString("One-paragraph description, at most "
                                         + MAX_PARAGRAPH_CHARS + " characters, stored as the task's"
                                         + " first session note."))
+                                .put("priority", schemaString("Task priority: one of Top, Highest,"
+                                        + " High, Medium, Low, Lowest, Unprioritized; omitted is"
+                                        + " unprioritized."))
                                 .put("after", schemaStringArray("Prerequisite references: bare task"
                                         + " ids or '<project>:<id>', at most " + MAX_AFTER_REFS
                                         + " entries. Each must name an existing task; an"
@@ -211,6 +218,9 @@ public final class TaskTools {
                 .put("created", document.created()
                         .<JsonValue>map(instant -> new JsonString(instant.toString()))
                         .orElse(JsonNull.INSTANCE))
+                .put("priority", document.priority()
+                        .<JsonValue>map(priority -> new JsonString(priority.storedName()))
+                        .orElse(JsonNull.INSTANCE))
                 .put("after", new JsonArray(document.after().stream()
                         .map(text -> (JsonValue) new JsonString(text)).toList()))
                 .put("sessions", new JsonArray(document.sessions().stream()
@@ -229,32 +239,52 @@ public final class TaskTools {
 
     private JsonValue taskUpdate(ManagedSessionId caller, JsonObject args) throws McpToolException {
         TaskId id = idArg(args);
-        TaskStatus status = statusArg(args);
+        Optional<TaskStatus> status = optionalStatusArg(args);
+        Optional<TaskPriority> priority = priorityArg(args);
         Optional<String> note = paragraphArg(args, "note");
+        if (status.isEmpty() && priority.isEmpty() && note.isEmpty()) {
+            throw new McpToolException("Argument 'task_update' must include at least one of status,"
+                    + " priority or note.");
+        }
         if (!join(context.assignedTaskIds(caller), "reading this session's assigned tasks")
                 .contains(id)) {
             throw new McpToolException("Task '" + id.text() + "' is not assigned to this session;"
                     + " task_update changes only the tasks whose sessions list carries this"
                     + " session's id -- read any task with task_get instead.");
         }
-        TaskToolContext.Outcome updated = join(
-                context.updateStatus(id, TaskState.Actor.AGENT, status), "updating the task");
-        if (updated.refused()) {
-            throw new McpToolException(updated.refusal());
+        TaskDocument committed = null;
+        if (status.isPresent()) {
+            TaskToolContext.Outcome updated = join(context.updateStatus(
+                    id, TaskState.Actor.AGENT, status.get(), priority), "updating the task");
+            if (updated.refused()) {
+                throw new McpToolException(updated.refusal());
+            }
+            committed = updated.document();
+        } else if (priority.isPresent()) {
+            TaskToolContext.Outcome prioritized = join(context.setPriority(id, priority.get()),
+                    "setting the priority");
+            if (prioritized.refused()) {
+                throw new McpToolException(prioritized.refusal());
+            }
+            committed = prioritized.document();
         }
-        TaskDocument committed = updated.document();
         if (note.isPresent()) {
             TaskToolContext.Outcome noted = join(context.appendNote(id, note.get()),
                     "appending the note");
             if (noted.refused()) {
-                throw new McpToolException("The status was committed as '"
-                        + committed.status().storedName() + "' but the note could not be stored: "
+                String committedStatus = committed == null ? "The task was otherwise unchanged"
+                        : "The status was committed as '" + committed.status().storedName() + "'";
+                throw new McpToolException(committedStatus + " but the note could not be stored: "
                         + noted.refusal());
             }
+            committed = noted.document();
         }
         return JsonObject.empty()
                 .put("id", new JsonString(id.text()))
                 .put("status", new JsonString(committed.status().storedName()))
+                .put("priority", committed.priority()
+                        .<JsonValue>map(p -> new JsonString(p.storedName()))
+                        .orElse(JsonNull.INSTANCE))
                 .put("awaitingHumanConfirmation",
                         new JsonBoolean(committed.status() == TaskStatus.REVIEW));
     }
@@ -264,6 +294,7 @@ public final class TaskTools {
     private JsonValue taskCreate(ManagedSessionId caller, JsonObject args) throws McpToolException {
         String title = titleArg(args);
         Optional<String> body = paragraphArg(args, "body");
+        Optional<TaskPriority> priority = priorityArg(args);
         List<String> after = afterArg(args);
         RepositoryId repository;
         Optional<String> project = projectArg(args);
@@ -277,7 +308,7 @@ public final class TaskTools {
             }
             repository = resolved.get();
         }
-        TaskToolContext.Outcome created = join(context.create(title, after, repository),
+        TaskToolContext.Outcome created = join(context.create(title, after, repository, priority),
                 "creating the task");
         if (created.refused()) {
             throw new McpToolException(created.refusal());

@@ -88,9 +88,16 @@ class McpToolRouterTaskTest {
         @Override public CompletableFuture<Optional<TaskToolContext.ProjectInfo>> projectOf(RepositoryId repo) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
-        @Override public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repo) {
+        @Override public CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repo,
+                Optional<TaskPriority> priority) {
             return CompletableFuture.completedFuture(
-                    mutate(() -> Outcome.committed(store.create(repo, title, List.of()))));
+                    mutate(() -> Outcome.committed(store.create(repo, title, List.of(),
+                            priority == null ? Optional.empty() : priority))));
+        }
+        @Override public CompletableFuture<Outcome> setPriority(TaskId task, TaskPriority priority) {
+            return CompletableFuture.completedFuture(mutate(() -> Outcome.committed(
+                    store.update(task, new TaskFilePatch.Updates(null, null, null, null,
+                            null, null, null, null, priority)))));
         }
         @Override public CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status) {
             TaskSnapshot s = scan();

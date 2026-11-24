@@ -4,6 +4,7 @@ import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.RepositoryId;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskSnapshot;
 import app.drydock.tasks.TaskState.Actor;
 import app.drydock.tasks.TaskStatus;
@@ -106,9 +107,12 @@ public interface TaskToolContext {
     /**
      * Creates one task: done_by always human (an agent cannot grant itself
      * agent-close, D16), the given prerequisite reference texts as after,
-     * and no sessions yet (assignment is a launch, not a create).
+     * the given priority in the new file's front matter, and no sessions
+     * yet (assignment is a launch, not a create). The explicit
+     * {@code Unprioritized} stores the same as unset.
      */
-    CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repository);
+    CompletableFuture<Outcome> create(String title, List<String> after, RepositoryId repository,
+            Optional<TaskPriority> priority);
 
     /**
      * Applies one status change under the state's actor rules (T07): an
@@ -118,8 +122,44 @@ public interface TaskToolContext {
      */
     CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status);
 
+    /**
+     * Applies a status change and optional priority together. Implementations with a
+     * single-writer store should persist both fields in one mutation. This default
+     * preserves compatibility for contexts that only implement the original status
+     * operation; production contexts override it to avoid a second file write.
+     */
+    default CompletableFuture<Outcome> updateStatus(TaskId task, Actor actor, TaskStatus status,
+            Optional<TaskPriority> priority) {
+        Objects.requireNonNull(priority, "priority");
+        CompletableFuture<Outcome> updated = updateStatus(task, actor, status);
+        if (priority.isEmpty()) {
+            return updated;
+        }
+        return updated.thenCompose(statusOutcome -> {
+            if (statusOutcome.refused()) {
+                return CompletableFuture.completedFuture(statusOutcome);
+            }
+            return setPriority(task, priority.get()).thenApply(priorityOutcome -> {
+                if (priorityOutcome.refused()) {
+                    return Outcome.refused("The status was committed as '"
+                            + statusOutcome.document().status().storedName()
+                            + "' but the priority could not be stored: " + priorityOutcome.refusal());
+                }
+                return priorityOutcome;
+            });
+        });
+    }
+
     /** Appends one session note under '## Session notes', touching no other body byte (P7). */
     CompletableFuture<Outcome> appendNote(TaskId task, String note);
+
+    /**
+     * Sets one task's priority, replacing whatever the front matter stored
+     * (a named value, an unknown one, or nothing). Unlike a status change
+     * this needs no state rule -- priority touches no status, no actor
+     * policy -- so the committed document carries the stored priority.
+     */
+    CompletableFuture<Outcome> setPriority(TaskId task, TaskPriority priority);
 
     /**
      * Claims one claimable follow-up (S4 of docs/StackedPrExecution.md) for

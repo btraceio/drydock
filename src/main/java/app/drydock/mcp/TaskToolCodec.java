@@ -1,6 +1,7 @@
 package app.drydock.mcp;
 
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskStatus;
 import app.drydock.state.json.JsonParseException;
 import app.drydock.state.json.JsonParser;
@@ -121,15 +122,34 @@ final class TaskToolCodec {
         }
     }
 
-    /** A required status, one of the five stored words, refused concretely otherwise. */
-    static TaskStatus statusArg(JsonObject args) throws McpToolException {
-        String text = requiredStringArg(args, "status");
+    /** An optional status, one of the five stored words, refused concretely otherwise. */
+    static Optional<TaskStatus> optionalStatusArg(JsonObject args) throws McpToolException {
+        Optional<String> value = optionalStringArg(args, "status");
+        if (value.isEmpty()) {
+            return Optional.empty();
+        }
+        String text = value.get();
         try {
-            return TaskStatus.fromStored(text);
+            return Optional.of(TaskStatus.fromStored(text));
         } catch (IllegalArgumentException e) {
             throw new McpToolException("Argument 'status' must be one of open, started, review,"
                     + " done or dropped; got '" + text + "'.");
         }
+    }
+
+    /**
+     * An optional priority: one of the seven Jira priority names, matched
+     * case-insensitively (hand-written calls do not agree on case); any
+     * other word is refused with the names that exist, never coerced.
+     */
+    static Optional<TaskPriority> priorityArg(JsonObject args) throws McpToolException {
+        Optional<String> value = optionalStringArg(args, "priority");
+        if (value.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(TaskPriority.fromKnown(value.get()).orElseThrow(() ->
+                new McpToolException("Argument 'priority' must be one of Top, Highest, High,"
+                        + " Medium, Low, Lowest, Unprioritized; got '" + value.get() + "'.")));
     }
 
     /**
