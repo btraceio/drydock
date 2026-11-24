@@ -1128,12 +1128,20 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // guard.
         tree.addTreeExpansionListener(expansions);
 
-        // The session this window's host shows selects its row.
+        // The shown session selects its row; a mere pane focus selects too,
+        // but the Projects view has no session rows to select.
         project.getMessageBus().connect(this).subscribe(SessionHostListener.TOPIC,
                 new SessionHostListener() {
                     @Override
                     public void sessionSelected(ManagedSessionId sessionId) {
                         consoleSelected(sessionId);
+                    }
+
+                    @Override
+                    public void sessionFocused(ManagedSessionId sessionId) {
+                        if (!browsing) {
+                            selectSessionRow(sessionId);
+                        }
                     }
                 });
 

@@ -134,6 +134,11 @@ final class SessionPane {
         return root;
     }
 
+    /** The session this pane presents. */
+    ManagedSessionId sessionId() {
+        return sessionId;
+    }
+
     AgentConsoleStrip strip() {
         return strip;
     }

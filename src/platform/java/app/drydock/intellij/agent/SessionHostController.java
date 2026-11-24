@@ -47,11 +47,13 @@ import java.util.function.Supplier;
  * identity is the only thing that writes {@link SessionHostState} and
  * publishes {@link SessionHostListener#sessionSelected}; re-activating the
  * current session, hold, close, invalidation and availability changes do
- * neither. Previous/current are data, never a target by themselves. The one
- * exception in spirit is {@link #sessionDone}: a Done flow that emptied the
- * shown slot picks the next remaining catalog session and shows it through
- * {@link #show}, so the committed identity and event follow what is now on
- * screen.</p>
+ * neither. Every accepted {@link #focus} publishes
+ * {@link SessionHostListener#sessionFocused}; when the identity changes,
+ * {@link SessionHostListener#sessionSelected} is published as well. Previous/current are data,
+ * never a target by themselves. The one exception in spirit is
+ * {@link #sessionDone}: a Done flow that emptied the shown slot picks the
+ * next remaining catalog session and shows it through {@link #show}, so the
+ * committed identity and event follow what is now on screen.</p>
  *
  * <p><b>Adoption.</b> Construction restores the remembered id into primary
  * through {@link SessionHostModel#restorePrimary}: passive, with no intent,
@@ -134,6 +136,7 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     private final Project project;
     private final SessionHostState state;
     private final Consumer<ManagedSessionId> selectionPublisher;
+    private final Consumer<ManagedSessionId> focusPublisher;
     private final Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders;
     /** The catalog's live session ids, in catalog order; the Done advance picks from it. */
     private final Supplier<List<ManagedSessionId>> remainingSessions;
@@ -184,11 +187,21 @@ public final class SessionHostController implements Disposable, SessionPane.Host
     SessionHostController(Project project, SessionHostState state, Consumer<ManagedSessionId> selectionPublisher,
                           Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders,
                           Supplier<List<ManagedSessionId>> remainingSessions) {
+        this(project, state, selectionPublisher, loaders, remainingSessions,
+                id -> project.getMessageBus().syncPublisher(SessionHostListener.TOPIC).sessionFocused(id));
+    }
+
+    /** The loader, remaining-session and focus-publisher factories are resolved by the caller. */
+    SessionHostController(Project project, SessionHostState state, Consumer<ManagedSessionId> selectionPublisher,
+                          Function<Consumer<SessionFactsLoader.Result>, SessionFactsLoader> loaders,
+                          Supplier<List<ManagedSessionId>> remainingSessions,
+                          Consumer<ManagedSessionId> focusPublisher) {
         this.project = Objects.requireNonNull(project, "project");
         this.state = Objects.requireNonNull(state, "state");
         this.selectionPublisher = Objects.requireNonNull(selectionPublisher, "selectionPublisher");
         this.loaders = Objects.requireNonNull(loaders, "loaders");
         this.remainingSessions = Objects.requireNonNull(remainingSessions, "remainingSessions");
+        this.focusPublisher = Objects.requireNonNull(focusPublisher, "focusPublisher");
         state.selectedSession().ifPresent(model::restorePrimary);
         this.layout = project();
         ageTicker.setRepeats(true);
@@ -480,7 +493,13 @@ public final class SessionHostController implements Disposable, SessionPane.Host
             return request(Outcome.UNAVAILABLE);
         }
         model.focusSlot(slot);
-        return presented(request(slot == Slot.HELD ? Outcome.FOCUSED_HELD : Outcome.SHOWN_IN_PRIMARY));
+        Outcome outcome = presented(request(slot == Slot.HELD ? Outcome.FOCUSED_HELD : Outcome.SHOWN_IN_PRIMARY));
+        if (outcome != Outcome.UNAVAILABLE) {
+            // Announced on every accepted focus, identity change or not: a
+            // changed identity already published sessionSelected in advance().
+            focusPublisher.accept(id);
+        }
+        return outcome;
     }
 
     /** The previous-session action; an unavailable or absent previous changes nothing. */
