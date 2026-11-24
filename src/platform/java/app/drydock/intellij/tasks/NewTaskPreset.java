@@ -27,6 +27,13 @@ import java.util.Optional;
  * harness dispatches subagents (see {@code NewTaskDialog}). Presets without
  * a mapping get no tier rules and no tier pickers.</p>
  *
+ * <p>{@code identity} carries the issue-invocation's ticket identity (the
+ * header line and URL, as {@code triageIdentity} builds it): it never enters
+ * the editable instructions, so a project workflow (a skill) can replace the
+ * whole methodology without losing which ticket the invocation serves. The
+ * launch composes it back in through {@link #launchInstructions(String)},
+ * after the task separator, exactly like the batch triage prompt.</p>
+ *
  * <p>{@code composed} carries the single-project start's plan seed (T31a):
  * when present, the dialog seeds its instructions with the composed segment
  * prompt for the SELECTED harness and recomposes on a harness switch while
@@ -34,7 +41,8 @@ import java.util.Optional;
  * every switch). The preset itself stays data: the composition is
  * {@link #composedInstructions(AgentKind, StartPlan, StartPlan.Segment)}.</p>
  */
-public record NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
+public record NewTaskPreset(String name, Optional<String> instructions, Optional<String> identity,
+                            Optional<SessionMode> fixedMode,
                             Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
                             Optional<String> tierRoles, Optional<Composed> composed,
                             Optional<PullRequestTarget> targetPullRequest,
@@ -51,6 +59,7 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
     public NewTaskPreset {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(instructions, "instructions");
+        Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(fixedMode, "fixedMode");
         Objects.requireNonNull(fixedWorkIn, "fixedWorkIn");
         Objects.requireNonNull(openIn, "openIn");
@@ -65,8 +74,8 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
                          Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn,
                          Optional<String> tierRoles, Optional<Composed> composed,
                          Optional<PullRequestTarget> targetPullRequest) {
-        this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, tierRoles, composed,
-                targetPullRequest,
+        this(name, instructions, Optional.empty(), fixedMode, fixedWorkIn, instructionsRequired, openIn,
+                tierRoles, composed, targetPullRequest,
                 composed.isPresent() ? Optional.empty() : Optional.of(WorkflowTarget.FREE_FORM_PRE_PROMPT));
     }
 
@@ -78,7 +87,7 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
     }
 
     NewTaskPreset withPullRequest(OpenPullRequest pr) {
-        return new NewTaskPreset(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn,
+        return new NewTaskPreset(name, instructions, identity, fixedMode, fixedWorkIn, instructionsRequired, openIn,
                 tierRoles, composed, pr.url().map(PullRequestTarget::fromUrl), workflowTarget);
     }
 
@@ -91,6 +100,20 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
     NewTaskPreset(String name, Optional<String> instructions, Optional<SessionMode> fixedMode,
                   Optional<WorkIn> fixedWorkIn, boolean instructionsRequired, OpenIn openIn) {
         this(name, instructions, fixedMode, fixedWorkIn, instructionsRequired, openIn, Optional.empty());
+    }
+
+    /**
+     * The task half the launch sends: for an issue invocation the ticket
+     * identity first, then the methodology (the editor's text, which may be
+     * the built-in steps, a project workflow's prompt, or a user edit); for
+     * every other preset the text unchanged.
+     */
+    public String launchInstructions(String methodology) {
+        if (identity.isEmpty()) {
+            return methodology;
+        }
+        String id = identity.get().strip();
+        return methodology == null || methodology.isBlank() ? id : id + "\n\n" + methodology.strip();
     }
 
     static NewTaskPreset empty() {
@@ -241,16 +264,17 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
     static NewTaskPreset implement(OpenIssue issue) {
         String reference = "#" + issue.number();
         String name = reference + " " + issue.title();
-        StringBuilder prompt = new StringBuilder("Implement GitHub issue ")
+        StringBuilder identity = new StringBuilder("Implement GitHub issue ")
                 .append(reference).append(": ").append(issue.title());
-        issue.url().ifPresent(url -> prompt.append("\n\n").append(url));
-        prompt.append("\n\n").append(WORKFLOW_STEPS)
-                .append(GITHUB_CLOSING_STEP.formatted(reference))
-                .append("\n").append(QUALITY_GATES)
-                .append("\n").append("Definition of done:\n")
-                .append(DONE_COMMON)
-                .append(GITHUB_DONE_PR);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
+        issue.url().ifPresent(url -> identity.append("\n\n").append(url));
+        String methodology = WORKFLOW_STEPS
+                + GITHUB_CLOSING_STEP.formatted(reference)
+                + "\n" + QUALITY_GATES
+                + "\n" + "Definition of done:\n"
+                + DONE_COMMON
+                + GITHUB_DONE_PR;
+        return new NewTaskPreset(name, Optional.of(methodology), Optional.of(identity.toString()),
+                Optional.of(SessionMode.WRITES),
                 Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES), Optional.empty(),
                 Optional.empty(), Optional.of(WorkflowTarget.ISSUE_IMPLEMENT));
     }
@@ -269,7 +293,7 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
         pullRequest.url().ifPresent(url -> prompt.append("\n\n").append(url));
         prompt.append(RESOLVE_CONFLICTS_STEPS.formatted(pullRequest.baseRefName(), pullRequest.headRefName()));
         return new NewTaskPreset("Resolve conflicts " + reference + " " + pullRequest.title(),
-                Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES), Optional.empty(), true,
+                Optional.of(prompt.toString()), Optional.empty(), Optional.of(SessionMode.WRITES), Optional.empty(), true,
                 OpenIn.THIS_WINDOW, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
@@ -306,35 +330,31 @@ public record NewTaskPreset(String name, Optional<String> instructions, Optional
     static NewTaskPreset triage(OpenIssue issue) {
         String reference = "#" + issue.number();
         String name = "Triage " + reference + " " + issue.title();
-        StringBuilder prompt = new StringBuilder("Triage GitHub issue ")
-                .append(reference).append(": ").append(issue.title());
-        issue.url().ifPresent(url -> prompt.append("\n\n").append(url));
-        prompt.append(TRIAGE_STEPS);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.empty(),
+        return new NewTaskPreset(name, Optional.of(TRIAGE_STEPS.strip()),
+                Optional.of(triageIdentity(issue)), Optional.empty(),
                 Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES),
                 Optional.empty(), Optional.empty(), Optional.of(WorkflowTarget.ISSUE_TRIAGE));
     }
 
     static NewTaskPreset implement(JiraIssue issue) {
         String name = issue.key() + " " + issue.summary();
-        StringBuilder prompt = new StringBuilder("Implement Jira issue ")
-                .append(issue.key()).append(": ").append(issue.summary())
-                .append("\n\n").append(issue.url())
-                .append("\n\n").append(WORKFLOW_STEPS)
-                .append("\n").append(QUALITY_GATES)
-                .append("\n").append("Definition of done:\n")
-                .append(DONE_COMMON)
-                .append(JIRA_DONE_PR);
-        return new NewTaskPreset(name, Optional.of(prompt.toString()), Optional.of(SessionMode.WRITES),
+        String identity = "Implement Jira issue " + issue.key() + ": " + issue.summary()
+                + "\n\n" + issue.url();
+        String methodology = WORKFLOW_STEPS
+                + "\n" + QUALITY_GATES
+                + "\n" + "Definition of done:\n"
+                + DONE_COMMON
+                + JIRA_DONE_PR;
+        return new NewTaskPreset(name, Optional.of(methodology), Optional.of(identity),
+                Optional.of(SessionMode.WRITES),
                 Optional.empty(), true, OpenIn.THIS_WINDOW, Optional.of(IMPLEMENT_TIER_ROLES), Optional.empty(),
                 Optional.empty(), Optional.of(WorkflowTarget.ISSUE_IMPLEMENT));
     }
 
     static NewTaskPreset triage(JiraIssue issue) {
         String name = "Triage " + issue.key() + " " + issue.summary();
-        String prompt = "Triage Jira issue " + issue.key() + ": " + issue.summary()
-                + "\n\n" + issue.url() + TRIAGE_STEPS;
-        return new NewTaskPreset(name, Optional.of(prompt), Optional.empty(),
+        return new NewTaskPreset(name, Optional.of(TRIAGE_STEPS.strip()),
+                Optional.of(triageIdentity(issue)), Optional.empty(),
                 Optional.of(WorkIn.MAIN_CHECKOUT), true, OpenIn.THIS_WINDOW, Optional.of(TRIAGE_TIER_ROLES),
                 Optional.empty(), Optional.empty(), Optional.of(WorkflowTarget.ISSUE_TRIAGE));
     }
