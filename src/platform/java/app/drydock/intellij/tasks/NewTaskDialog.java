@@ -933,7 +933,11 @@ final class NewTaskDialog extends DialogWrapper {
             case MAIN_CHECKOUT -> inputs.project().root();
             case NEW_WORKTREE -> Path.of(folder.getText().strip().isEmpty() ? "." : folder.getText().strip());
         };
-        String text = instructions.getText();
+        // An issue invocation composes its ticket identity back in here: the
+        // editor holds only the methodology (built-in steps, project workflow
+        // prompt, or a user edit), and the identity rides after the launch's
+        // task separator exactly like the batch triage prompt.
+        String text = preset.launchInstructions(instructions.getText());
         Optional<ModelTiers> tiers = tiersShown(agent)
                 ? Optional.of(new ModelTiers(strongField.selected(), midField.selected(), lowField.selected()))
                 : Optional.empty();
@@ -1102,7 +1106,8 @@ final class NewTaskDialog extends DialogWrapper {
             // done_by control, so the save carries no refs and the default
             // HUMAN policy.
             acceptedResult = NewTaskLauncherResult.savedTask(
-                    new app.drydock.tasks.NewTaskPlan(taskName(), instructions.getText(), List.of(),
+                    new app.drydock.tasks.NewTaskPlan(taskName(),
+                            preset.launchInstructions(instructions.getText()), List.of(),
                             DoneBy.HUMAN, null, inputs.project().root(), inputs.repoName()));
             close(OK_EXIT_CODE);
             return;
@@ -1114,8 +1119,11 @@ final class NewTaskDialog extends DialogWrapper {
         getOKAction().setEnabled(false);
         ModalityState modality = ModalityState.stateForComponent(getContentPanel());
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            // The editor text, not the choice's instructions: an issue
+            // invocation's composed instructions always carry the ticket
+            // identity, so only the methodology's blankness can refuse.
             Optional<String> refusal = NewTaskPlan.refusal(inputs, choice, NewTaskDialog::occupied);
-            if (refusal.isEmpty() && preset.instructionsRequired() && choice.instructions().isEmpty()) {
+            if (refusal.isEmpty() && preset.instructionsRequired() && instructions.getText().isBlank()) {
                 refusal = Optional.of("Give the agent implementation instructions.");
             }
             Optional<String> finalRefusal = refusal;
@@ -1123,7 +1131,8 @@ final class NewTaskDialog extends DialogWrapper {
                 getOKAction().setEnabled(true);
                 if (finalRefusal.isPresent()) {
                     setErrorText(finalRefusal.get(),
-                            preset.instructionsRequired() && choice.instructions().isEmpty() ? instructions : folder);
+                            preset.instructionsRequired() && instructions.getText().isBlank()
+                                    ? instructions : folder);
                 } else if (isShowing()) {
                     // Accept only now, after the disk refusal: the controller's cancel is terminal and begin()
                     // throws once ACCEPTED, so an earlier accept would strand a refused Start.

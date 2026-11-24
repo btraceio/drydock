@@ -99,7 +99,8 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             }
         });
 
-        assertEquals(preset.instructions(), choice.get().instructions());
+        assertEquals(Optional.of(preset.launchInstructions(preset.instructions().orElseThrow())),
+                choice.get().instructions());
         assertEquals(AgentKind.PI, choice.get().agent());
     }
 
@@ -120,7 +121,8 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
 
         assertEquals(SessionMode.WRITES, choice.get().mode());
         assertEquals(NewTaskPlan.WorkIn.MAIN_CHECKOUT, choice.get().workIn());
-        assertEquals(preset.instructions(), choice.get().instructions());
+        assertEquals(Optional.of(preset.launchInstructions(preset.instructions().orElseThrow())),
+                choice.get().instructions());
     }
 
     public void testProjectMainCheckoutEntryCannotCreateAWorktree() {
@@ -896,13 +898,34 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
                     dialog.sourceLabelText());
             w.complete(0, "late project seed", 2);
             w.drainUntil(dialog::diagStartEnabled);
-            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            // The choice composes the ticket identity back in; the workflow's
+            // accepted text stays the methodology alone.
+            assertEquals("Triage GitHub issue #42: Fix\n\nmy own methodology",
+                    dialog.choice().instructions().orElseThrow());
             assertEquals("Edited for this invocation; based on Project profiler: inline text",
                     dialog.sourceLabelText());
             assertTrue(dialog.acceptWorkflowForStart());
             var accepted = dialog.acceptedWorkflow().orElseThrow();
             assertEquals("my own methodology", accepted.text());
             assertTrue(accepted.edited());
+        });
+    }
+
+    public void testProjectWorkflowSeedReplacesTheMethodologyButNeverTheTicketIdentity() {
+        Wiring w = new Wiring(WorkflowTarget.ISSUE_TRIAGE);
+        // The seed the dialog applies is the resolver's prompt text; the
+        // materialization only stages the bundle.
+        w.resolution = new WorkflowResolution.Selected(w.selected("PROJECT SKILL PROMPT"));
+        withDialog(w, triage(), inputs(), dialog -> {
+            w.drainUntil(() -> w.materializationStarted(1));
+            w.complete(0, "unused", 2);
+            w.drainUntil(dialog::diagStartEnabled);
+            // The seed replaced the built-in steps in the editor; the choice
+            // still composes the ticket identity in front of it.
+            assertEquals("Triage GitHub issue #42: Fix\n\nPROJECT SKILL PROMPT",
+                    dialog.choice().instructions().orElseThrow());
+            assertTrue(dialog.acceptWorkflowForStart());
+            assertEquals("PROJECT SKILL PROMPT", dialog.acceptedWorkflow().orElseThrow().text());
         });
     }
 
@@ -972,12 +995,14 @@ public class NewTaskDialogPlatformTest extends BasePlatformTestCase {
             w.drainUntil(dialog::diagStartEnabled);
             w.complete(0, "stale seed", 2);
             w.drainUntil(() -> w.released.get() == 1);
-            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            assertEquals("Triage GitHub issue #42: Fix\n\nmy own methodology",
+                    dialog.choice().instructions().orElseThrow());
             assertEquals(Optional.of(remembered), dialog.choice().tiers());
             agentButton(dialog, AgentKind.PI).doClick();
             assertEquals(Optional.of("my-model"), dialog.choice().model());
             assertEquals(Optional.of(remembered), dialog.choice().tiers());
-            assertEquals("my own methodology", dialog.choice().instructions().orElseThrow());
+            assertEquals("Triage GitHub issue #42: Fix\n\nmy own methodology",
+                    dialog.choice().instructions().orElseThrow());
             assertTrue(dialog.sourceLabelText().startsWith("Edited for this invocation"));
         });
     }

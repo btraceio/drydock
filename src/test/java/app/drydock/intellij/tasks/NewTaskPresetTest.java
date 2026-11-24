@@ -30,9 +30,9 @@ class NewTaskPresetTest {
         NewTaskPreset preset = NewTaskPreset.implement(issue);
 
         assertEquals("#42 Fix allocation accounting", preset.name());
-        String prompt = preset.instructions().orElseThrow();
-        assertTrue(prompt.startsWith("Implement GitHub issue #42: Fix allocation accounting\n\n"
+        assertTrue(preset.identity().orElseThrow().startsWith("Implement GitHub issue #42: Fix allocation accounting\n\n"
                 + "https://github.com/acme/profiler/issues/42"));
+        String prompt = preset.instructions().orElseThrow();
         assertTrue(prompt.contains("brainstorm the viable interpretations"));
         assertTrue(prompt.contains("Produce a design, review it critically"));
         assertTrue(prompt.contains("Produce a separate implementation plan"));
@@ -62,9 +62,9 @@ class NewTaskPresetTest {
         NewTaskPreset preset = NewTaskPreset.triage(issue);
 
         assertEquals("Triage #42 Fix allocation accounting", preset.name());
-        String prompt = preset.instructions().orElseThrow();
-        assertTrue(prompt.startsWith("Triage GitHub issue #42: Fix allocation accounting\n\n"
+        assertTrue(preset.identity().orElseThrow().startsWith("Triage GitHub issue #42: Fix allocation accounting\n\n"
                 + "https://github.com/acme/profiler/issues/42"));
+        String prompt = preset.instructions().orElseThrow();
         assertTrue(prompt.contains("Treat every behavioral statement in the report as an unverified claim"));
         assertTrue(prompt.contains("still applies to the current source shape"));
         assertTrue(prompt.contains("Propose the smallest meaningful reproducer"));
@@ -106,13 +106,11 @@ class NewTaskPresetTest {
                 Optional.of("https://github.com/acme/profiler/issues/42"), List.of(), List.of(),
                 Optional.of(Instant.parse("2026-10-20T10:15:30Z")));
 
-        // Byte-identical characterization of today's GitHub prompts. The
-        // Jira variants below must reuse these fragments, not reword them.
-        String expectedImplement = "Implement GitHub issue #42: Fix allocation accounting\n\n"
-                + "https://github.com/acme/profiler/issues/42"
-                + """
-
-
+        // Byte-identical characterization of the GitHub prompts. The Jira
+        // variants below must reuse these fragments, not reword them.
+        String identity = "Implement GitHub issue #42: Fix allocation accounting\n\n"
+                + "https://github.com/acme/profiler/issues/42";
+        String methodology = """
                 Follow a disciplined issue workflow:
                 1. Read the issue and relevant repository context. If the requirements or acceptance criteria are
                    unclear, brainstorm the viable interpretations and resolve the ambiguity before designing.
@@ -148,13 +146,14 @@ class NewTaskPresetTest {
                 - The pull request explains the behavior, design decisions, risks, and verification, and contains the
                   correct closing keyword for this issue; the work is not done merely because code was written.
                 """.formatted("#42");
-        assertEquals(expectedImplement, NewTaskPreset.implement(issue).instructions().orElseThrow());
+        NewTaskPreset implement = NewTaskPreset.implement(issue);
+        assertEquals(Optional.of(identity), implement.identity());
+        assertEquals(methodology, implement.instructions().orElseThrow());
+        assertEquals(identity + "\n\n" + methodology.strip(), implement.launchInstructions(methodology));
 
-        String expectedTriage = "Triage GitHub issue #42: Fix allocation accounting\n\n"
-                + "https://github.com/acme/profiler/issues/42"
-                + """
-
-
+        String triageIdentity = "Triage GitHub issue #42: Fix allocation accounting\n\n"
+                + "https://github.com/acme/profiler/issues/42";
+        String triageMethodology = """
                 Triage the report against the repository as it exists now:
                 1. Read the full issue and inspect the relevant current production control flow, data flow,
                    configuration, and tests. Treat every behavioral statement in the report as an unverified claim.
@@ -170,7 +169,41 @@ class NewTaskPresetTest {
                 5. End with an Impact-Likelihood-Workaround assessment: rate and justify each dimension from the
                    available evidence, state confidence and remaining unknowns, then recommend an explicit priority.
                 """;
-        assertEquals(expectedTriage, NewTaskPreset.triage(issue).instructions().orElseThrow());
+        NewTaskPreset triage = NewTaskPreset.triage(issue);
+        assertEquals(Optional.of(triageIdentity), triage.identity());
+        // The built-in steps are seeded stripped: the editor shows the
+        // methodology, never the two blank separator lines the old prompt led with.
+        assertEquals(triageMethodology.strip(), triage.instructions().orElseThrow());
+        assertEquals(triageIdentity + "\n\n" + triageMethodology.strip(),
+                triage.launchInstructions(triageMethodology));
+    }
+
+    @Test
+    void theTicketIdentityNeverEntersTheEditableMethodologyButAlwaysRidesAtLaunch() {
+        OpenIssue issue = new OpenIssue(42, "Fix allocation accounting", Optional.empty(), List.of(), List.of(),
+                Optional.empty());
+
+        // A project workflow (a skill) replaces the whole methodology: the
+        // ticket identity stays outside the editable text, so nothing the
+        // user or a workflow seed does can lose it.
+        NewTaskPreset triage = NewTaskPreset.triage(issue);
+        assertFalse(triage.instructions().orElseThrow().contains("#42"));
+        assertEquals("Triage GitHub issue #42: Fix allocation accounting\n\nPROJECT SKILL PROMPT",
+                triage.launchInstructions("PROJECT SKILL PROMPT"));
+        assertEquals("Triage GitHub issue #42: Fix allocation accounting",
+                triage.launchInstructions(""), "a blank methodology still launches with the identity");
+        assertEquals("Triage GitHub issue #42: Fix allocation accounting\n\nmy own methodology",
+                triage.launchInstructions("my own methodology\n"));
+
+        NewTaskPreset implement = NewTaskPreset.implement(issue);
+        // The closing step legitimately cites `Closes #42`; what must never
+        // happen is the identity header leaking into the methodology.
+        assertFalse(implement.instructions().orElseThrow().startsWith("Implement GitHub issue"));
+        assertEquals("Implement GitHub issue #42: Fix allocation accounting\n\nPROJECT SKILL PROMPT",
+                implement.launchInstructions("PROJECT SKILL PROMPT"));
+
+        // Presets without a ticket send the text unchanged.
+        assertEquals("any text", NewTaskPreset.empty().launchInstructions("any text"));
     }
 
     @Test
@@ -182,9 +215,9 @@ class NewTaskPresetTest {
         NewTaskPreset preset = NewTaskPreset.implement(issue);
 
         assertEquals("PROJ-123 Fix allocation accounting", preset.name());
-        String prompt = preset.instructions().orElseThrow();
-        assertTrue(prompt.startsWith("Implement Jira issue PROJ-123: Fix allocation accounting\n\n"
+        assertTrue(preset.identity().orElseThrow().startsWith("Implement Jira issue PROJ-123: Fix allocation accounting\n\n"
                 + "https://acme.atlassian.net/browse/PROJ-123"));
+        String prompt = preset.instructions().orElseThrow();
         assertTrue(prompt.contains("Follow a disciplined issue workflow:"));
         assertTrue(prompt.contains("brainstorm the viable interpretations"));
         assertTrue(prompt.contains("Produce a design, review it critically"));
@@ -215,9 +248,9 @@ class NewTaskPresetTest {
         NewTaskPreset preset = NewTaskPreset.triage(issue);
 
         assertEquals("Triage PROJ-123 Fix allocation accounting", preset.name());
-        String prompt = preset.instructions().orElseThrow();
-        assertTrue(prompt.startsWith("Triage Jira issue PROJ-123: Fix allocation accounting\n\n"
+        assertTrue(preset.identity().orElseThrow().startsWith("Triage Jira issue PROJ-123: Fix allocation accounting\n\n"
                 + "https://acme.atlassian.net/browse/PROJ-123"));
+        String prompt = preset.instructions().orElseThrow();
         assertTrue(prompt.contains("Triage the report against the repository as it exists now:"));
         assertTrue(prompt.contains("Treat every behavioral statement in the report as an unverified claim"));
         assertTrue(prompt.contains("still applies to the current source shape"));
