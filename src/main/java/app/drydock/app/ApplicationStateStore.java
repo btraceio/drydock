@@ -1,11 +1,15 @@
 package app.drydock.app;
 
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.state.ApplicationStateRepository;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -15,6 +19,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 
 /**
@@ -141,6 +146,116 @@ public final class ApplicationStateStore {
             repository.save(toSave);
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Failed to persist application state", e);
+        }
+    }
+
+    /**
+     * The one-stop reservation of a checkout's marked (editor Q&A) row: an
+     * atomic compare-and-insert keyed by the canonical working directory.
+     * If this catalog already holds exactly one marked row for {@code
+     * candidate}'s working directory, that row is returned and nothing is
+     * written — a crash after a row-only reservation must leave a reusable
+     * row, never a reason to mint another. Otherwise {@code candidate} is
+     * inserted.
+     *
+     * <p>The whole comparison and insert runs inside a single {@link
+     * #update}, under the store's lock: two IDE windows whose first asks
+     * for the same checkout race can never both insert — one finds the
+     * other's row. There is deliberately no check-then-insert across
+     * separate calls, which would reintroduce the lost-update shape this
+     * store exists to kill.
+     *
+     * <p>The key is the session's working directory, normalized here
+     * without I/O ({@code toAbsolutePath().normalize()}). Resolving
+     * symlinks — the part that makes two spellings of one checkout the
+     * same key — is real filesystem I/O, so it belongs to the caller, off
+     * the EDT, before the candidate is built. An ordinary row at the same
+     * directory is never reused: purposes differ, and a Q&A row must not
+     * take over a human's session.
+     *
+     * <p>Marked rows for one directory are unique by construction; if the
+     * catalog already holds two or more (a damaged or externally edited
+     * state file), the ambiguity is a recovery error — {@link
+     * DuplicateMarkedSessionException} — never a guessed binding.
+     *
+     * @return the effective row: the pre-existing marked row for the
+     *     directory, or the inserted {@code candidate}
+     * @throws DuplicateMarkedSessionException when the catalog already
+     *     holds more than one marked row for the directory
+     */
+    public ManagedAgentSession ensureMarkedSession(ManagedAgentSession candidate) {
+        if (candidate.purpose() == ManagedAgentSession.SessionPurpose.ORDINARY) {
+            throw new IllegalArgumentException(
+                    "ensureMarkedSession requires a marked (non-ORDINARY) session: " + candidate.id());
+        }
+        Path key = canonicalKey(candidate.workingDirectory());
+        AtomicReference<ManagedAgentSession> effective = new AtomicReference<>();
+        update(state -> {
+            ManagedAgentSession existing = markedSession(state, key);
+            if (existing != null) {
+                effective.set(existing);
+                return state;   // row-only reservation already durable: reusable, never re-minted
+            }
+            List<ManagedAgentSession> sessions = new ArrayList<>(state.sessions());
+            sessions.add(candidate);
+            effective.set(candidate);
+            return state.withSessions(List.copyOf(sessions));
+        });
+        return effective.get();
+    }
+
+    /**
+     * The marked row for {@code canonicalWorkingDirectory}, or empty when
+     * the checkout has none. A read-side companion to {@link
+     * #ensureMarkedSession} for callers resolving the index without
+     * reserving (restart recovery, Forget protection). Like it, this
+     * refuses to guess when the index is inconsistent: two or more marked
+     * rows for one directory raise {@link DuplicateMarkedSessionException}.
+     * The caller passes a canonical (symlink-resolved) path; it is
+     * normalized here without I/O.
+     */
+    public Optional<ManagedAgentSession> markedSession(Path canonicalWorkingDirectory) {
+        return Optional.ofNullable(markedSession(state(), canonicalKey(canonicalWorkingDirectory)));
+    }
+
+    /**
+     * The marked row keyed by {@code key} inside {@code state}, or null.
+     * Shared by the insert path and the read path so both see the same
+     * uniqueness rule. Pure: no I/O, called only under the store's lock (or
+     * on an immutable snapshot).
+     */
+    private static ManagedAgentSession markedSession(ApplicationState state, Path key) {
+        List<ManagedAgentSession> matches = new ArrayList<>();
+        for (ManagedAgentSession session : state.sessions()) {
+            if (session.purpose() != ManagedAgentSession.SessionPurpose.ORDINARY
+                    && canonicalKey(session.workingDirectory()).equals(key)) {
+                matches.add(session);
+            }
+        }
+        if (matches.size() > 1) {
+            throw new DuplicateMarkedSessionException(key, matches);
+        }
+        return matches.isEmpty() ? null : matches.getFirst();
+    }
+
+    /** Normalizes a directory key without I/O; symlink resolution is the caller's, off the EDT. */
+    private static Path canonicalKey(Path directory) {
+        return directory.toAbsolutePath().normalize();
+    }
+
+    /**
+     * Recovery error, not a silent choice: the catalog holds more than one
+     * marked row for one canonical checkout directory, so no row can be
+     * trusted as the checkout's Q&A session. Carrying the row ids keeps the
+     * error triageable (which rows to inspect or prune) without guessing a
+     * binding the state file no longer supports.
+     */
+    public static final class DuplicateMarkedSessionException extends IllegalStateException {
+
+        public DuplicateMarkedSessionException(Path directory, List<ManagedAgentSession> duplicates) {
+            super("Multiple marked sessions for canonical directory " + directory + ": "
+                    + duplicates.stream().map(s -> s.id().value().toString()).sorted()
+                            .reduce((a, b) -> a + ", " + b).orElse(""));
         }
     }
 
