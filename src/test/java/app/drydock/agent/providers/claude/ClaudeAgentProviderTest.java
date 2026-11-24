@@ -13,6 +13,7 @@ import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
+import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer.EvalSetup;
 import app.drydock.agent.providers.claude.internal.ClaudeExecutableLocator;
@@ -696,8 +697,18 @@ class ClaudeAgentProviderTest {
                 exit 1
                 """);
         assertTrue(stub.toFile().setExecutable(true));
+        // The capabilities the stub's --version/--help output yields, handed
+        // over directly: running the real subprocess probe here made the
+        // renderer oracles flake on a loaded CI runner, where one probe run
+        // failed, degraded to conservative caps, and rendered a command
+        // missing --settings and --permission-mode plan (PR #167 CI,
+        // 2026-11-24). The stub script stays as the located executable and
+        // the detection logic itself is exercised by ClaudeCapabilityService
+        // tests; these oracle tests pin the renderer's output for known caps.
         ClaudeAgentProvider provider = new ClaudeAgentProvider(
-                new ClaudeExecutableLocator(stub), null, noDdtool());
+                new ClaudeExecutableLocator(stub), null, noDdtool(), () ->
+                        new ClaudeCapabilities(true, true, false, true, true, true, true,
+                                "1.2.3 (Claude Code)"));
         provider.init(new AgentContext(dir, dir.resolve("activity"),
                 Executors.newVirtualThreadPerTaskExecutor()));
         // The plugin installs the activity hooks at startup; the settings

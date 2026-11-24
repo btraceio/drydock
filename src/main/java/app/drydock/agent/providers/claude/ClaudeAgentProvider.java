@@ -36,12 +36,15 @@ import app.drydock.state.json.JsonValue;
 import app.drydock.state.json.JsonWriter;
 
 import java.io.IOException;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.function.Supplier;
 
 /**
  * Claude Code as an {@link AgentProvider}. Command strings are identical to the
@@ -57,8 +60,17 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private static final String REMOTE_COMMAND_PREFIX = "exec env LANG=en_US.UTF-8"
             + " CLAUDE_CODE_NO_FLICKER=1 claude";
 
+    private static final Logger LOG = System.getLogger(ClaudeAgentProvider.class.getName());
+
     private final ClaudeExecutableLocator locator;
     private final HostBinaryLocator ddtoolLocator;
+
+    /**
+     * Test seam: replaces the real capability probe (two subprocess runs of
+     * the located claude) with a fixed answer, so renderer tests cannot flake
+     * when a loaded CI runner makes one probe run fail. Null in production.
+     */
+    private final Supplier<ClaudeCapabilities> capsForTests;
 
     /**
      * The resolved {@code claude} binary, shell-quoted, or bare {@code "claude"} when
@@ -195,9 +207,16 @@ public final class ClaudeAgentProvider implements AgentProvider {
     /** For tests: inject both, so the PATH-injection form can be exercised deterministically. */
     ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer,
                         HostBinaryLocator ddtoolLocator) {
+        this(locator, evalContainer, ddtoolLocator, null);
+    }
+
+    /** For tests: inject the capabilities too, so no renderer test runs the real subprocess probe. */
+    ClaudeAgentProvider(ClaudeExecutableLocator locator, ClaudeEvalContainer evalContainer,
+                        HostBinaryLocator ddtoolLocator, Supplier<ClaudeCapabilities> capsForTests) {
         this.locator = locator;
         this.evalContainer = evalContainer;
         this.ddtoolLocator = ddtoolLocator;
+        this.capsForTests = capsForTests;
     }
 
     @Override
@@ -536,11 +555,20 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     /** Uncached, like the pre-seam code: every launch/resume re-probes. Runs on the caller's (background) thread. */
     private ClaudeCapabilities detectCaps() {
+        if (capsForTests != null) {
+            return capsForTests.get();
+        }
         try {
             return capabilityService.detectCapabilitiesBlocking();
         } catch (RuntimeException e) {
             // Fail conservatively: no name/session-id/settings/plan-mode
-            // support (matches NO_CAPABILITIES semantics).
+            // support (matches NO_CAPABILITIES semantics). Logged, not
+            // silent: a degraded launch (no --settings, no plan mode) whose
+            // probe failure is invisible cannot be told apart from a real
+            // claude that lacks the flags -- and the degraded render is what
+            // made CI fail unexplainably (PR #167, 2026-11-24).
+            LOG.log(Level.WARNING, "Claude capability probe failed; rendering "
+                    + "the launch with conservative capabilities", e);
             return new ClaudeCapabilities(false, true, false, false, false, false, false, "unknown");
         }
     }
