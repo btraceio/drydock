@@ -25,8 +25,12 @@ import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.GridLayout;
+import java.awt.KeyboardFocusManager;
+import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
+import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -47,6 +51,13 @@ import java.util.Optional;
  * editor re-reads the layout and last focused slot and mounts the same panes.
  * With no primary session the slot shows a placeholder and the empty
  * {@linkplain #allSessionsSlot() All Sessions entry slot}. UI thread only.</p>
+ *
+ * <p>While leased, a {@link KeyboardFocusManager} focus-owner watcher turns a
+ * focus landing inside a mounted pane root into the controller's
+ * {@code paneFocused} (a deliberate pane focus), and a focus that leaves the
+ * panes into {@code focusDeparted}. A null owner (window switches, transient
+ * AWT states) is ignored, so the focused slot survives deactivation and the
+ * activation refocus still knows where the keyboard was.</p>
  */
 final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
 
@@ -65,7 +76,12 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
     /** The emptied primary slot's placeholder; its text names why nothing is shown. */
     private final JBLabel emptyLabel = new JBLabel("No session shown", SwingConstants.CENTER);
     private final List<SessionPane> mounted = new ArrayList<>();
+    /** The mounted pane holding keyboard focus, per the watcher; null when none does. */
+    private SessionPane focusedPane;
     private boolean disposed;
+
+    /** The watcher registered with the shared {@link KeyboardFocusManager}; only while leased. */
+    private final PropertyChangeListener focusWatcher = this::focusOwnerChanged;
 
     SessionHostEditor(Project project, SessionHostController controller) {
         Objects.requireNonNull(project, "project");
@@ -96,8 +112,43 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
                             FileEditorManager.getInstance(project)
                                     .updateFilePresentation(file);
                         }
+
+                        @Override
+                        public void sessionFocused(ManagedSessionId sessionId) {
+                            // The focused slot moved; the accent border follows it.
+                            refreshLayout();
+                        }
                     });
+            KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                    .addPropertyChangeListener("focusOwner", focusWatcher);
             refreshLayout();
+        }
+    }
+
+    /** EDT: maps a focus-owner change onto the mounted panes; see the class javadoc. */
+    void focusOwnerChanged(PropertyChangeEvent event) {
+        if (disposed || !leased || !"focusOwner".equals(event.getPropertyName())) {
+            return;
+        }
+        Component owner = (Component) event.getNewValue();
+        if (owner == null) {
+            return;
+        }
+        SessionPane inside = null;
+        for (SessionPane pane : mounted) {
+            if (SwingUtilities.isDescendingFrom(owner, pane.root())) {
+                inside = pane;
+                break;
+            }
+        }
+        if (inside == focusedPane) {
+            return;
+        }
+        focusedPane = inside;
+        if (inside != null) {
+            controller.paneFocused(inside.sessionId());
+        } else {
+            controller.focusDeparted();
         }
     }
 
@@ -219,6 +270,8 @@ final class SessionHostEditor extends UserDataHolderBase implements FileEditor {
         }
         disposed = true;
         if (leased) {
+            KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                    .removePropertyChangeListener("focusOwner", focusWatcher);
             controller.releaseLease(this);
         }
         mounted.forEach(SessionPane::detachRoot);
