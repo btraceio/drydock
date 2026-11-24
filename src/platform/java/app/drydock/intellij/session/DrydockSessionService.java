@@ -39,7 +39,6 @@ import app.drydock.domain.SessionActivity;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionStatus;
 import app.drydock.domain.SessionStatusFacet;
-import app.drydock.domain.SessionWorkspace;
 import app.drydock.domain.SshRemote;
 import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.git.GitCommandFailedException;
@@ -53,6 +52,7 @@ import app.drydock.intellij.agent.AgentConsoleHost;
 import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.agent.LaunchClaims;
+import app.drydock.intellij.editorqa.EditorAskLaunchPolicy;
 import app.drydock.intellij.mcp.IdeMcpServer;
 import app.drydock.intellij.project.ProjectRepositoryService;
 import app.drydock.intellij.remote.RemoteReviewService;
@@ -72,9 +72,6 @@ import app.drydock.workspace.BoxShell;
 import app.drydock.workspace.CommandRunner;
 import app.drydock.workspace.WorkspacesCli;
 
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ModalityState;
-import com.intellij.openapi.ui.Messages;
 
 import java.io.IOException;
 import java.lang.System.Logger;
@@ -198,6 +195,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
      */
     private final LaunchClaims claims;
 
+    /** Marked Q&A row launch policy; null until wired (such rows then never launch). */
+    private volatile EditorAskLaunchPolicy editorAsk;
+
     /** The end-of-agent half: persistence, late id binding, and the id bookkeeping both halves share. */
     private final SessionEnds ends;
 
@@ -250,7 +250,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 AgentExecutionRegistry.getInstance().launchClaims(), taskLaunchResources(plugin),
                 WorkspaceSettings::enabled, new BoxShell(CommandRunner.PRODUCTION),
                 new WorkspacesCli(CommandRunner.PRODUCTION), plugin.remoteSessionLiveness(),
-                DrydockSessionService::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds(),
+                SessionEnds::askOnEdt, AgentExecutionRegistry.getInstance().remoteClientEnds(),
                 BabysitGit.PRODUCTION, plugin.activityMonitor()::current);
     }
 
@@ -296,7 +296,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         this(initialization, stateStore, registry, watcher, repositoryIdFor, consoles, executor,
                 stdioMcpServers, mcpAccess, claims, taskLaunchResources, () -> false,
                 new BoxShell(CommandRunner.PRODUCTION), new WorkspacesCli(CommandRunner.PRODUCTION),
-                new RemoteSessionLiveness(), DrydockSessionService::askOnEdt,
+                new RemoteSessionLiveness(), SessionEnds::askOnEdt,
                 AgentExecutionRegistry.RemoteClientEnds.INERT);
     }
 
@@ -475,7 +475,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Path workingDirectory = repoRoot.toAbsolutePath().normalize();
         return repositoryIdFor.apply(repositoryRoot.toAbsolutePath().normalize())
                 .thenApplyAsync(
-                        repositoryId -> newSessionMetadata(repositoryId, workingDirectory, kind, displayName,
+                        repositoryId -> LocalLaunchPreparation.newSessionMetadata(repositoryId, workingDirectory, kind, displayName,
                                 mode, workspaceBox),
                         executor);
     }
@@ -825,7 +825,9 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // Stamped before the persist: the marker rides the row's first save,
         // like the initialPrompt it mirrors, and earns the session the fixed
         // resume prompt on its next resume.
-        ManagedAgentSession prepared = pending.withStartedWithTask(initialPrompt.isPresent());
+        ManagedAgentSession prepared = pending.withStartedWithTask(
+                EditorAskLaunchPolicy.startedWithTask(pending, initialPrompt));
+        EditorAskLaunchPolicy.admit(editorAsk, prepared);
         // Claimed before anything is persisted or minted: a refused launch
         // must not touch the row, the token or the credential file of the
         // agent that already holds the session.
@@ -931,6 +933,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                                       Optional<String> initialPrompt, Optional<String> model,
                                       Optional<ModelTiers> tiers,
                                       boolean rowMustExist) {
+        EditorAskLaunchPolicy.requireLocal(prepared, repositoryRemoteOf(stateStore.get().state(), prepared));
         Optional<WorkspaceBoxBinding> box = prepared.workspaceBox();
         if (box.isPresent()) {
             return startRemoteLaunch(prepared, box.get(), provider, initialPrompt, model, tiers, rowMustExist);
@@ -955,9 +958,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         String generatedId = provider.idStrategy() == SessionIdStrategy.PRESET
                 ? UUID.randomUUID().toString()
                 : "";
-        Optional<SessionIdDiscovery> discovery = provider.idStrategy() == SessionIdStrategy.DISCOVERED
-                ? provider.idDiscovery()
-                : Optional.empty();
+        Optional<SessionIdDiscovery> discovery = EditorAskLaunchPolicy.discovery(prepared,
+                provider.idStrategy() == SessionIdStrategy.DISCOVERED ? provider.idDiscovery() : Optional.empty());
         Path cwd = prepared.workingDirectory();
         // Snapshot BEFORE the spawn and BEFORE the launch timestamp, so a
         // record the new session itself writes cannot already be in the
@@ -966,22 +968,23 @@ public final class DrydockSessionService implements AgentExecutionListener {
         Object snapshot = discovery.map(d -> d.snapshot(cwd)).orElse(null);
         Instant launchedAt = Instant.now();
         ends.lastLaunchedAt().put(prepared.id(), launchedAt);
-        Optional<McpAccess> access = launch.mcpAccessFor(prepared.id(), provider);
+        Optional<McpAccess> access = launch.mcpAccessFor(prepared, provider);
         // Resolved BEFORE the context is built (T29a): the receipt and
         // directory I/O is blocking, and this whole pre-spawn stage runs on
         // the executor, never the EDT (AGENTS.md). A receipt directory that
         // cannot be resolved refuses the launch visibly here; no resources
         // resolve to empty and the launch is byte-identical to before.
-        Optional<LaunchResources> resources = launch.resourcesFor(prepared.id(), access);
+        Optional<LaunchResources> resources = launch.resourcesFor(prepared, access);
         try {
             CreateContext ctx = new CreateContext(prepared.displayName(), generatedId, cwd,
                     Optional.empty(), access, model, prepared.evalMode(), prepared.readOnly(), initialPrompt,
                     List.of())
-                    .withStdioMcpServers(launch.stdioMcpServersFor(cwd));
+                    .withStdioMcpServers(launch.stdioMcpServersFor(prepared));
             if (resources.isPresent()) {
                 ctx = ctx.withLaunchResources(resources.get());
             }
-            LaunchPlan plan = provider.buildCreateCommand(launch.withWorkflow(ctx, prepared.id()));
+            LaunchPlan plan = EditorAskLaunchPolicy.buildCreate(editorAsk, provider, prepared,
+                    launch.withWorkflow(ctx, prepared));
             launch.releaseIfUnused(prepared.id(), access, plan);
             if (!plan.supported()) {
                 // AC11: name the agent, open nothing.
@@ -1006,6 +1009,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 }
             }
             CompletableFuture<Void> open = consoles.startConsole(prepared.id(), cwd, plan);
+            if (editorAsk != null) editorAsk.opened(prepared.id());
             return new StartedLaunch(prepared, discovery, snapshot, launchedAt, generatedId, sessionIdUsed, model,
                     tiers, open);
         } catch (RuntimeException | Error failure) {
@@ -1206,10 +1210,12 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // Only persist the generated id when the launch command actually
         // carried it — an id the agent never saw would make a later resume
         // target a nonexistent conversation.
-        if (started.sessionIdUsed()) {
+        // A marked row binds only via proof.
+        if (started.sessionIdUsed() && !EditorAskLaunchPolicy.marked(running)) {
             running = running.withAgentSessionId(Optional.of(started.generatedId()));
         }
         persistUpdatedSession(running);
+        if (editorAsk != null && started.sessionIdUsed()) editorAsk.presetRendered(running, started.generatedId());
         // Records the agent kind actually used, so the next session in this
         // repository defaults to it (AC8's data half), and the starting model
         // with it -- keyed per harness, since the model spaces are disjoint.
@@ -1218,8 +1224,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         // tiers ride the same lifecycle, but only when the launch carried
         // them: a launch that showed no tier pickers leaves them as they were.
         ManagedAgentSession recorded = running;
-        stateStore.get().update(state -> repoWithLastUsedLaunch(state, recorded.repositoryId(),
-                recorded.agentKind(), started.model(), started.tiers()));
+        if (EditorAskLaunchPolicy.recordsLastUsed(recorded)) stateStore.get().update(state -> repoWithLastUsedLaunch(
+                state, recorded.repositoryId(), recorded.agentKind(), started.model(), started.tiers()));
         scheduleDetachedDiscovery(started);
         return running;
     }
@@ -1459,6 +1465,19 @@ public final class DrydockSessionService implements AgentExecutionListener {
                 Optional.empty(), true);
     }
 
+    /** Wires the Q&A policy (admission gate). */
+    public void editorAskPolicy(EditorAskLaunchPolicy policy) {
+        this.editorAsk = Objects.requireNonNull(policy, "policy");
+    }
+
+    /** The Q&A row's fresh start; {@code prompt} is its one positional launch prompt. Policy-only (admission). */
+    public CompletableFuture<ManagedAgentSession> startEditorAsk(ManagedSessionId id, String prompt,
+                                                                 Optional<String> model) {
+        return initialization.thenApplyAsync(unused -> prepareFreshOnExistingRow(requireSession(id)), executor)
+                .thenComposeAsync(session -> launchPrepared(session, Optional.of(prompt), model, Optional.empty(), true),
+                        executor);
+    }
+
     private ManagedAgentSession prepareFreshOnExistingRow(ManagedAgentSession session) {
         if (session.agentSessionId().isPresent()) {
             if (!nothingRecordedUnder(session)) {
@@ -1510,6 +1529,8 @@ public final class DrydockSessionService implements AgentExecutionListener {
         if (prepared.status() == SessionStatus.UNSUPPORTED_AGENT) {
             return CompletableFuture.completedFuture(prepared);
         }
+        EditorAskLaunchPolicy.admit(editorAsk, prepared);
+        EditorAskLaunchPolicy.requireLocal(prepared, remoteFor(prepared));
         // A remote row attaches to its box-side tmux session; the local
         // resume below -- the working-directory probe, the late bind, the
         // MCP mint -- never runs for it.
@@ -1573,11 +1594,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // provider's own no-id branch is what a session without an id gets
             // (AC21). The row's eval mode rides the resume: an eval session
             // resumes on the eval account.
-            Optional<McpAccess> access = launch.mcpAccessFor(session.id(), provider);
+            Optional<McpAccess> access = launch.mcpAccessFor(session, provider);
             // T29a: resolved before the context, on this executor stage
             // (never the EDT); a resumed task session re-receives exactly
             // what its retained receipts and the MCP surface resolve now.
-            Optional<LaunchResources> resources = launch.resourcesFor(session.id(), access);
+            Optional<LaunchResources> resources = launch.resourcesFor(session, access);
             // The eval mark rides the resumed conversation's session key, and
             // is in place before the command is built; best-effort like the
             // launch-side mark. A session with no bound id cannot be
@@ -1594,11 +1615,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     session.workingDirectory(), Optional.empty(), access, session.evalMode(), session.readOnly(),
                     List.of(),
                     resumePromptFor(session, promptOverride))
-                    .withStdioMcpServers(launch.stdioMcpServersFor(session.workingDirectory()));
+                    .withStdioMcpServers(launch.stdioMcpServersFor(session));
             if (resources.isPresent()) {
                 ctx = ctx.withLaunchResources(resources.get());
             }
-            plan = provider.buildResumeCommand(launch.withWorkflow(ctx, session.id()));
+            plan = EditorAskLaunchPolicy.buildResume(editorAsk, provider, session, launch.withWorkflow(ctx, session));
             launch.releaseIfUnused(session.id(), access, plan);
         } catch (RuntimeException failure) {
             unmarkEvalAsync(session);
@@ -1615,6 +1636,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
         CompletableFuture<Void> open;
         try {
             open = consoles.startConsole(session.id(), session.workingDirectory(), plan);
+            if (editorAsk != null) editorAsk.opened(session.id());
         } catch (RuntimeException failure) {
             // A synchronous throw never reaches finalizeResume; the claim's
             // end, when resumePrepared rethrows, releases the access minted above.
@@ -1897,7 +1919,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
             // agent: nothing in a transcript records a read-only launch, and
             // assuming read-only would mislabel every adopted row.
             ManagedAgentSession adopted =
-                    newSessionMetadata(repository.id(), repository.root(), kind, displayName, SessionMode.WRITES)
+                    LocalLaunchPreparation.newSessionMetadata(repository.id(), repository.root(), kind, displayName, SessionMode.WRITES)
                             .withAgentSessionId(Optional.of(agentSessionId));
             result[0] = adopted;
             List<ManagedAgentSession> updated = new ArrayList<>(state.sessions());
@@ -1988,6 +2010,7 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     // execution yet, so forgetConsole could not stop it.
                     // Refuse instead; the claim also keeps a launch from
                     // starting while the row is removed.
+                    EditorAskLaunchPolicy.forgetRefusal(editorAsk, session).ifPresent(why -> { throw new IllegalStateException(why); });
                     if (!claims.tryClaimForRemoval(sessionId)) {
                         throw new IllegalStateException(
                                 "a launch of this task is in progress; try again when it ends");
@@ -3247,50 +3270,14 @@ public final class DrydockSessionService implements AgentExecutionListener {
         return tiers.map(t -> recorded.withLastUsedTiers(kind, t)).orElse(recorded);
     }
 
-    private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
-            AgentKind kind, String displayName, SessionMode mode) {
-        return newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode, Optional.empty());
-    }
-
-    private static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
-            AgentKind kind, String displayName, SessionMode mode, Optional<WorkspaceBoxBinding> workspaceBox) {
-        return new ManagedAgentSession.Builder(
-                ManagedSessionId.newId(), repositoryId, displayName,
-                AgentBinding.unlaunched(kind, mode),
-                SessionWorkspace.inRepository(workingDirectory),
-                Instant.now())
-                .status(SessionStatus.STARTING)
-                .workspaceBox(workspaceBox)
-                .build();
-    }
-
-    /**
-     * The production remote confirm: the question becomes a Yes/No dialog
-     * on the EDT ({@code ModalityState.anyModal()}, because the ask comes
-     * from a background flow that may itself sit under a modal), and the
-     * future completes with the answer from there. Never called by tests —
-     * they inject a fake through the full seam.
-     */
-    private static CompletableFuture<Boolean> askOnEdt(String question) {
-        CompletableFuture<Boolean> answer = new CompletableFuture<>();
-        ApplicationManager.getApplication().invokeLater(() -> {
-            try {
-                answer.complete(Messages.showYesNoDialog(question, "Drydock",
-                        Messages.getQuestionIcon()) == Messages.YES);
-            } catch (RuntimeException | Error e) {
-                answer.completeExceptionally(e);
-            }
-        }, ModalityState.any());
-        return answer;
-    }
-
     /**
      * The prompt a resume carries: the caller's override when present, else
      * the fixed {@link #RESUME_PROMPT} for a session that started with a task,
      * else none.
      */
     private static Optional<String> resumePromptFor(ManagedAgentSession session, Optional<String> override) {
-        return override.or(() -> session.startedWithTask() ? Optional.of(RESUME_PROMPT) : Optional.empty());
+        return override.or(() -> session.startedWithTask() && !EditorAskLaunchPolicy.marked(session)
+                ? Optional.of(RESUME_PROMPT) : Optional.empty());
     }
 
     private static String kindName(AgentKind kind) {

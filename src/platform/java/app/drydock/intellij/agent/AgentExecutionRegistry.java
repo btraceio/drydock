@@ -3,6 +3,7 @@ package app.drydock.intellij.agent;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.identity.AgentIdentityException;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.editorqa.EditorAskLane;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.identity.AgentIdentityLauncher;
 import app.drydock.intellij.project.ProjectIdentity;
@@ -49,6 +50,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * Every live agent process in the IDE, and which window — if any — shows
@@ -107,6 +109,23 @@ public final class AgentExecutionRegistry implements Disposable {
     /** Sessions whose agent a click has just started, until the process is live or the start failed. */
     private final Set<ManagedSessionId> starting = ConcurrentHashMap.newKeySet();
     private final LaunchClaims launchClaims = new LaunchClaims(this::isRunning);
+    /** Marked (editor Q&A) sessions whose terminal is display-only; one policy per session, kept across every rebinding. */
+    private final Map<ManagedSessionId, MarkedExecutionInputPolicy> displayOnly = new ConcurrentHashMap<>();
+    /** Execution keys started under the guard: only those report their end to {@link #markedListener}. */
+    private final Set<String> markedKeys = ConcurrentHashMap.newKeySet();
+    private volatile MarkedExecutionListener markedListener;
+
+    /** Start and end of a display-only (Q&A) execution, with the execution's identity, never just the row's. */
+    public interface MarkedExecutionListener {
+        void started(ManagedSessionId sessionId, String executionKey);
+
+        void ended(ManagedSessionId sessionId, String executionKey);
+    }
+
+    /** Installs (or, with null, clears) the one listener of marked executions. */
+    public void markedListener(MarkedExecutionListener listener) {
+        this.markedListener = listener;
+    }
 
     /** The launch claims every session launch in this IDE goes through; see {@link LaunchClaims}. */
     public LaunchClaims launchClaims() {
@@ -475,6 +494,11 @@ public final class AgentExecutionRegistry implements Disposable {
             return CompletableFuture.failedFuture(new IllegalStateException(
                     "Session " + sessionId + " already has a running agent"));
         }
+        if (displayOnly.containsKey(sessionId)) {
+            String key = executionKey(execution);
+            markedKeys.add(key);
+            notifyMarked(sessionId, key, true);
+        }
         CompletableFuture<AgentExecution> started = new CompletableFuture<>();
         // ModalityState.any(): a start from a modal dialog must still land
         // while that dialog is up. Not expiring on the host's disposal: an
@@ -540,6 +564,10 @@ public final class AgentExecutionRegistry implements Disposable {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, () -> "Could not record the end of " + sessionId + ": " + e);
         }
+        String key = executionKey(execution);
+        if (markedKeys.remove(key)) {
+            notifyMarked(sessionId, key, false);
+        }
         // The requested end, if any, was delivered: its mark is consumed, so
         // it can never steer a later end (a future launch's client).
         remoteClientEnds.consume(sessionId);
@@ -601,7 +629,8 @@ public final class AgentExecutionRegistry implements Disposable {
         // retaining every console ever moved away from.
         ProcessHandlerTtyConnector tty = new ProcessHandlerTtyConnector(execution.handler(), StandardCharsets.UTF_8);
         NopProcessHandler output = new NopProcessHandler();
-        console.attachToProcess(output, tty, true);
+        MarkedExecutionInputPolicy marked = displayOnly.get(sessionId);
+        console.attachToProcess(output, marked == null ? tty : marked.guard(tty), true);
         output.startNotify();
         attachReshowRedraw(console, tty);
         execution.shownIn(target, console);
@@ -757,12 +786,13 @@ public final class AgentExecutionRegistry implements Disposable {
     public PromptOutcome submitPrompt(ManagedSessionId sessionId, String prompt) {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(prompt, "prompt");
-        if (prompt.indexOf('\n') >= 0 || prompt.indexOf('\r') >= 0) {
-            LOG.log(Level.WARNING, "Refusing a multi-line prompt for {0}", sessionId);
+        if (isDisplayOnly(sessionId)) {
+            // A raw review/task caller cannot reach a marked terminal; only
+            // the Q&A lane's reservation-bound submit can.
+            LOG.log(Level.WARNING, "Refusing a raw prompt for the display-only {0}", sessionId);
             return PromptOutcome.REFUSED;
         }
-        if (prompt.indexOf('\u001b') >= 0) {
-            LOG.log(Level.WARNING, "Refusing a prompt with an escape character for {0}", sessionId);
+        if (unsendable(sessionId, prompt)) {
             return PromptOutcome.REFUSED;
         }
         AgentExecution execution = executions.get(sessionId);
@@ -774,6 +804,93 @@ public final class AgentExecutionRegistry implements Disposable {
             return PromptOutcome.REFUSED;
         }
         return writePrompt(sessionId, in, framed(prompt), execution::isRunning);
+    }
+
+    private static boolean unsendable(ManagedSessionId sessionId, String prompt) {
+        if (prompt.indexOf('\n') >= 0 || prompt.indexOf('\r') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a multi-line prompt for {0}", sessionId);
+            return true;
+        }
+        if (prompt.indexOf('\u001b') >= 0) {
+            LOG.log(Level.WARNING, "Refusing a prompt with an escape character for {0}", sessionId);
+            return true;
+        }
+        return false;
+    }
+
+    private void notifyMarked(ManagedSessionId sessionId, String key, boolean started) {
+        MarkedExecutionListener listener = markedListener;
+        if (listener == null) {
+            return;
+        }
+        try {
+            if (started) {
+                listener.started(sessionId, key);
+            } else {
+                listener.ended(sessionId, key);
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "A marked execution listener failed for " + sessionId + ": " + e);
+        }
+    }
+
+    /** Makes {@code sessionId}'s terminal display-only; call before its agent starts. */
+    public void markDisplayOnly(ManagedSessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        displayOnly.computeIfAbsent(sessionId, id -> new MarkedExecutionInputPolicy());
+    }
+
+    /** Whether {@code sessionId}'s terminal is display-only. */
+    public boolean isDisplayOnly(ManagedSessionId sessionId) {
+        return displayOnly.containsKey(sessionId);
+    }
+
+    /** Identity of one execution (one launch), never of the session row; what a Q&A reservation binds to. */
+    public static String executionKey(AgentExecution execution) {
+        return execution.sessionId().value() + "@" + execution.startedAt().toEpochMilli()
+                + "#" + System.identityHashCode(execution);
+    }
+
+    /**
+     * The Q&A lane's only way to write into a display-only terminal: the
+     * same UTF-8 bracketed-paste {@link #framed} write as {@link
+     * #submitPrompt}, exactly once, but only for {@code reservation} bound
+     * to <em>this</em> execution and still {@code current}. A stale or
+     * foreign reservation, an ordinary row or a call on the EDT writes
+     * nothing ({@link PromptOutcome#REFUSED}). The write is tied to the
+     * execution resolved here: a delayed or stalled write cannot reach a
+     * replacement started under the same id. Any throw is {@link
+     * PromptOutcome#FAILED} (ambiguous); {@code DELIVERED} is no receipt.
+     * Blocking: off the EDT.
+     */
+    public PromptOutcome submitAskPrompt(ManagedSessionId sessionId, String prompt, EditorAskLane.Reservation reservation,
+                                         Predicate<EditorAskLane.Reservation> current) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(prompt, "prompt");
+        Objects.requireNonNull(reservation, "reservation");
+        Objects.requireNonNull(current, "current");
+        if (!isDisplayOnly(sessionId) || unsendable(sessionId, prompt)
+                || ApplicationManager.getApplication().isDispatchThread()) {
+            return PromptOutcome.REFUSED;
+        }
+        AgentExecution execution = executions.get(sessionId);
+        if (execution == null || !execution.isRunning()
+                || !executionKey(execution).equals(reservation.executionId())) {
+            return PromptOutcome.REFUSED;
+        }
+        OutputStream in = execution.handler().getProcessInput();
+        if (in == null) {
+            return PromptOutcome.REFUSED;
+        }
+        try {
+            if (!current.test(reservation)) {
+                return PromptOutcome.REFUSED;
+            }
+            return writePrompt(sessionId, in, framed(prompt), execution::isRunning);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Could not write a Q&A prompt to " + sessionId + ": " + e);
+            return PromptOutcome.FAILED;
+        }
     }
 
     /** {@code prompt} as a bracketed paste followed by a carriage return, in UTF-8. */
@@ -846,6 +963,7 @@ public final class AgentExecutionRegistry implements Disposable {
     public void forget(ManagedSessionId sessionId) {
         stop(sessionId);
         AgentExecution removed = executions.remove(sessionId);
+        displayOnly.remove(sessionId); // a forgotten row's guard must not outlive it (a relaunch marks again)
         if (removed == null) {
             return;
         }

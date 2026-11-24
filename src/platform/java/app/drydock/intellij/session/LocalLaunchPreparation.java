@@ -1,5 +1,6 @@
 package app.drydock.intellij.session;
 
+import app.drydock.agent.api.AgentKind;
 import app.drydock.agent.api.CreateContext;
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.agent.api.LaunchResources;
@@ -10,13 +11,22 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.spi.AgentProvider;
 import app.drydock.delayedtasks.TaskLaunchResources;
+import app.drydock.domain.AgentBinding;
+import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedAgentSession.SessionPurpose;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryId;
+import app.drydock.domain.SessionMode;
+import app.drydock.domain.SessionStatus;
+import app.drydock.domain.SessionWorkspace;
+import app.drydock.domain.WorkspaceBoxBinding;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.sdlc.SessionWorkflowResourceOwner;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -105,6 +115,38 @@ final class LocalLaunchPreparation {
         }
     }
 
+    // ---- marked (editor Q&A) rows: strict, empty resources, rotated credential ----
+
+    private static boolean marked(ManagedAgentSession row) {
+        return row.purpose() != SessionPurpose.ORDINARY;
+    }
+
+    /** As {@link #mcpAccessFor(ManagedSessionId, AgentProvider)}; a marked row's previous token is revoked first, under the caller's claim, so the mint is a fresh generation. */
+    Optional<McpAccess> mcpAccessFor(ManagedAgentSession row, AgentProvider provider) {
+        if (marked(row)) {
+            release(row.id());
+        }
+        return mcpAccessFor(row.id(), provider);
+    }
+
+    /** A marked row carries no task or receipt resources. */
+    Optional<LaunchResources> resourcesFor(ManagedAgentSession row, Optional<McpAccess> access) {
+        return marked(row) ? Optional.empty() : resourcesFor(row.id(), access);
+    }
+
+    /** A marked row gets no IDE stdio MCP server (the review surface). */
+    List<StdioMcpServer> stdioMcpServersFor(ManagedAgentSession row) {
+        return marked(row) ? List.of() : stdioMcpServersFor(row.workingDirectory());
+    }
+
+    CreateContext withWorkflow(CreateContext ctx, ManagedAgentSession row) {
+        return marked(row) ? ctx : withWorkflow(ctx, row.id());
+    }
+
+    ResumeContext withWorkflow(ResumeContext ctx, ManagedAgentSession row) {
+        return marked(row) ? ctx : withWorkflow(ctx, row.id());
+    }
+
     /**
      * Installs the local workflow-resource seam (T35): the one retained-resource owner and the resolver of a
      * session's typed access. Unset, every launch is exactly as before.
@@ -135,5 +177,22 @@ final class LocalLaunchPreparation {
 
     private Optional<LocalWorkflowAccess> access(ManagedSessionId id) {
         return workflowAccess.apply(id);
+    }
+
+    static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
+            AgentKind kind, String displayName, SessionMode mode) {
+        return newSessionMetadata(repositoryId, workingDirectory, kind, displayName, mode, Optional.empty());
+    }
+
+    static ManagedAgentSession newSessionMetadata(RepositoryId repositoryId, Path workingDirectory,
+            AgentKind kind, String displayName, SessionMode mode, Optional<WorkspaceBoxBinding> workspaceBox) {
+        return new ManagedAgentSession.Builder(
+                ManagedSessionId.newId(), repositoryId, displayName,
+                AgentBinding.unlaunched(kind, mode),
+                SessionWorkspace.inRepository(workingDirectory),
+                Instant.now())
+                .status(SessionStatus.STARTING)
+                .workspaceBox(workspaceBox)
+                .build();
     }
 }
