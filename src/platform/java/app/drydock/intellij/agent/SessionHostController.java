@@ -364,6 +364,20 @@ public final class SessionHostController implements Disposable, SessionPane.Host
         return retained;
     }
 
+    /**
+     * The pane of {@code id} for a navigation issued under {@code requestEpoch}: only while the
+     * host is alive, no later request has superseded it, and the session is in the primary or
+     * held slot. Creates and starts nothing else; never a launch.
+     */
+    Optional<SessionPane> paneIfCurrent(ManagedSessionId id, long requestEpoch) {
+        Objects.requireNonNull(id, "id");
+        if (closed() || requestEpoch != epoch
+                || !(layout.primary().filter(id::equals).isPresent() || layout.held().filter(id::equals).isPresent())) {
+            return Optional.empty();
+        }
+        return Optional.of(paneFor(id));
+    }
+
     /** The retained pane in the focused slot, only while a lease is held and the host is alive. */
     Optional<SessionPane> focusedPane() {
         if (lease == null || closed()) {

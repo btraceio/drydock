@@ -111,6 +111,8 @@ final class SessionPane {
     /** The command state the strip was last painted with: the intent a click was invited under. */
     private SessionCommands.State painted;
     private String title = "";
+    /** An extra view hosted beside the body (a marked session's Q&A history); never part of ordinary panes. */
+    private JComponent sideView;
 
     /** The shared lifecycle handler's call, the one launch/focus effect boundary a test may replace. */
     @FunctionalInterface
@@ -137,6 +139,29 @@ final class SessionPane {
     /** The session this pane presents. */
     ManagedSessionId sessionId() {
         return sessionId;
+    }
+
+    /**
+     * Hosts {@code view} below the body, replacing any earlier one; null removes it.
+     * Only the marked Q&A session's pane is given one. The body, console and
+     * strip are untouched, so a stopped or detached pane shows it without resuming. EDT.
+     */
+    void setSideView(JComponent view) {
+        if (disposed || view == sideView) {
+            return;
+        }
+        if (sideView != null) {
+            root.remove(sideView);
+        }
+        sideView = view;
+        if (view != null) {
+            root.add(view, BorderLayout.SOUTH);
+        }
+        root.revalidate();
+    }
+
+    JComponent sideView() {
+        return sideView;
     }
 
     AgentConsoleStrip strip() {
@@ -375,6 +400,7 @@ final class SessionPane {
         disposed = true;
         releaseStopped();
         body.removeAll();
+        sideView = null;
         mounted = null;
         mountedConsole = null;
         detachRoot();

@@ -140,6 +140,7 @@
         <notificationGroup id="Drydock tasks" displayType="BALLOON"/>
         <!-- "Review posted on PR #n": the pull request lane's submit (W5e). -->
         <notificationGroup id="Drydock review" displayType="BALLOON"/>
+        <notificationGroup id="Drydock editor ask" displayType="BALLOON"/>
         <!-- "PR #n merged/closed - done with <session>?": the session Done
              offer (PullRequestDoneOffers). -->
         <notificationGroup id="Drydock pull requests" displayType="BALLOON"/>
@@ -152,6 +153,10 @@
 
         <postStartupActivity
                 implementation="app.drydock.intellij.startup.DrydockStartupActivity"/>
+        <!-- Editor Q&A presentation (inlay cards, launch policy) per project, attached once the
+             plugin service is initialized; independent of any review tab. -->
+        <postStartupActivity
+                implementation="app.drydock.intellij.editorqa.EditorAskService$ProjectStartup"/>
 
         <!-- The [[id]] / [[project:id]] navigation in task documents
              (T21a, P5): a caret inside a bracketed task reference in a
@@ -243,6 +248,14 @@
                 description="Ask the review's agent about the selected lines; the answer arrives as a finding">
             <add-to-group group-id="Diff.EditorPopupMenu" anchor="after"
                           relative-to-action="Drydock.Review.CommentOnSelection"/>
+        </action>
+        <!-- Ask Agent: a question about the selected code in an ordinary
+             editor (not the diff popup, no review binding). -->
+        <action id="Drydock.EditorAsk.Ask"
+                class="app.drydock.intellij.editorqa.EditorAskAction"
+                text="Ask Agent…"
+                description="Ask the agent about the selected code">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
         <!-- Drydock is reached through its tool window, not a menu: New
              Session is outside it so the shortcut works anywhere, and the

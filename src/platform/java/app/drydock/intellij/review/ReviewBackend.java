@@ -14,6 +14,7 @@ import app.drydock.git.GitStatusService;
 import app.drydock.git.PrCheckoutService;
 import app.drydock.git.WorktreeService;
 import app.drydock.github.GitHubReviewService;
+import app.drydock.mcp.EditorAskAnswerDelegate;
 import app.drydock.mcp.McpConfigWriter;
 import app.drydock.mcp.McpServer;
 import app.drydock.mcp.McpSessionContext.RenameOutcome;
@@ -41,10 +42,12 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -89,6 +92,8 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
     /** Package-private so tests can replace it; production uses {@link McpConfigWriter}. */
     CredentialWriter credentialWriter;
     private volatile boolean ready;
+    /** The Q&A rows whose launches get a rotated, bounded-read credential; null until the delegate is injected. */
+    private volatile Predicate<ManagedSessionId> editorAskRows;
 
     public ReviewBackend(Path baseDir, Supplier<List<ManagedAgentSession>> sessions,
                          Supplier<List<Repository>> repositories, AgentRegistry agentRegistry) {
@@ -392,7 +397,10 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
         if (closed.get() || !ready || delivery == McpDelivery.NONE) {
             return Optional.empty();
         }
-        String token = mcpRegistry.mint(sessionId, Spawn.FORBIDDEN);
+        Predicate<ManagedSessionId> qa = editorAskRows;
+        // A Q&A row gets a fresh generation and bounded request reads under the launch's exclusive claim.
+        String token = qa != null && qa.test(sessionId) ? mcpRegistry.rotateAndMint(sessionId, Spawn.FORBIDDEN)
+                : mcpRegistry.mint(sessionId, Spawn.FORBIDDEN);
         try {
             // Both deliveries get a file so a credential is never a
             // command-line argument; COMMAND_LINE gets the bare token.
@@ -407,6 +415,31 @@ public final class ReviewBackend implements SessionMcpAccess, AutoCloseable {
                     + "; launching without Drydock tools: " + e.getClass().getSimpleName());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Opts this local router into {@code editor_ask_answer} (once) and marks which rows' launches get
+     * rotated, bounded-read credentials. Independent of the review UI; the remote composition never sees it.
+     */
+    public void serveEditorAskAnswer(EditorAskAnswerDelegate delegate, Predicate<ManagedSessionId> qaRows) {
+        editorAskRows = Objects.requireNonNull(qaRows, "qaRows");
+        router.serveEditorAskAnswer(delegate);
+    }
+
+    /** Whether the local router lists and serves {@code editor_ask_answer}. */
+    public boolean servesEditorAskAnswer() {
+        return router.serves(EditorAskAnswerDelegate.TOOL_NAME);
+    }
+
+    /** Whether {@code generation} is {@code sessionId}'s current credential generation. */
+    public boolean isCurrentCredential(ManagedSessionId sessionId, long generation) {
+        return mcpRegistry.isCurrent(sessionId, generation);
+    }
+
+    /** The nonsecret generation of {@code sessionId}'s current credential, if it holds one. */
+    public OptionalLong credentialGeneration(ManagedSessionId sessionId) {
+        return mcpRegistry.tokenFor(sessionId).flatMap(mcpRegistry::authenticate)
+                .map(c -> OptionalLong.of(c.generation())).orElse(OptionalLong.empty());
     }
 
     /** Writes the credential file for one delivery; a seam so tests can force a failed write. */
