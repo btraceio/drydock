@@ -59,7 +59,8 @@ public final class TaskFilePatch {
      * caller mutations cannot change what a patch writes.
      */
     public record Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
-            List<String> after, List<String> sessions, List<String> mirrors, Instant doneAt) {
+            List<String> after, List<String> sessions, List<String> mirrors, Instant doneAt,
+            TaskPriority priority) {
 
         public Updates {
             after = snapshotEntries(after, "after");
@@ -67,15 +68,26 @@ public final class TaskFilePatch {
             mirrors = snapshotEntries(mirrors, "mirrors");
         }
 
-        /** The updates before tasks recorded when they were done: {@code done_at} left unchanged. */
+        /** The updates before tasks carried a priority: unchanged. */
         public Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
-                List<String> after, List<String> sessions, List<String> mirrors) {
-            this(title, status, doneBy, created, after, sessions, mirrors, null);
+                List<String> after, List<String> sessions, List<String> mirrors, Instant doneAt) {
+            this(title, status, doneBy, created, after, sessions, mirrors, doneAt, null);
         }
 
         /** This update with {@code done_at} set to {@code doneAt}; every other field unchanged. */
         public Updates withDoneAt(Instant doneAt) {
-            return new Updates(title, status, doneBy, created, after, sessions, mirrors, doneAt);
+            return new Updates(title, status, doneBy, created, after, sessions, mirrors, doneAt, priority);
+        }
+
+        /** This update with {@code priority} set; every other field unchanged. */
+        public Updates withPriority(TaskPriority priority) {
+            return new Updates(title, status, doneBy, created, after, sessions, mirrors, doneAt, priority);
+        }
+
+        /** The updates before tasks recorded when they were done: {@code done_at} left unchanged. */
+        public Updates(String title, TaskStatus status, DoneBy doneBy, Instant created,
+                List<String> after, List<String> sessions, List<String> mirrors) {
+            this(title, status, doneBy, created, after, sessions, mirrors, null);
         }
 
         /** The updates before tasks could be mirrored: {@code mirrors} left unchanged. */
@@ -133,6 +145,10 @@ public final class TaskFilePatch {
         if (updates.doneAt() != null && !Optional.of(updates.doneAt()).equals(doc.doneAt())) {
             spanEdit(spans.get("done_at"), edits, inserted, "done_at: " + updates.doneAt());
         }
+        if (priorityWriteRequested(updates, doc)
+                && !Optional.of(updates.priority()).equals(doc.priority())) {
+            spanEdit(spans.get("priority"), edits, inserted, "priority: " + updates.priority().storedName());
+        }
         if (!inserted.isEmpty()) {
             edits.add(insertion(parsed, inserted));
         }
@@ -154,7 +170,8 @@ public final class TaskFilePatch {
     /**
      * Renders a new task file: canonical known front matter (P1 order:
      * title, status, done_by, created only when present, after, sessions,
-     * mirrors only when there is one, done_at only when present; lists always flow style, scalars
+     * mirrors only when there is one, done_at only when present, priority
+     * only when a NAMED one is set; lists always flow style, scalars
      * through the shared {@link #quoted}) followed by the document's raw
      * body verbatim. Only the known fields are written -- unknown keys have nowhere to come from in a new
      * file -- so this is not a general YAML serializer, and it reuses
@@ -177,6 +194,11 @@ public final class TaskFilePatch {
             out.append("mirrors: ").append(list(document.mirrors())).append('\n');
         }
         document.doneAt().ifPresent(doneAt -> out.append("done_at: ").append(doneAt).append('\n'));
+        // A new file never stores the explicit Unprioritized: unset is the
+        // same state and the canonical form stays minimal.
+        document.priority()
+                .filter(p -> p != TaskPriority.UNPRIORITIZED)
+                .ifPresent(priority -> out.append("priority: ").append(priority.storedName()).append('\n'));
         out.append("---\n").append(document.rawBody());
         String result = out.toString();
         checkNewFile(document, result);
@@ -195,7 +217,10 @@ public final class TaskFilePatch {
                 || !reparsed.after().equals(document.after())
                 || !reparsed.sessions().equals(document.sessions())
                 || !reparsed.mirrors().equals(document.mirrors())
-                || !reparsed.doneAt().equals(document.doneAt())) {
+                || !reparsed.doneAt().equals(document.doneAt())
+                // The explicit Unprioritized is never stored in a new file:
+                // unset is the same state.
+                || !reparsed.priority().equals(document.usablePriority())) {
             throw new TaskFormatException("New-file front matter does not round-trip");
         }
     }
@@ -551,9 +576,19 @@ public final class TaskFilePatch {
                 || updates.after() != null && !updates.after().equals(reparsed.after())
                 || updates.sessions() != null && !updates.sessions().equals(reparsed.sessions())
                 || updates.mirrors() != null && !updates.mirrors().equals(reparsed.mirrors())
-                || updates.doneAt() != null && !Optional.of(updates.doneAt()).equals(reparsed.doneAt())) {
+                || updates.doneAt() != null && !Optional.of(updates.doneAt()).equals(reparsed.doneAt())
+                // The Unprioritized-on-unset skip writes nothing: the reparse
+                // stays empty, and that IS the requested round-trip state.
+                || priorityWriteRequested(updates, doc) && !Optional.of(updates.priority()).equals(reparsed.priority())) {
             throw new TaskFormatException("Patched front matter does not round-trip");
         }
+    }
+
+    /** Whether this update actually writes a priority entry: everything but
+     * the Unprioritized-on-unset no-op that {@link #patch} skips. Pure. */
+    private static boolean priorityWriteRequested(TaskFilePatch.Updates updates, TaskDocument doc) {
+        return updates.priority() != null
+                && !(updates.priority() == TaskPriority.UNPRIORITIZED && doc.priority().isEmpty());
     }
 
     /**

@@ -37,7 +37,10 @@ import java.util.Optional;
  * multi-document front matter, duplicate keys, aliases, unbounded
  * nesting/collections, and invalid values for known fields ({@code title},
  * {@code status}, {@code done_by}, {@code created}, {@code after},
- * {@code sessions}, {@code mirrors}, {@code done_at}). Unknown keys, comments and the body are never
+ * {@code sessions}, {@code mirrors}, {@code done_at}). An unknown
+ * {@code priority} name is the one lenient known field: it parses to unset
+ * instead of failing, so a foreign or hand-edited name never makes a task
+ * unreadable. Unknown keys, comments and the body are never
  * interpreted — they survive byte for byte in
  * {@link TaskDocument#rawFrontMatter()} and {@link TaskDocument#rawBody()}.
  *
@@ -114,7 +117,7 @@ public final class TaskFileReader {
                 : Optional.ofNullable(createdFallback);
         TaskDocument document = new TaskDocument(id, repository, fields.title, fields.status, fields.doneBy,
                 created, fields.after, fields.sessions, fields.mirrors, Optional.ofNullable(fields.doneAt),
-                envelope.frontMatter(), envelope.body());
+                fields.priority, envelope.frontMatter(), envelope.body());
         return new Parsed(document, fields.spans,
                 new Span(envelope.frontStart(), envelope.frontStart() + envelope.frontMatter().length()));
     }
@@ -172,6 +175,7 @@ public final class TaskFileReader {
         List<String> sessions;
         List<String> mirrors;
         Instant doneAt;
+        Optional<TaskPriority> priority = Optional.empty();
         final Map<String, Span> spans = new LinkedHashMap<>();
     }
 
@@ -221,6 +225,10 @@ public final class TaskFileReader {
                     fields.doneAt = instantValue(value, "done_at");
                     fields.spans.put("done_at", entrySpan(source, envelope, key, value));
                 }
+                case "priority" -> {
+                    fields.priority = priorityValue(value, "priority");
+                    fields.spans.put("priority", entrySpan(source, envelope, key, value));
+                }
                 default -> {
                     // Unknown key: preserved only as raw text, never interpreted.
                 }
@@ -249,6 +257,14 @@ public final class TaskFileReader {
         }
         throw new TaskFormatException("Front-matter field '" + field + "' must be a string, got "
                 + (value instanceof ScalarNode ? ((ScalarNode) value).getTag().getValue() : value.getTag().getValue()));
+    }
+
+    private static Optional<TaskPriority> priorityValue(Node value, String field) throws TaskFormatException {
+        String text = stringValue(value, field);
+        // Lenient by design: an unknown name (another site's custom priority, a
+        // typo) parses to unset instead of failing the whole task file -- the
+        // raw bytes survive, only the usable priority is empty.
+        return TaskPriority.fromKnown(text);
     }
 
     private static Instant instantValue(Node value, String field) throws TaskFormatException {

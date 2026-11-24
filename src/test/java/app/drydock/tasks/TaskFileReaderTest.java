@@ -14,6 +14,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TaskFileReaderTest {
@@ -285,6 +286,34 @@ class TaskFileReaderTest {
         assertThrows(TaskFormatException.class,
                 () -> parse("---\ntitle: t\n---\n" + "x".repeat(TaskFileReader.MAX_FILE_CODE_POINTS)),
                 "oversized file");
+    }
+
+    /**
+     * The known priority: exact names parse, an unknown name is the one
+     * lenient known field (unset, never a failed parse), and a non-string
+     * value is refused like every other known field's type error.
+     */
+    @Test
+    void priorityParsesNamedValuesAndTreatsUnknownNamesAsUnset() throws Exception {
+        assertEquals(Optional.of(TaskPriority.TOP),
+                parse("---\ntitle: t\npriority: Top\n---\n").document().priority());
+        assertEquals(Optional.of(TaskPriority.LOWEST),
+                parse("---\ntitle: t\npriority: Lowest\n---\n").document().priority());
+        assertEquals(Optional.of(TaskPriority.UNPRIORITIZED),
+                parse("---\ntitle: t\npriority: Unprioritized\n---\n").document().priority());
+        // The one lenient known field: a foreign or mistyped name never makes
+        // the task unreadable, it only loses its usable priority.
+        TaskFileReader.Parsed foreign = parse("---\ntitle: t\npriority: P3\n---\n");
+        assertEquals(Optional.empty(), foreign.document().priority());
+        assertTrue(foreign.document().rawFrontMatter().contains("P3"),
+                "the raw bytes still carry the foreign value");
+        assertTrue(foreign.knownKeySpans().containsKey("priority"),
+                "the entry is still patchable, so a later write can replace it");
+        // Case is not exactness here: the lenient parse accepts it too.
+        assertEquals(Optional.of(TaskPriority.HIGH),
+                parse("---\ntitle: t\npriority: high\n---\n").document().priority());
+        assertThrows(TaskFormatException.class,
+                () -> parse("---\ntitle: t\npriority: 3\n---\n"), "a non-string is a type refusal");
     }
 
     private static void assertDoesNotThrowParse(String source, String what) {
