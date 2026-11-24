@@ -1523,7 +1523,8 @@ n     * git scans (the placeholder root is not a local checkout, and every
             stable = projects.register(saved.projectRoot(), saved.projectName())
                     .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS).id();
         }
-        TaskDocument created = committed(tasks.create(saved.title(), saved.after(), stable)
+        TaskDocument created = committed(tasks.create(saved.title(), saved.after(), stable,
+                        Optional.of(saved.priority()))
                         .get(PREPARE_TIMEOUT_SECONDS, TimeUnit.SECONDS),
                 "Drydock could not save the task \"" + saved.title() + "\"");
         TaskDocument task = created;

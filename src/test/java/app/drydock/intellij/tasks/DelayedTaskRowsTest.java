@@ -257,6 +257,42 @@ class DelayedTaskRowsTest {
         assertEquals(derive(View.ALL, ""), derive(View.ALL, ""));
     }
 
+    /**
+     * Priority decides inside a presentation bucket: the most urgent task
+     * sits at the top of its bucket whatever its age or id, an unprioritized
+     * (and unset) task sorts below every named one, and the bucket order
+     * itself is untouched.
+     */
+    @Test
+    void orderingWithinABucketIsHighestPriorityFirst() {
+        TaskDocument low = doc(ALPHA, "prio-low", "Low urgency", TaskStatus.OPEN, YOUNG, List.of(), List.of());
+        TaskDocument top = doc(ALPHA, "prio-top", "Top urgency", TaskStatus.OPEN, YOUNG, List.of(), List.of());
+        TaskDocument unset = doc(ALPHA, "prio-unset", "No priority at all", TaskStatus.OPEN, YOUNG,
+                List.of(), List.of());
+        TaskDocument explicitUnprioritized = doc(ALPHA, "prio-explicit", "Explicitly unprioritized",
+                TaskStatus.OPEN, YOUNG, List.of(), List.of());
+        top = withPriority(top, TaskPriority.TOP);
+        low = withPriority(low, TaskPriority.LOW);
+        explicitUnprioritized = withPriority(explicitUnprioritized, TaskPriority.UNPRIORITIZED);
+        List<DelayedTaskRow> rows = DelayedTaskRows.sorted(DelayedTaskRows.rows(
+                snapshot(List.of(unset, low, top, explicitUnprioritized)), Set.of(), SLUGS, NOW));
+        assertEquals(List.of("prio-top", "prio-low", "prio-explicit", "prio-unset"),
+                rows.stream().map(row -> row.id().text()).toList(),
+                "Top first, then Low, then both unprioritized variants last (id tiebreak among ties)");
+        assertEquals(Optional.of(TaskPriority.TOP), rows.get(0).priority());
+        assertEquals(Optional.of(TaskPriority.UNPRIORITIZED), rows.get(2).priority(),
+                "the explicit Unprioritized carries through the row");
+        assertEquals(Optional.empty(), rows.get(3).priority(), "the unset one stays empty");
+    }
+
+    /** One document carrying a priority; the row builder reads it off the document. */
+    private static TaskDocument withPriority(TaskDocument document, TaskPriority priority) {
+        return new TaskDocument(document.id(), document.repository(), document.title(), document.status(),
+                document.doneBy(), document.created(), document.after(), document.sessions(),
+                document.mirrors(), document.doneAt(), Optional.of(priority),
+                document.rawFrontMatter(), document.rawBody());
+    }
+
     /** Matrix 6: All vs Tasks view contents and the text search. */
     @Test
     void viewsAndTextSearchFilter() {

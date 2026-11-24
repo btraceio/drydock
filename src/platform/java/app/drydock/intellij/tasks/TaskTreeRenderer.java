@@ -32,6 +32,7 @@ import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
 import app.drydock.tasks.TaskMirror;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskState;
 import app.drydock.ui.AgentLabels;
 
@@ -272,7 +273,7 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
 
     /**
      * Pure. The badge colour of a Jira priority name: Jira's five default
-     * names map to their colour (red for Highest/High, amber for Medium,
+     * names map to their colour (red for Top/Highest/High, amber for Medium,
      * green for Low/Lowest) and any other name — sites define custom
      * priorities with arbitrary names — gets the neutral mark. Empty only
      * for a blank name; an issue without a priority is decided by the
@@ -280,11 +281,28 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
      */
     static Optional<PriorityKind> priorityKind(String priority) {
         return switch (priority.strip().toLowerCase(Locale.ROOT)) {
-            case "highest", "high" -> Optional.of(PriorityKind.HIGH);
+            case "top", "highest", "high" -> Optional.of(PriorityKind.HIGH);
             case "medium", "middle" -> Optional.of(PriorityKind.MEDIUM);
             case "low", "lowest" -> Optional.of(PriorityKind.LOW);
             case "" -> Optional.empty();
             default -> Optional.of(PriorityKind.NEUTRAL);
+        };
+    }
+
+    /**
+     * Pure. The badge colour of a task's stored priority: the named values
+     * map like the same Jira names do; the explicit Unprioritized answers
+     * empty — no badge, exactly like a task with no priority at all.
+     */
+    static Optional<PriorityKind> priorityKind(TaskPriority priority) {
+        if (priority == TaskPriority.UNPRIORITIZED) {
+            return Optional.empty();
+        }
+        return switch (priority) {
+            case TOP, HIGHEST, HIGH -> Optional.of(PriorityKind.HIGH);
+            case MEDIUM -> Optional.of(PriorityKind.MEDIUM);
+            case LOW, LOWEST -> Optional.of(PriorityKind.LOW);
+            case UNPRIORITIZED -> Optional.empty();
         };
     }
 

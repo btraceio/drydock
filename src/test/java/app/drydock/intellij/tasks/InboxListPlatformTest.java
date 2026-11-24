@@ -35,9 +35,13 @@ import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.ui.SessionDots;
 import app.drydock.projects.SharedProject;
+import app.drydock.tasks.DelayedTaskRows;
 import app.drydock.tasks.DoneBy;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskId;
+import app.drydock.tasks.TaskMirror;
+import app.drydock.tasks.TaskPriority;
+import app.drydock.tasks.TaskSnapshot;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
 import app.drydock.tasks.TaskState.Presentation;
 import app.drydock.tasks.TaskState.TaskView;
@@ -216,6 +220,36 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         if (component instanceof Container container) {
             for (Component child : container.getComponents()) {
                 visibleLabels(child, labels);
+            }
+        }
+    }
+
+    public void testExplicitUnprioritizedSuppressesTheJiraMirrorBadge() throws Exception {
+        String mirror = "https://acme.atlassian.net/browse/PROJ-7";
+        String issueKey = TaskMirror.jiraKeyOf(mirror).orElseThrow();
+        list.jiraPriorities(() -> Map.of(issueKey, Optional.of("High")));
+
+        for (Optional<TaskPriority> storedPriority : List.<Optional<TaskPriority>>of(
+                Optional.of(TaskPriority.UNPRIORITIZED), Optional.empty())) {
+            String title = storedPriority.isPresent() ? "Explicitly unprioritized" : "Unset priority";
+            TaskId id = TaskId.of(storedPriority.isPresent() ? "unprioritized-row" : "unset-priority-row");
+            TaskDocument document = new TaskDocument(id, TASKS, title, TaskStatus.OPEN, DoneBy.HUMAN,
+                    Optional.empty(), List.of(), List.of(), List.of(mirror), Optional.empty(), storedPriority,
+                    "", "");
+            TaskSnapshot snapshot = new TaskSnapshot(List.of(document), List.of(TASKS), Map.of(id, document),
+                    Map.of(), List.of(), List.of());
+            DelayedTaskRow row = DelayedTaskRows.rows(snapshot, Set.of(), repository -> "alpha", NOW).getFirst();
+            TaskItem item = new TaskItem(row, Optional.empty());
+            list.show(new Inbox(List.of(new Group(GroupKind.READY, "Ready to start", List.of(item))), List.of(), 0),
+                    false);
+
+            Icon icon = renderedIcon(indexOf(title), title);
+            if (storedPriority.isPresent()) {
+                assertSame("explicit Unprioritized suppresses the mirror's High badge",
+                        InboxList.icon(item), icon);
+            } else {
+                assertTrue("unset priority still uses the mirror's High badge", icon instanceof RowIcon);
+                assertTrue(((RowIcon) icon).getAllIcons().contains(TaskTreeRenderer.PRIORITY_HIGH_ICON));
             }
         }
     }
