@@ -18,7 +18,6 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -103,6 +102,10 @@ public final class McpServer implements AutoCloseable {
      */
     private static final Set<String> SUPPORTED_PROTOCOL_VERSIONS =
             Set.of("2024-11-05", "2025-03-26", "2025-06-18");
+
+    /** Wire budget and JSON depth for requests under a Q&A credential on the local endpoint. */
+    private static final int QA_MAX_BODY_BYTES = 256 * 1024;
+    private static final int QA_MAX_JSON_DEPTH = 32;
 
     private final McpSessionRegistry registry;
     private final McpToolRouter router;
@@ -406,14 +409,14 @@ public final class McpServer implements AutoCloseable {
          * sets both and gets one wrong is a client to be forgiving of, not a
          * privilege boundary to defend.</p>
          */
-        private Optional<ManagedSessionId> resolveCaller(HttpExchange exchange) {
-            Optional<ManagedSessionId> byDrydockHeader =
-                    registry.resolve(exchange.getRequestHeaders().getFirst(TOKEN_HEADER));
+        private Optional<McpSessionRegistry.Credential> resolveCaller(HttpExchange exchange) {
+            Optional<McpSessionRegistry.Credential> byDrydockHeader =
+                    registry.authenticate(exchange.getRequestHeaders().getFirst(TOKEN_HEADER));
             if (byDrydockHeader.isPresent()) {
                 return byDrydockHeader;
             }
             return bearerCredential(exchange.getRequestHeaders().getFirst("Authorization"))
-                    .flatMap(registry::resolve);
+                    .flatMap(registry::authenticate);
         }
 
         /**
@@ -456,21 +459,29 @@ public final class McpServer implements AutoCloseable {
 
             // The body is read before the token resolves, because a rejected
             // call is worth a row naming it -- see recordRejectedToolCall.
-            byte[] raw = readBody(exchange.getRequestBody());
-            if (policy.bounded() && raw.length > policy.maxBodyBytes()) {
+            // Authenticated once, up front: the credential freezes the caller with
+            // its generation, and selects the Q&A bounded read below.
+            Optional<McpSessionRegistry.Credential> credential = resolveCaller(exchange);
+            boolean qaBounded = !policy.bounded() && credential.map(McpSessionRegistry.Credential::boundedReads)
+                    .orElse(false);
+            boolean bounded = policy.bounded() || qaBounded;
+            int maxBody = qaBounded ? QA_MAX_BODY_BYTES : policy.maxBodyBytes();
+            int maxDepth = qaBounded ? QA_MAX_JSON_DEPTH : policy.maxJsonDepth();
+            byte[] raw = bounded ? exchange.getRequestBody().readNBytes(maxBody + 1)
+                    : exchange.getRequestBody().readAllBytes();
+            if (bounded && raw.length > maxBody) {
                 sendEmpty(exchange, 413);
                 return;
             }
             String body = new String(raw, StandardCharsets.UTF_8);
             JsonValue parsed;
             try {
-                parsed = policy.bounded() ? JsonParser.parseStrict(body, policy.maxJsonDepth())
-                        : JsonParser.parse(body);
+                parsed = bounded ? JsonParser.parseStrict(body, maxDepth) : JsonParser.parse(body);
             } catch (JsonParseException e) {
                 // There is nothing the activity panel can show -- no call to
                 // name -- so the one trace an unparseable request gets is here.
                 // A bounded endpoint logs no parser text: it can echo request content.
-                LOG.log(Level.WARNING, policy.bounded() ? "Could not parse an MCP request"
+                LOG.log(Level.WARNING, bounded ? "Could not parse an MCP request"
                         : "Could not parse an MCP request: " + e.getMessage());
                 sendJson(exchange, 200, errorResponse(JsonValue.JsonNull.INSTANCE, -32700, "Parse error"));
                 return;
@@ -500,7 +511,8 @@ public final class McpServer implements AutoCloseable {
             String method = request.get("method") instanceof JsonString s ? s.value() : null;
             JsonValue params = request.get("params");
 
-            Optional<ManagedSessionId> caller = resolveCaller(exchange);
+            Optional<ManagedSessionId> caller = credential.map(McpSessionRegistry.Credential::session);
+            long generation = credential.map(McpSessionRegistry.Credential::generation).orElse(-1L);
             if (caller.isEmpty()) {
                 recordRejectedToolCall(method, params);
                 sendEmpty(exchange, 401);
@@ -518,7 +530,7 @@ public final class McpServer implements AutoCloseable {
             String launchNonce = exchange.getRequestHeaders().getFirst("X-Drydock-Launch-Nonce");
             String bridgePid = exchange.getRequestHeaders().getFirst("X-Drydock-Bridge-Pid");
             RemoteAuthorizationPermit requestPermit = permit;
-            Supplier<JsonValue> call = () -> dispatchBound(requestPermit, caller.get(), method, params, id,
+            Supplier<JsonValue> call = () -> dispatchBound(requestPermit, caller.get(), generation, method, params, id,
                     launchNonce, bridgePid);
             if (!policy.bounded()) {
                 sendJson(exchange, 200, call.get());
@@ -562,7 +574,7 @@ public final class McpServer implements AutoCloseable {
         }
 
         /** Binds the request's permit for exactly this dispatch and notifies the observer of an authenticated initialize. */
-        private JsonValue dispatchBound(RemoteAuthorizationPermit permit, ManagedSessionId caller, String method,
+        private JsonValue dispatchBound(RemoteAuthorizationPermit permit, ManagedSessionId caller, long generation, String method,
                                         JsonValue params, JsonValue id, String launchNonce, String bridgePid) {
             try (RemoteAuthorizationPermit.Bound ignored = permit == null ? null
                     : RemoteAuthorizationPermit.Bound.bind(permit)) {
@@ -574,16 +586,16 @@ public final class McpServer implements AutoCloseable {
                         LOG.log(Level.WARNING, "Initialize observer failed: " + e.getClass().getSimpleName());
                     }
                 }
-                return dispatch(caller, method, params, id);
+                return dispatch(caller, generation, method, params, id);
             }
         }
 
-        private JsonValue dispatch(ManagedSessionId caller, String method, JsonValue params, JsonValue id) {
+        private JsonValue dispatch(ManagedSessionId caller, long generation, String method, JsonValue params, JsonValue id) {
             return switch (method == null ? "" : method) {
                 case "initialize" -> successResponse(id, initializeResult(params));
                 case "ping" -> successResponse(id, JsonObject.empty());
                 case "tools/list" -> successResponse(id, toolsListResult());
-                case "tools/call" -> toolsCall(caller, params, id);
+                case "tools/call" -> toolsCall(caller, generation, params, id);
                 default -> errorResponse(id, -32601, "Method not found: " + method);
             };
         }
@@ -633,7 +645,7 @@ public final class McpServer implements AutoCloseable {
             }
         }
 
-        private JsonValue toolsCall(ManagedSessionId caller, JsonValue params, JsonValue id) {
+        private JsonValue toolsCall(ManagedSessionId caller, long generation, JsonValue params, JsonValue id) {
             JsonObject args = params instanceof JsonObject object ? object : JsonObject.empty();
             JsonValue nameValue = args.get("name");
             if (!(nameValue instanceof JsonString nameString)) {
@@ -647,11 +659,11 @@ public final class McpServer implements AutoCloseable {
             JsonValue arguments = args.get("arguments");
 
             try {
-                JsonValue toolResult = router.call(caller, name, arguments);
+                JsonValue toolResult = router.call(caller, generation, name, arguments);
                 // session_reclaim is bridge housekeeping, not agent-authored
                 // work: logging it as a row in the Review activity panel would
                 // be noise about something the model never asked for.
-                if (!"session_reclaim".equals(name)) {
+                if (!isUnlogged(name)) {
                     logActivity(name, arguments, summarize(arguments),
                             bytesOf(JsonWriter.write(toolResult)), false);
                 }
@@ -663,7 +675,7 @@ public final class McpServer implements AutoCloseable {
                 // The row says WHAT the tool refused with -- on a failed call
                 // the refusal is the payload; the request args were already
                 // visible to whoever sent them.
-                if (!"session_reclaim".equals(name)) {
+                if (!isUnlogged(name)) {
                     logActivity(name, arguments, oneLine(e.getMessage()), bytesOf(e.getMessage()), true);
                 }
                 return successResponse(id, toolCallResult(new JsonString(e.getMessage()), true));
@@ -754,11 +766,6 @@ public final class McpServer implements AutoCloseable {
                     || presented.equals("127.0.0.1:" + port) || presented.equals("localhost:" + port);
         }
 
-        /** Reads at most limit+1 bytes on a bounded endpoint, so an overrun is seen without buffering it. */
-        private byte[] readBody(InputStream in) throws IOException {
-            return policy.bounded() ? in.readNBytes(policy.maxBodyBytes() + 1) : in.readAllBytes();
-        }
-
         private void sendJson(HttpExchange exchange, int status, JsonValue value) throws IOException {
             byte[] bytes = JsonWriter.write(value).getBytes(StandardCharsets.UTF_8);
             if (policy.bounded() && bytes.length > policy.maxResponseBytes()) {
@@ -807,6 +814,15 @@ public final class McpServer implements AutoCloseable {
     private static final Set<String> AGENT_WRITE_TOOLS = Set.of(
             "review_reply", "review_tour", "review_check", "review_finding", "review_answer", "session_rename",
             "session_handoff", "babysit_start", "ci_rerun", "babysit_escalate");
+
+    /**
+     * Calls with no activity row: {@code session_reclaim} is bridge housekeeping, and
+     * {@code editor_ask_answer} carries the user's code and the agent's answer, which
+     * must reach no excerpt on success or on error.
+     */
+    private static boolean isUnlogged(String tool) {
+        return "session_reclaim".equals(tool) || EditorAskAnswerDelegate.TOOL_NAME.equals(tool);
+    }
 
     static McpActivityLog.Direction directionOf(String tool) {
         return AGENT_WRITE_TOOLS.contains(tool)
