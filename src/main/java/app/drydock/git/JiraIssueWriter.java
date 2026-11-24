@@ -203,18 +203,40 @@ public final class JiraIssueWriter implements AutoCloseable {
      */
     public Outcome create(JiraConnection connection, String secret, String projectKey, String issueType,
                           String summary, String description, String propertyKey, JsonValue property) {
+        return create(connection, secret, projectKey, issueType, summary, description,
+                propertyKey, property, Optional.empty());
+    }
+
+    /**
+     * As {@link #create}, with the ticket's priority named by
+     * {@code priorityName} when present -- the task's stored priority name,
+     * sent verbatim so the ticket wears the same priority the task does. A
+     * name the destination site does not know is Jira's refusal, surfaced
+     * like any other create failure.
+     */
+    public Outcome create(JiraConnection connection, String secret, String projectKey, String issueType,
+                          String summary, String description, String propertyKey, JsonValue property,
+                          Optional<String> priorityName) {
         return switch (createChecked(connection, secret, projectKey, issueType, summary, description,
-                propertyKey, property)) {
+                propertyKey, property, priorityName)) {
             case Created created -> created;
             case Failed failed -> failed;
             case Uncertain uncertain -> new Failed(uncertain.message());
         };
     }
 
-    /** As {@link #create}, but an unknown effect is reported as {@link Uncertain}, never as a failure. */
+    /** As {@link #createChecked}, but an unknown effect is reported as {@link Uncertain}, never as a failure. */
     public CreateResult createChecked(JiraConnection connection, String secret, String projectKey,
                                       String issueType, String summary, String description,
                                       String propertyKey, JsonValue property) {
+        return createChecked(connection, secret, projectKey, issueType, summary, description,
+                propertyKey, property, Optional.empty());
+    }
+
+    /** As {@link #create}, but an unknown effect is reported as {@link Uncertain}, never as a failure. */
+    public CreateResult createChecked(JiraConnection connection, String secret, String projectKey,
+                                      String issueType, String summary, String description,
+                                      String propertyKey, JsonValue property, Optional<String> priorityName) {
         Objects.requireNonNull(connection, "connection");
         String baseUrl = connection.baseUrl();
         Optional<String> refusal = JiraConnection.baseUrlRefusal(baseUrl);
@@ -235,11 +257,14 @@ public final class JiraIssueWriter implements AutoCloseable {
             return new Failed("Name the Jira issue type, e.g. Task");
         }
         String auth = JiraService.authorization(connection, secret);
-        String payload = JsonWriter.write(JsonObject.empty().put("fields", JsonObject.empty()
+        JsonObject fields = JsonObject.empty()
                 .put("project", JsonObject.empty().put("key", new JsonString(projectKey)))
                 .put("issuetype", JsonObject.empty().put("name", new JsonString(issueType.strip())))
                 .put("summary", new JsonString(summary))
-                .put("description", new JsonString(description))));
+                .put("description", new JsonString(description));
+        priorityName.ifPresent(name -> fields.put("priority",
+                JsonObject.empty().put("name", new JsonString(name))));
+        String payload = JsonWriter.write(JsonObject.empty().put("fields", fields));
         HttpResponse<String> created;
         try {
             created = client().send(request(baseUrl + "/rest/api/2/issue", auth)

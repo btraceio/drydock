@@ -22,6 +22,7 @@ import app.drydock.tasks.TaskMirrorPlan;
 import app.drydock.tasks.TaskMirrorPlan.Disposition;
 import app.drydock.tasks.TaskMirrorRun;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.tasks.TaskPriority;
 import app.drydock.tasks.TaskSnapshot;
 
 import com.intellij.ide.BrowserUtil;
@@ -697,7 +698,11 @@ public final class TaskMirroring {
             JiraIssueWriter.CreateResult result = jira.createChecked(endpoint.connection(), endpoint.secret(),
                     choice.get().key(), choice.get().type(), task.title(),
                     TaskMirror.jiraDescription(task, shared.displayName()), TaskMirror.JIRA_PROPERTY,
-                    TaskMirror.metadata(task, shared.displayName()));
+                    TaskMirror.metadata(task, shared.displayName()),
+                    // The task's own priority, by the Jira name it stored: the ticket
+                    // wears the same priority the task does. An unprioritized task
+                    // names none, and Jira's project default applies.
+                    task.usablePriority().map(TaskPriority::storedName));
             return switch (result) {
                 case JiraIssueWriter.Created created ->
                         new TaskMirrorRun.CreateOutcome.Created(created.url(), created.propertyProblem());

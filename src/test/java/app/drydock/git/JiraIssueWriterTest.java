@@ -76,6 +76,27 @@ class JiraIssueWriterTest {
         });
     }
 
+    /** The task's priority name rides the create payload as fields.priority; absent names none. */
+    @Test
+    void createSendsThePriorityNameWhenOneIsGiven() throws Exception {
+        answer(201, "{\"id\":\"10001\",\"key\":\"PROJ-9\",\"self\":\"x\"}", 200);
+
+        assertInstanceOf(JiraIssueWriter.Created.class, writer.create(
+                dataCenter(), SECRET, "PROJ", "Task", "Fix it", "Body", "drydock.task", PROPERTY,
+                Optional.of("Top")));
+        assertInstanceOf(JiraIssueWriter.Created.class, writer.createChecked(
+                dataCenter(), SECRET, "PROJ", "Task", "Fix it", "Body", "drydock.task", PROPERTY,
+                Optional.empty()));
+
+        assertEquals(4, requests.size(), "each create is a POST plus the property PUT");
+        JsonObject withPriority = (JsonObject) ((JsonObject) JsonParser.parse(requests.get(0).body())).get("fields");
+        assertEquals(new JsonString("Top"),
+                ((JsonObject) withPriority.get("priority")).get("name"),
+                "the stored Jira name travels verbatim");
+        JsonObject without = (JsonObject) ((JsonObject) JsonParser.parse(requests.get(2).body())).get("fields");
+        assertFalse(without.has("priority"), "an unprioritized task lets Jira's default apply");
+    }
+
     @Test
     void createsTheTicketThenStoresTheMetadataProperty() throws Exception {
         answer(201, "{\"id\":\"10001\",\"key\":\"PROJ-7\",\"self\":\"x\"}", 200);
