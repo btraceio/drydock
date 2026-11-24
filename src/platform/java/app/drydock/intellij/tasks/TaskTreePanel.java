@@ -277,6 +277,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** The inbox's project filter (the {@code project:} chip), or null for every project. Written on the EDT. */
     private volatile Focus focus;
     private String displayedFilter = "";
+    /** Canonical working root used by the rows currently displayed; EDT-owned. */
+    private Optional<Path> appliedWorkingRoot = Optional.empty();
     /** Which lazy listing sections the user opened here, with the guard that keeps the
      * panel's own tree restoration from counting as such an open. */
     private final ListingExpansionTracker expansions =
@@ -2120,14 +2122,15 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     PullRequestDoneOffers.claim(gathered.sessions(), gathered.pullRequestsBySession());
             ApplicationManager.getApplication().invokeLater(
                     () -> {
-                        finishRebuild(requestedVersion, requestedFilter, nodes, treeNodes, tasks, builtInbox, null);
+                        finishRebuild(requestedVersion, requestedFilter, nodes, treeNodes, tasks, builtInbox,
+                                gathered.currentWorkingRoot(), null);
                         doneOffers.forEach(offer -> PullRequestDoneOffers.notify(project, offer));
                     },
                     ModalityState.any(), project.getDisposed());
         }, plugin.executor()).exceptionally(failure -> {
             ApplicationManager.getApplication().invokeLater(
                     () -> finishRebuild(requestedVersion, requestedFilter, List.of(), List.of(), TaskLayer.EMPTY,
-                            null, failure),
+                            null, Optional.empty(), failure),
                     ModalityState.any(), project.getDisposed());
             return null;
         });
@@ -2136,7 +2139,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
     /** EDT: applies only the newest requested view, then schedules any request coalesced behind it. */
     private void finishRebuild(long requestedVersion, String requestedFilter,
                                List<TaskNode> nodes, List<TaskNode> treeNodes, TaskLayer tasks,
-                               InboxModel.Inbox builtInbox, Throwable failure) {
+                               InboxModel.Inbox builtInbox, Optional<Path> workingRoot, Throwable failure) {
         boolean newerPassPending = requestedVersion != refreshRequests.version();
         if (failure != null) {
             // Never silent: an empty tree with no reason given is the worst
@@ -2157,6 +2160,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 }
             }
         } else if (requestedVersion == refreshRequests.version() && !disposed && !project.isDisposed()) {
+            appliedWorkingRoot = workingRoot;
             apply(nodes, treeNodes, tasks, builtInbox, requestedFilter);
         }
         refreshRequests.finishPass();
@@ -2558,11 +2562,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             return;
         }
         String repo = repoOf(path).orElse(idle.worktree().getFileName().toString());
-        // Lexical, not canonical: this is the EDT. A miss only offers "Start
-        // in this window", which does the same thing on the window's own worktree.
-        boolean ownWorktree = Optional.ofNullable(project.getBasePath())
-                .map(base -> Path.of(base).toAbsolutePath().normalize().equals(idle.worktree()))
-                .orElse(false);
+        // TaskTreeInputs canonicalizes this root and listed worktree paths before
+        // applying them, so this EDT comparison is purely in-memory.
+        boolean ownWorktree = isHolder(appliedWorkingRoot, Optional.of(idle.worktree()));
         StartMenu.show(new RelativePoint(event), StartMenu.items(repo, idle.branch(), ownWorktree),
                 item -> TaskLauncher.open(project, root, Optional.of(fixed),
                         NewTaskPreset.start(item.openIn(), item.mode())));
@@ -2608,11 +2610,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
 
     /** Whether {@code branch}'s holder worktree is this window's own project directory. EDT. */
     private boolean ownWorktree(TaskNode.BranchRow branch) {
-        return branch.branch().checkedOutAt()
-                .map(holder -> Optional.ofNullable(project.getBasePath())
-                        .map(base -> Path.of(base).toAbsolutePath().normalize().equals(holder))
-                        .orElse(false))
-                .orElse(false);
+        return isHolder(appliedWorkingRoot, branch.branch().checkedOutAt());
+    }
+
+    /** Compares paths already canonicalized during gathering; absent paths are never this window's worktree. */
+    static boolean isHolder(Optional<Path> root, Optional<Path> holder) {
+        return root.isPresent() && holder.isPresent() && root.get().equals(holder.get());
     }
 
     /** EDT: dispatches one picked branch-start item. */

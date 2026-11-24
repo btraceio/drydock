@@ -97,14 +97,9 @@ class TaskTreeRemoteRevealTest {
     void theTreePanelDoesNotGrowBeyondItsBaseline() throws IOException {
         Path panel = Path.of("src/platform/java/app/drydock/intellij/tasks/TaskTreePanel.java");
 
-<<<<<<< HEAD
         // The panel is a reviewability budget (per-source cap discipline): every
         // feature that grows it bumps this baseline deliberately, never silently.
-        assertTrue(Files.readAllLines(panel).size() <= 2_970, "line baseline 2,970");
-        assertTrue(Files.size(panel) <= 145_480, "byte baseline 145,480");
-=======
-        assertTrue(Files.readAllLines(panel).size() <= 2962, "line baseline 2,962");
-        assertTrue(Files.size(panel) <= 145_131, "byte baseline 145,131");
->>>>>>> 25fca377 (The project tree lists the repository's branches under a Branches section)
+        assertTrue(Files.readAllLines(panel).size() <= 2_973, "line baseline 2,973");
+        assertTrue(Files.size(panel) <= 145_736, "byte baseline 145,736");
     }
 }

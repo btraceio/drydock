@@ -4,6 +4,7 @@ import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.AgentBinding;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.RepositoryId;
 import app.drydock.domain.SessionMode;
 import app.drydock.domain.SessionWorkspace;
@@ -29,6 +30,7 @@ import app.drydock.intellij.tasks.TaskNode.TaskRow;
 import app.drydock.intellij.tasks.TaskNode.WorktreeGroup;
 import app.drydock.projects.SharedProject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import javax.swing.JTree;
 import javax.swing.event.TreeExpansionEvent;
@@ -37,6 +39,8 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.ExpandVetoException;
 import javax.swing.tree.TreePath;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -56,12 +60,42 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class TaskTreePanelTargetTest {
 
     private static final Path REGISTERED_ROOT = Path.of("/work/profiling-backend");
     private static final Path LINKED_WORKTREE = Path.of("/work/profiling-backend-fix");
     private static final Instant NOW = Instant.parse("2026-10-20T17:00:00Z");
+
+    @Test
+    void holderPredicateRequiresEqualPresentPaths() {
+        Path root = Path.of("/work/project");
+
+        assertTrue(TaskTreePanel.isHolder(Optional.of(root), Optional.of(root)));
+        assertFalse(TaskTreePanel.isHolder(Optional.of(root), Optional.of(Path.of("/work/other"))));
+        assertFalse(TaskTreePanel.isHolder(Optional.empty(), Optional.of(root)));
+        assertFalse(TaskTreePanel.isHolder(Optional.of(root), Optional.empty()));
+        assertFalse(TaskTreePanel.isHolder(Optional.empty(), Optional.empty()));
+    }
+
+    @Test
+    void holderPredicateMatchesEquivalentPathsAfterCanonicalization(@TempDir Path temporaryDirectory)
+            throws IOException {
+        Path target = Files.createDirectory(temporaryDirectory.resolve("target"));
+        Path alias = temporaryDirectory.resolve("alias");
+        try {
+            Files.createSymbolicLink(alias, target);
+        } catch (IOException | UnsupportedOperationException | SecurityException unsupported) {
+            assumeTrue(false, "symbolic links are unavailable: " + unsupported);
+            return;
+        }
+
+        Path canonicalAlias = RepositoryCatalog.canonicalize(alias);
+        Path canonicalTarget = RepositoryCatalog.canonicalize(target);
+        assertEquals(canonicalTarget, canonicalAlias);
+        assertTrue(TaskTreePanel.isHolder(Optional.of(canonicalAlias), Optional.of(canonicalTarget)));
+    }
 
     @Test
     void projectRowTargetsTheRegisteredProjectRatherThanTheWindowProject() {

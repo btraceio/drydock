@@ -1,6 +1,7 @@
 package app.drydock.intellij.tasks;
 
 import app.drydock.config.UserConfig;
+import app.drydock.domain.RepositoryCatalog;
 import app.drydock.domain.SessionMode;
 import app.drydock.git.BranchCatalog;
 import app.drydock.git.BranchCheckout;
@@ -42,10 +43,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -261,8 +264,16 @@ final class BranchStart {
                                       Item item, Runnable onWorktreeCreated) {
         String key = mainRoot + "\n" + row.worktreeBranch();
         if (!IN_FLIGHT.add(key)) {
+            report(from, "Drydock is already creating the worktree for '" + row.worktreeBranch() + "'.");
             return;
         }
+        AtomicBoolean releaseDeferred = new AtomicBoolean();
+        AtomicBoolean released = new AtomicBoolean();
+        Runnable releaseKey = () -> {
+            if (released.compareAndSet(false, true)) {
+                IN_FLIGHT.remove(key);
+            }
+        };
         ProgressManager.getInstance().run(new Task.Backgroundable(from,
                 "Creating worktree for " + row.worktreeBranch() + "…", true) {
             @Override
@@ -270,15 +281,12 @@ final class BranchStart {
                 try (GitStatusService git = new GitStatusService(); WorktreeService worktrees = new WorktreeService()) {
                     BranchCatalog catalog = BranchCatalog.load(git, worktrees, mainRoot)
                             .get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                    BranchRef ref = catalog.branches().stream()
-                            .filter(candidate -> candidate.name().equals(row.branch().name())
-                                    && candidate.remote() == row.branch().remote())
-                            .findFirst()
+                    BranchRef ref = findMatchingRef(catalog, row.branch())
                             .orElseThrow(() -> new IllegalStateException(
                                     "Branch " + row.branch().name() + " vanished while preparing the worktree"));
                     switch (BranchCheckout.resolve(catalog, ref)) {
                         case BranchCheckout.Outcome.Ready ready -> create(from, mainRoot, ready, repositoryName,
-                                item, onWorktreeCreated, indicator);
+                                item, onWorktreeCreated, indicator, git, releaseDeferred, releaseKey);
                         case BranchCheckout.Outcome.Occupied occupied -> report(from,
                                 "'" + occupied.ref().name() + "' was just checked out in the worktree at "
                                         + occupied.ref().checkedOutAt().orElseThrow() + "; start it from there.");
@@ -291,6 +299,8 @@ final class BranchStart {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    LOG.log(Level.WARNING, "Worktree creation was interrupted for " + row.worktreeBranch(), e);
+                    report(from, "Creating the worktree was interrupted.");
                 } catch (ExecutionException | TimeoutException | RuntimeException e) {
                     LOG.log(Level.WARNING, "Could not create the worktree for " + row.worktreeBranch(), e);
                     report(from, "Drydock could not create the worktree: " + WorktreeErrors.visibleMessage(e));
@@ -299,7 +309,54 @@ final class BranchStart {
 
             @Override
             public void onFinished() {
-                IN_FLIGHT.remove(key);
+                if (!releaseDeferred.get()) {
+                    releaseKey.run();
+                }
+            }
+        });
+    }
+
+    /** A package-visible folder decision for the creation/reuse/conflict policy. */
+    enum FolderDisposition { CREATE, REUSE, CONFLICT }
+
+    @FunctionalInterface
+    interface BranchHolder {
+        boolean holds() throws ExecutionException, InterruptedException, TimeoutException;
+    }
+
+    /** Classifies the folder lazily: a holder is consulted only for an existing directory. */
+    static FolderDisposition classify(boolean isDirectory, BranchHolder holdsRequestedBranch)
+            throws ExecutionException, InterruptedException, TimeoutException {
+        if (!isDirectory) {
+            return FolderDisposition.CREATE;
+        }
+        return holdsRequestedBranch.holds() ? FolderDisposition.REUSE : FolderDisposition.CONFLICT;
+    }
+
+    /** Selects the exact fresh-catalog ref identity represented by the user's branch row. */
+    static Optional<BranchRef> findMatchingRef(BranchCatalog catalog, BranchRef selected) {
+        return catalog.branches().stream()
+                .filter(candidate -> candidate.name().equals(selected.name())
+                        && candidate.remote() == selected.remote())
+                .findFirst();
+    }
+
+    /**
+     * Defers the per-task reservation until a timed-out add reaches a terminal state. The deferred
+     * flag is set before the timeout report and callback registration, including when the future is
+     * already complete and the callback therefore runs inline.
+     */
+    static void deferReleaseUntilCompletion(CompletableFuture<?> future, AtomicBoolean releaseDeferred,
+                                            Runnable releaseKey, Runnable onDeferred,
+                                            Runnable onLateSuccess, Consumer<Throwable> onLateFailure) {
+        releaseDeferred.set(true);
+        onDeferred.run();
+        future.whenComplete((ignored, error) -> {
+            releaseKey.run();
+            if (error == null) {
+                onLateSuccess.run();
+            } else {
+                onLateFailure.accept(error);
             }
         });
     }
@@ -314,36 +371,57 @@ final class BranchStart {
      */
     private static void create(Project from, Path mainRoot, BranchCheckout.Outcome.Ready ready,
                                String repositoryName, Item item, Runnable onWorktreeCreated,
-                               ProgressIndicator indicator)
+                               ProgressIndicator indicator, GitStatusService git, AtomicBoolean releaseDeferred,
+                               Runnable releaseKey)
             throws ExecutionException, InterruptedException, TimeoutException {
         Path folder = WorktreeNaming.defaultDirectory(Path.of(System.getProperty("user.home")),
                 UserConfig.load().worktreesDirectory(), repositoryName, ready.localName());
-        if (!Files.isDirectory(folder)) {
-            if (indicator != null) {
-                indicator.setText("Creating worktree " + ready.localName() + "…");
+        FolderDisposition disposition = classify(Files.isDirectory(folder),
+                () -> holdsBranch(mainRoot, folder, ready.localName()));
+        switch (disposition) {
+            case CREATE -> {
+                if (indicator != null) {
+                    indicator.setText("Creating worktree " + ready.localName() + "…");
+                }
+                CompletableFuture<Path> added = git.addWorktreeForBranch(mainRoot, folder, ready.ref(), ready.localName());
+                try {
+                    added.get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (TimeoutException timeout) {
+                    deferReleaseUntilCompletion(added, releaseDeferred, releaseKey,
+                            () -> report(from, "Creating the worktree for '" + ready.localName()
+                                    + "' is taking longer than expected and may still finish; check the Worktrees list before retrying."),
+                            () -> ApplicationManager.getApplication().invokeLater(onWorktreeCreated,
+                                    ModalityState.any(), from.getDisposed()),
+                            error -> {
+                                LOG.log(Level.WARNING, "Could not create the worktree for " + ready.localName(), error);
+                                report(from, "Drydock could not create the worktree: "
+                                        + WorktreeErrors.visibleMessage(error));
+                            });
+                    return;
+                }
             }
-            new GitStatusService()
-                    .addWorktreeForBranch(mainRoot, folder, ready.ref(), ready.localName())
-                    .get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } else if (!holdsBranch(mainRoot, folder, ready.localName())) {
-            report(from, "The worktree folder " + folder + " already exists and does not hold '"
-                    + ready.localName() + "'; free or rename it and start again.");
-            return;
+            case REUSE -> { }
+            case CONFLICT -> {
+                report(from, "The worktree folder " + folder + " already exists and does not hold '"
+                        + ready.localName() + "'; free or rename it and start again.");
+                return;
+            }
         }
         ApplicationManager.getApplication().invokeLater(() -> {
             onWorktreeCreated.run();
             TaskLauncher.open(from, Optional.of(mainRoot),
                     Optional.of(new FixedWorktree(folder, ready.localName())),
                     NewTaskPreset.start(item.openIn(), item.mode()));
-        }, ModalityState.any());
+        }, ModalityState.any(), from.getDisposed());
     }
 
     /** Whether git lists {@code folder} as a worktree of {@code mainRoot} holding {@code branch}. */
-    private static boolean holdsBranch(Path mainRoot, Path folder, String branch)
+    static boolean holdsBranch(Path mainRoot, Path folder, String branch)
             throws ExecutionException, InterruptedException, TimeoutException {
+        Path canonicalFolder = RepositoryCatalog.canonicalize(folder);
         try (WorktreeService worktrees = new WorktreeService()) {
             return worktrees.list(mainRoot).get(WORKTREE_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
-                    .anyMatch(worktree -> worktree.path().equals(folder)
+                    .anyMatch(worktree -> RepositoryCatalog.canonicalize(worktree.path()).equals(canonicalFolder)
                             && worktree.branch().equals(Optional.of(branch)));
         }
     }
