@@ -200,6 +200,9 @@ public final class ClaudeHookInstaller {
         Path dir = hooks.settingsFile().getParent();
         try {
             Files.createDirectories(dir);
+            // The launch path must be self-sufficient: the deferred-install flow
+            // arms the observer and installs hooks without a prior install().
+            Files.createDirectories(hooksDirectory());
             Path script = hooksDirectory().resolve("drydock-editor-ask.sh");
             writeAtomically(script, EDITOR_ASK_SCRIPT);
             Path log = hooks.eventLog();
@@ -234,6 +237,18 @@ public final class ClaudeHookInstaller {
         } catch (IOException | RuntimeException e) {
             deleteLaunchDirectory(dir);
             throw e;
+        }
+    }
+
+    /**
+     * Best-effort removal of one launch's directory (settings, event log);
+     * shared hook artifacts are outside it and are never touched.
+     */
+    public void deleteEditorAskLaunch(String nonce) {
+        try {
+            deleteLaunchDirectory(editorAskLaunchPaths(nonce).settingsFile().getParent());
+        } catch (RuntimeException ignored) {
+            // Launch cleanup is best effort; an invalid nonce left nothing to remove.
         }
     }
 

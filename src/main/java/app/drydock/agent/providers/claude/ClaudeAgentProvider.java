@@ -536,18 +536,20 @@ public final class ClaudeAgentProvider implements AgentProvider {
         if (!pieces.containsAll(EditorAskDelivery.required(AgentKind.CLAUDE))) {
             return EditorAskLaunch.refused("Claude does not carry the answer tool on this launch.");
         }
+        // Artifacts exist only after every validation: a refusal path above
+        // this point must have created nothing on disk.
+        try {
+            hookInstaller.installEditorAskLaunch(request.launchNonce());
+        } catch (IOException | RuntimeException e) {
+            return EditorAskLaunch.refused("Claude launch hooks could not be installed.");
+        }
         ClaudeEditorAskObserver observer = ClaudeEditorAskObserver.forLaunch(hooks, hookSemanticsVerified(caps));
         try {
             observer.arm(request.firstTurnMarker());
         } catch (RuntimeException e) {
             observer.close();
+            hookInstaller.deleteEditorAskLaunch(request.launchNonce());
             return EditorAskLaunch.refused("The first turn could not be armed.");
-        }
-        try {
-            hookInstaller.installEditorAskLaunch(request.launchNonce());
-        } catch (IOException | RuntimeException e) {
-            observer.close();
-            return EditorAskLaunch.refused("Claude launch hooks could not be installed.");
         }
         EditorAskConversationProof proof = created && plan.sessionIdUsed()
                 ? EditorAskConversationProof.RENDERED_PRESET_ID : EditorAskConversationProof.CORRELATED_HOOK;

@@ -160,6 +160,17 @@ public final class ClaudeEditorAskObserver implements EditorAskTurnObserver {
         return new Observation(out, next, Optional.empty());
     }
 
+    /**
+     * True when the log's parent exists but is not a directory: the path can
+     * never become a log, so absence is a broken state, not a lazy launch.
+     * A missing parent directory is tolerated — the deferred-install flow
+     * arms the observer before the launch directory is created.
+     */
+    private boolean logPathIsUnusable() {
+        Path parent = eventLog.getParent();
+        return parent != null && Files.exists(parent) && !Files.isDirectory(parent);
+    }
+
     /** Reads and commits only complete lines appended since the last boundary. */
     private void ingest() throws IOException {
         if (brokenReason != null) {
@@ -171,8 +182,13 @@ public final class ClaudeEditorAskObserver implements EditorAskTurnObserver {
             currentFileKey = Files.readAttributes(eventLog, BasicFileAttributes.class)
                     .fileKey();
         } catch (NoSuchFileException absent) {
-            if (committedOffset == 0) {
+            if (committedOffset == 0 && !logPathIsUnusable()) {
                 return;
+            }
+            if (committedOffset == 0) {
+                // Pre-commit unusable path: re-evaluated on every call, so a
+                // later-repaired location recovers instead of staying broken.
+                throw new IllegalStateException("event log path is not a readable location", absent);
             }
             brokenReason = "event log disappeared after evidence was committed";
             throw new IllegalStateException(brokenReason, absent);
@@ -200,8 +216,13 @@ public final class ClaudeEditorAskObserver implements EditorAskTurnObserver {
             }
             fileKeyAfterRead = Files.readAttributes(eventLog, BasicFileAttributes.class).fileKey();
         } catch (NoSuchFileException absent) {
-            if (committedOffset == 0) {
+            if (committedOffset == 0 && !logPathIsUnusable()) {
                 return;
+            }
+            if (committedOffset == 0) {
+                // Pre-commit unusable path: re-evaluated on every call, so a
+                // later-repaired location recovers instead of staying broken.
+                throw new IllegalStateException("event log path is not a readable location", absent);
             }
             brokenReason = "event log disappeared after evidence was committed";
             throw new IllegalStateException(brokenReason, absent);

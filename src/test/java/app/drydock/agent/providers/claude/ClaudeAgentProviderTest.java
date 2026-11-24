@@ -683,8 +683,10 @@ class ClaudeAgentProviderTest {
         var armRefused = provider.prepareEditorAskCreate(valid,
                 new EditorAskRequest("launch-blocked", blockedMarker, "Answer " + blockedMarker));
         assertFalse(armRefused.accepted());
-        assertTrue(armRefused.refusal().contains("first turn"), armRefused.refusal());
+        // The obstruction is only detectable by the filesystem, and nothing
+        // was created for the blocked nonce: it is untouched.
         assertTrue(Files.isRegularFile(obstruction));
+        assertTrue(armRefused.refusal().contains("launch"), armRefused.refusal());
         Files.delete(obstruction);
 
         String marker = EditorAskRecord.newId();

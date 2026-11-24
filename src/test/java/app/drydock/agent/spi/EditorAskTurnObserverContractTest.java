@@ -240,7 +240,11 @@ class EditorAskTurnObserverContractTest {
     }
 
     @Test
-    void launchesGetDistinctNonces(@TempDir Path dir) {
-        assertFalse(observer(dir).launchNonce().equals(observer(dir).launchNonce()));
+    void launchNonceIsReportedFromTheLaunchNotSelfMinted(@TempDir Path dir) {
+        // The provider mints one nonce per launch and hands it to the observer;
+        // the observer reports it faithfully rather than minting its own.
+        assertEquals(NONCE, observer(dir).launchNonce());
+        assertFalse(observer(dir).launchNonce()
+                .equals(new PiEditorAskReceipts(dir, "another-launch-nonce").launchNonce()));
     }
 }
