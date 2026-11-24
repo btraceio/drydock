@@ -74,6 +74,12 @@ public final class PiExtensionInstaller {
         return new PiExtensionInstaller(stateDirectory, "drydock-activity.ts", PiActivityExtensionSource.SOURCE);
     }
 
+    /** The editor-ask turn-evidence extension, installed per Q&A launch. */
+    public static PiExtensionInstaller editorAsk(Path stateDirectory) {
+        return new PiExtensionInstaller(
+                stateDirectory, PiEditorAskExtensionSource.FILE_NAME, PiEditorAskExtensionSource.SOURCE);
+    }
+
     /** Where the extension lives, whether or not it has been written yet. */
     private Path extensionFile() {
         return stateDirectory.resolve("pi").resolve(fileName);

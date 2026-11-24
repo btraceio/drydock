@@ -6,9 +6,11 @@ import app.drydock.state.json.JsonValue;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -232,6 +234,65 @@ public final class CodexRolloutStore implements CandidateSource {
             LOG.log(Level.DEBUG, () -> "Failed to read first line of " + file, e);
             return Optional.empty();
         }
+        return parseMeta(firstLine, file);
+    }
+
+    /**
+     * Result of a bounded header read.
+     *
+     * @param meta       the parsed {@code session_meta}, when the header line is complete and valid
+     * @param bytesRead  bytes actually read from the file
+     * @param tooLong    the first line exceeded the byte limit (a bound hit, not "no header")
+     * @param incomplete no newline yet within the file's current bytes (writer still appending) or I/O failed
+     */
+    public record HeaderProbe(Optional<RolloutMeta> meta, int bytesRead, boolean tooLong, boolean incomplete) {
+    }
+
+    /** Reads at most {@code maxLineBytes + 1} bytes of {@code file}'s first line. */
+    public HeaderProbe probeHeader(Path file, int maxLineBytes) {
+        byte[] buf = new byte[maxLineBytes + 1];
+        int n = 0;
+        try (InputStream in = Files.newInputStream(file)) {
+            while (n < buf.length) {
+                int r = in.read(buf, n, Math.min(8192, buf.length - n));
+                if (r < 0) {
+                    break;
+                }
+                int nl = -1;
+                for (int i = n; i < n + r; i++) {
+                    if (buf[i] == '\n') {
+                        nl = i;
+                        break;
+                    }
+                }
+                n += r;
+                if (nl >= 0) {
+                    String line = new String(buf, 0, nl, StandardCharsets.UTF_8);
+                    return new HeaderProbe(parseMeta(line, file), n, false, false);
+                }
+            }
+        } catch (IOException e) {
+            LOG.log(Level.DEBUG, () -> "Failed to read header of " + file, e);
+            return new HeaderProbe(Optional.empty(), n, false, true);
+        }
+        if (n > maxLineBytes) {
+            return new HeaderProbe(Optional.empty(), n, true, false);
+        }
+        return new HeaderProbe(Optional.empty(), n, false, true);
+    }
+
+    /** Rollout files in {@code launchedAt}'s date bucket and the adjacent days. */
+    public List<Path> bucketFilesAround(Instant launchedAt) {
+        return rolloutFilesInBuckets(dateBucketDirs(launchedAt));
+    }
+
+    /** Whether {@code meta} is an interactive-source rollout of {@code cwd}. */
+    public static boolean isInteractiveFor(RolloutMeta meta, Path cwd) {
+        return INTERACTIVE_SOURCES.contains(meta.source())
+                && meta.cwd().equals(cwd.toAbsolutePath().normalize());
+    }
+
+    private Optional<RolloutMeta> parseMeta(String firstLine, Path file) {
         if (firstLine == null || firstLine.isBlank()) {
             return Optional.empty();
         }
