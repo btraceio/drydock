@@ -308,6 +308,7 @@ final class SessionEnds implements AgentExecutionListener {
             return DrydockSessionService.withReplacedSession(state, idle);
         });
         DrydockSessionsListener.publishChanged();
+        suspendEngagementsOf(id);
         // The agent is gone; its eval side channel (e.g. Claude's proxy
         // marking) must not outlive it. Best-effort, off this thread — and
         // re-checked at execution time (below), so a resume that re-marked
@@ -373,7 +374,22 @@ final class SessionEnds implements AgentExecutionListener {
                     existing.withStatus(ended).withLastOpenedAt(Instant.now()));
         });
         DrydockSessionsListener.publishChanged();
+        // Unlike a box row, the agent does not outlive its ssh client: the
+        // SIGHUP the client's end delivers is the stop, so this end is the
+        // watched session's deactivation however it came about.
+        suspendEngagementsOf(id);
         unmarkEvalAsync(row, ended);
+    }
+
+    /**
+     * The ended session's babysitting engagements pause ({@link
+     * BabysitMonitorService#suspendEngagementsOfStopped}): their pairings
+     * are marked SUSPENDED and the babysitters' agents are stopped. The
+     * quit exclusion rides the static cascade -- the detach handover, not
+     * suspension, governs engagements at quit.
+     */
+    private void suspendEngagementsOf(ManagedSessionId id) {
+        BabysitMonitorService.suspendEngagementsOfStopped(id);
     }
 
     /**
@@ -476,6 +492,10 @@ final class SessionEnds implements AgentExecutionListener {
                 settleRemote(id, stopRequested ? SessionStatus.INACTIVE : SessionStatus.EXITED,
                         RemoteSessionLiveness.State.DEAD);
                 releaseRemote(id, box.sshRemote().host(), ReleaseOutcome.DEATH);
+                // The probe says the box-side agent is gone: this really is
+                // the watched session's death, however unattended, so its
+                // engagements pause like a local end's would.
+                suspendEngagementsOf(id);
             }
             case BoxShell.Liveness.Unknown unknown -> {
                 releaseRemote(id, box.sshRemote().host(), ReleaseOutcome.DETACH);

@@ -110,9 +110,12 @@ public final class BabysitHandover {
     // ---- detach ----------------------------------------------------------------
 
     /**
-     * The detachment of every active engagement in {@code state}, under
+     * The detachment of every live engagement in {@code state}, under
      * {@code generation}; empty when none can be carried. An engagement is
-     * skipped (logged) when its babysitter or watched row, or its
+     * skipped (logged) when it is {@link BabysitState#SUSPENDED} (its watched
+     * session's agent is not running; babysitting it resumes when that
+     * session is resumed, and a paused engagement must not run headlessly
+     * behind the human's back), when its babysitter or watched row, or its
      * repository, no longer resolves, when the babysitter is remote or a
      * plain terminal. {@code repositoryOf} answers a repository root's
      * configured GitHub {@code owner/repo}. Pure but for the logging.
@@ -121,7 +124,7 @@ public final class BabysitHandover {
                                                     Function<Path, Optional<String>> repositoryOf) {
         List<DetachedEngagement> engagements = new ArrayList<>();
         for (BabysitPairing pairing : state.pairings()) {
-            if (pairing.state() == BabysitState.STOPPED) {
+            if (pairing.state() == BabysitState.STOPPED || pairing.state() == BabysitState.SUSPENDED) {
                 continue;
             }
             Optional<ManagedAgentSession> babysitter = row(state, pairing.babysitterId());

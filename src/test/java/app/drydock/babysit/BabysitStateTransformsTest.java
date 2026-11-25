@@ -121,7 +121,8 @@ class BabysitStateTransformsTest {
     @Test
     void anActivePairingRefusesASecondBabysitterButAStoppedOneDoesNot() {
         ManagedAgentSession watched = session(Optional.empty());
-        for (BabysitState active : List.of(BabysitState.WATCHING, BabysitState.ACTING, BabysitState.ESCALATED)) {
+        for (BabysitState active : List.of(BabysitState.WATCHING, BabysitState.ACTING, BabysitState.ESCALATED,
+                BabysitState.SUSPENDED)) {
             ApplicationState state = ApplicationState.empty().withSessions(List.of(watched))
                     .withPairings(List.of(pairing(ManagedSessionId.newId(), watched.id()).withState(active)));
             assertEquals(Optional.of(BabysitStartRefusal.ALREADY_BABYSAT),
@@ -206,6 +207,106 @@ class BabysitStateTransformsTest {
                 BabysitState.ACTING, BabysitState.WATCHING));
         assertSame(escalated, BabysitStateTransforms.withPairingStateIf(escalated, babysitter,
                 BabysitState.WATCHING, BabysitState.ACTING));
+    }
+
+    // ---- suspension: the watched session's life drives the engagement ------
+
+    @Test
+    void suspendingMarksTheLivePairingsOfTheWatchedSession() {
+        ManagedSessionId watched = ManagedSessionId.newId();
+        BabysitPairing watching = pairing(ManagedSessionId.newId(), watched);
+        BabysitPairing escalated = pairing(ManagedSessionId.newId(), watched)
+                .withState(BabysitState.ESCALATED);
+        BabysitPairing stopped = pairing(ManagedSessionId.newId(), watched).withState(BabysitState.STOPPED);
+        BabysitPairing elsewhere = pairing(ManagedSessionId.newId(), ManagedSessionId.newId());
+        ApplicationState state = ApplicationState.empty()
+                .withPairings(List.of(watching, escalated, stopped, elsewhere));
+
+        ApplicationState after = BabysitStateTransforms.withWatchedSuspended(state, watched);
+
+        assertEquals(List.of(watching.withState(BabysitState.SUSPENDED),
+                escalated.withState(BabysitState.SUSPENDED), stopped, elsewhere), after.pairings());
+        // Already suspended: nothing to write, the same instance comes back.
+        assertSame(after, BabysitStateTransforms.withWatchedSuspended(after, watched));
+        assertSame(state, BabysitStateTransforms.withWatchedSuspended(state, ManagedSessionId.newId()));
+    }
+
+    @Test
+    void resumingReturnsTheSuspendedPairingsToWatching() {
+        ManagedSessionId watched = ManagedSessionId.newId();
+        BabysitPairing suspended = pairing(ManagedSessionId.newId(), watched)
+                .withState(BabysitState.SUSPENDED);
+        BabysitPairing live = pairing(ManagedSessionId.newId(), watched);
+        BabysitPairing elsewhere = pairing(ManagedSessionId.newId(), ManagedSessionId.newId())
+                .withState(BabysitState.SUSPENDED);
+        ApplicationState state = ApplicationState.empty()
+                .withPairings(List.of(suspended, live, elsewhere));
+
+        ApplicationState after = BabysitStateTransforms.withWatchedResumed(state, watched);
+
+        assertEquals(List.of(suspended.withState(BabysitState.WATCHING), live, elsewhere), after.pairings());
+        assertSame(after, BabysitStateTransforms.withWatchedResumed(after, watched));
+        assertSame(state, BabysitStateTransforms.withWatchedResumed(state, ManagedSessionId.newId()));
+    }
+
+    @Test
+    void aSuspendedEngagementIsNotActiveForItsBabysitter() {
+        ManagedSessionId babysitter = ManagedSessionId.newId();
+        ApplicationState state = ApplicationState.empty().withPairings(List.of(
+                pairing(babysitter, ManagedSessionId.newId()).withState(BabysitState.SUSPENDED)));
+
+        assertEquals(Optional.empty(), BabysitStateTransforms.activePairingOf(state, babysitter));
+        assertThrows(IllegalArgumentException.class,
+                () -> BabysitStateTransforms.withEscalationAppended(state,
+                        escalation(ManagedSessionId.newId(), babysitter, "m", false)));
+    }
+
+    @Test
+    void aSuspendedPairingCanStillBeStoppedAndKeepsItsHead() {
+        ManagedSessionId babysitter = ManagedSessionId.newId();
+        BabysitPairing suspended = pairing(babysitter, ManagedSessionId.newId())
+                .withState(BabysitState.SUSPENDED).withKnownHead(HEAD);
+        ApplicationState state = ApplicationState.empty().withPairings(List.of(suspended));
+
+        ApplicationState ended = BabysitStateTransforms.withPairingState(state, babysitter,
+                BabysitState.STOPPED);
+        assertEquals(List.of(suspended.withState(BabysitState.STOPPED)), ended.pairings());
+        assertSame(state, BabysitStateTransforms.withPairingHead(state, babysitter, HEAD));
+    }
+
+    @Test
+    void liveWatchedPairingsNamesExactlyWhatSuspensionPauses() {
+        ManagedSessionId watched = ManagedSessionId.newId();
+        BabysitPairing watching = pairing(ManagedSessionId.newId(), watched);
+        BabysitPairing escalated = pairing(ManagedSessionId.newId(), watched)
+                .withState(BabysitState.ESCALATED);
+        BabysitPairing suspended = pairing(ManagedSessionId.newId(), watched)
+                .withState(BabysitState.SUSPENDED);
+        BabysitPairing stopped = pairing(ManagedSessionId.newId(), watched).withState(BabysitState.STOPPED);
+        BabysitPairing elsewhere = pairing(ManagedSessionId.newId(), ManagedSessionId.newId());
+        ApplicationState state = ApplicationState.empty()
+                .withPairings(List.of(watching, escalated, suspended, stopped, elsewhere));
+
+        assertEquals(List.of(watching, escalated),
+                BabysitStateTransforms.liveWatchedPairings(state, watched));
+        assertEquals(List.of(), BabysitStateTransforms.liveWatchedPairings(state, ManagedSessionId.newId()));
+    }
+
+    @Test
+    void suspendedWatchedPairingsNamesExactlyWhatResumeWakes() {
+        ManagedSessionId watched = ManagedSessionId.newId();
+        BabysitPairing suspended = pairing(ManagedSessionId.newId(), watched)
+                .withState(BabysitState.SUSPENDED);
+        BabysitPairing watching = pairing(ManagedSessionId.newId(), watched);
+        BabysitPairing elsewhere = pairing(ManagedSessionId.newId(), ManagedSessionId.newId())
+                .withState(BabysitState.SUSPENDED);
+        ApplicationState state = ApplicationState.empty()
+                .withPairings(List.of(suspended, watching, elsewhere));
+
+        assertEquals(List.of(suspended),
+                BabysitStateTransforms.suspendedWatchedPairings(state, watched));
+        assertEquals(List.of(),
+                BabysitStateTransforms.suspendedWatchedPairings(state, ManagedSessionId.newId()));
     }
 
     // ---- bounded escalations ----------------------------------------------------

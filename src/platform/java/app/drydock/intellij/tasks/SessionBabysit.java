@@ -143,12 +143,13 @@ public record SessionBabysit(Role role, BabysitPairing pairing, Optional<Escalat
         return Optional.ofNullable(latest);
     }
 
-    /** Pure. The engagement state's one word: {@code watching}, {@code acting}, {@code escalated}, {@code stopped}. */
+    /** Pure. The engagement state's one word: {@code watching}, {@code acting}, {@code escalated}, {@code suspended}, {@code stopped}. */
     public static String stateWord(BabysitState state) {
         return switch (state) {
             case WATCHING -> "watching";
             case ACTING -> "acting";
             case ESCALATED -> "escalated";
+            case SUSPENDED -> "suspended";
             case STOPPED -> "stopped";
         };
     }

@@ -99,7 +99,7 @@ class SessionBabysitTest {
     void theChipAndTooltipNameTheStateThePrAndTheEscalation() {
         ManagedSessionId watched = ManagedSessionId.newId();
         ManagedSessionId babysitter = ManagedSessionId.newId();
-        assertEquals(List.of("watching", "acting", "escalated", "stopped"),
+        assertEquals(List.of("watching", "acting", "escalated", "suspended", "stopped"),
                 List.of(BabysitState.values()).stream().map(SessionBabysit::stateWord).toList());
         BabysitPairing escalated = pairing(babysitter, watched, BabysitState.ESCALATED);
         Escalation raised = escalation(escalated, "Rebase needs a design call\nDetails: the API moved", false);

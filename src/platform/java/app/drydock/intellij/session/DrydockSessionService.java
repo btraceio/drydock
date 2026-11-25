@@ -2396,6 +2396,11 @@ public final class DrydockSessionService implements AgentExecutionListener {
                     killBegan.set(true);
                     try {
                         stopMarkedRemoteSession(row);
+                        // The kill concluded, so the box-side agent is gone:
+                        // its babysitting engagements pause. A failed stop
+                        // (the kill did not conclude) suspends nothing -- the
+                        // agent may still run. Never thrown.
+                        BabysitMonitorService.suspendEngagementsOfStopped(row.id());
                         stopped.complete(null);
                     } catch (RuntimeException | Error failure) {
                         stopped.completeExceptionally(failure);

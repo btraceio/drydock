@@ -41,7 +41,10 @@ public final class BabysitStateTransforms {
      * row is remote), be an agent session (a {@link AgentKind#TERMINAL} row
      * is a plain shell, and the babysitter launches as the watched session's
      * kind -- a shell handed a prompt), not be a babysitter itself (in any pairing, stopped or
-     * not), and have no pairing that is not {@link BabysitState#STOPPED}.
+     * not), and have no pairing that is not {@link BabysitState#STOPPED} --
+     * a {@link BabysitState#SUSPENDED} engagement refuses too, because
+     * resuming the watched session brings its babysitter back and a second
+     * one would race it.
      *
      * <p>Meant to run inside the same store update that then adds the
      * pairing ({@link #withPairingAdded}), so two concurrent starts cannot
@@ -82,14 +85,21 @@ public final class BabysitStateTransforms {
 
     /**
      * The engagement {@code babysitterId} runs as the babysitter, when it is
-     * not {@link BabysitState#STOPPED}; empty for a session that babysits
-     * nothing. The identity gate of every babysitter-only tool: the watched
-     * session is what this pairing names, never what a caller claims.
+     * neither {@link BabysitState#STOPPED} nor {@link
+     * BabysitState#SUSPENDED}; empty for a session that babysits nothing or
+     * whose engagement is paused (its watched session's agent is not
+     * running). The identity gate of every babysitter-only tool: the watched
+     * session is what this pairing names, never what a caller claims. A
+     * paused engagement answers empty like a stopped one -- its babysitter
+     * must not act while the watched session is down -- while the human's
+     * Stop Babysitting resolves engagements through its own not-STOPPED
+     * lookup, because ending a paused engagement must stay possible.
      */
     public static Optional<BabysitPairing> activePairingOf(ApplicationState state, ManagedSessionId babysitterId) {
         return state.pairings().stream()
                 .filter(pairing -> pairing.babysitterId().equals(babysitterId)
-                        && pairing.state() != BabysitState.STOPPED)
+                        && pairing.state() != BabysitState.STOPPED
+                        && pairing.state() != BabysitState.SUSPENDED)
                 .findFirst();
     }
 
@@ -186,6 +196,92 @@ public final class BabysitStateTransforms {
             if (pairing.babysitterId().equals(babysitterId) && pairing.state() != BabysitState.STOPPED) {
                 next = change.apply(pairing);
                 changed |= !next.equals(pairing);
+            }
+            pairings.add(next);
+        }
+        return changed ? state.withPairings(pairings) : state;
+    }
+
+    /**
+     * The live pairings {@code watchedId} takes part in as the watched
+     * session: not {@link BabysitState#STOPPED}, not {@link
+     * BabysitState#SUSPENDED}. Exactly the engagements
+     * {@link #withWatchedSuspended} pauses -- the monitor stops each one's
+     * babysitter and drops none of its own state for the others.
+     */
+    public static List<BabysitPairing> liveWatchedPairings(ApplicationState state, ManagedSessionId watchedId) {
+        List<BabysitPairing> live = new ArrayList<>();
+        for (BabysitPairing pairing : state.pairings()) {
+            if (pairing.watchedId().equals(watchedId)
+                    && pairing.state() != BabysitState.STOPPED
+                    && pairing.state() != BabysitState.SUSPENDED) {
+                live.add(pairing);
+            }
+        }
+        return live;
+    }
+
+    /**
+     * The {@link BabysitState#SUSPENDED} pairings {@code watchedId} takes
+     * part in as the watched session: exactly the engagements
+     * {@link #withWatchedResumed} resumes -- the monitor re-wakes each one's
+     * babysitter.
+     */
+    public static List<BabysitPairing> suspendedWatchedPairings(ApplicationState state, ManagedSessionId watchedId) {
+        List<BabysitPairing> suspended = new ArrayList<>();
+        for (BabysitPairing pairing : state.pairings()) {
+            if (pairing.watchedId().equals(watchedId)
+                    && pairing.state() == BabysitState.SUSPENDED) {
+                suspended.add(pairing);
+            }
+        }
+        return suspended;
+    }
+
+    /**
+     * {@code state} with every live pairing of {@code watchedId} (not
+     * {@link BabysitState#STOPPED}, not already {@link
+     * BabysitState#SUSPENDED}) marked {@link BabysitState#SUSPENDED}; the
+     * same instance when there is none, so the store skips the write. The
+     * watched session's agent is no longer running: the monitor stops
+     * polling and waking, the babysitter's agent is stopped by the caller,
+     * and a detached watcher is not handed the engagement.
+     */
+    public static ApplicationState withWatchedSuspended(ApplicationState state, ManagedSessionId watchedId) {
+        List<BabysitPairing> pairings = new ArrayList<>(state.pairings().size());
+        boolean changed = false;
+        for (BabysitPairing pairing : state.pairings()) {
+            BabysitPairing next = pairing;
+            if (pairing.watchedId().equals(watchedId)
+                    && pairing.state() != BabysitState.STOPPED
+                    && pairing.state() != BabysitState.SUSPENDED) {
+                next = pairing.withState(BabysitState.SUSPENDED);
+                changed = true;
+            }
+            pairings.add(next);
+        }
+        return changed ? state.withPairings(pairings) : state;
+    }
+
+    /**
+     * {@code state} with every {@link BabysitState#SUSPENDED} pairing of
+     * {@code watchedId} marked {@link BabysitState#WATCHING}; the same
+     * instance when there is none. The watched session's agent runs again;
+     * the caller resumes the babysitters' agents. The mark is always
+     * WATCHING, never the pre-suspension state: an escalation that stood
+     * when the engagement was paused is still queued unresolved in the
+     * escalations list, and the monitor re-orients the resumed engagement
+     * from its next read.
+     */
+    public static ApplicationState withWatchedResumed(ApplicationState state, ManagedSessionId watchedId) {
+        List<BabysitPairing> pairings = new ArrayList<>(state.pairings().size());
+        boolean changed = false;
+        for (BabysitPairing pairing : state.pairings()) {
+            BabysitPairing next = pairing;
+            if (pairing.watchedId().equals(watchedId)
+                    && pairing.state() == BabysitState.SUSPENDED) {
+                next = pairing.withState(BabysitState.WATCHING);
+                changed = true;
             }
             pairings.add(next);
         }

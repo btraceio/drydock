@@ -14,6 +14,7 @@ import app.drydock.babysit.BabysitStateTransforms;
 import app.drydock.babysit.BabysitWakePolicy;
 import app.drydock.babysit.BabysitWriteGuard.Verdict;
 import app.drydock.domain.ApplicationState;
+import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.Repository;
 import app.drydock.git.PrMonitorRead;
@@ -21,6 +22,7 @@ import app.drydock.git.PrMonitorRead.PrSnapshot;
 import app.drydock.git.PrMonitorRead.PrSnapshot.Snapshot;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.DrydockSessionsListener;
+import app.drydock.intellij.agent.AgentCloseConfirmation;
 import app.drydock.intellij.agent.AgentExecution;
 import app.drydock.intellij.agent.AgentExecutionRegistry;
 import app.drydock.intellij.session.BabysitWaker.WakeOutcome;
@@ -335,6 +337,204 @@ public final class BabysitMonitorService implements Disposable {
         wakesHeld = Objects.requireNonNull(held, "held");
     }
 
+    /**
+     * The suspend cascade for {@code watchedId} whose agent just stopped, for
+     * callers outside the plugin's own lifecycle (the session end recorder, a
+     * session service without a monitor reference): resolves the running
+     * monitor or answers silently when none runs (no IDE application, tests,
+     * non-production backend, disposal). An IDE quit is excluded -- quit
+     * deactivates every agent, and the detach handover, not suspension, is
+     * what governs engagements at quit; a quit-time remote kill that somehow
+     * reaches this cascade is excluded with them. Never throws: a failed
+     * pause must not fail the caller's own settle.
+     */
+    public static void suspendEngagementsOfStopped(ManagedSessionId watchedId) {
+        if (AgentCloseConfirmation.isQuitting()) {
+            return;
+        }
+        BabysitMonitorService monitor = DrydockPluginService.babysitMonitorOrNull();
+        if (monitor == null) {
+            return;
+        }
+        try {
+            monitor.suspendEngagementsOf(watchedId);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, () -> "Suspending the engagements of " + watchedId + " failed", e);
+        }
+    }
+
+    /**
+     * Pauses every engagement of {@code watchedId} because its agent is no
+     * longer running: the pairings are marked {@link BabysitState#SUSPENDED}
+     * and the babysitters' agents are stopped (best-effort, wherever they
+     * run; their rows stay). The monitor then neither polls their pull
+     * requests nor wakes them, and a detach hands them to no watcher. An IDE
+     * quit must not call this: quit deactivates every agent, and the
+     * detach handover -- not suspension -- is what governs engagements at
+     * quit. No-op (and cheap) when nothing watches {@code watchedId}.
+     */
+    public void suspendEngagementsOf(ManagedSessionId watchedId) {
+        if (stopped) {
+            return;
+        }
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        if (registry.isRunning(watchedId) || registry.isStarting(watchedId)
+                || registry.launchClaims().isClaimed(watchedId)) {
+            // The watched session's agent is live again (a stale end event
+            // settled after a new start) or a launch holds it: pausing now
+            // would stop the babysitter of a running engagement and strand
+            // it SUSPENDED until the next start. A pause that is wrongly
+            // skipped self-heals -- the monitor keeps watching and its next
+            // wake resumes the babysitter.
+            LOG.log(Level.DEBUG, () -> "Not suspending the engagements of " + watchedId
+                    + ": its agent runs or is launching");
+            return;
+        }
+        List<BabysitPairing> paused = BabysitStateTransforms.liveWatchedPairings(stateStore.get().state(),
+                watchedId);
+        if (paused.isEmpty()) {
+            return;
+        }
+        AtomicBoolean changed = new AtomicBoolean();
+        stateStore.get().update(state -> {
+            ApplicationState updated = BabysitStateTransforms.withWatchedSuspended(state, watchedId);
+            changed.set(updated != state);
+            return updated;
+        });
+        if (!changed.get()) {
+            // Raced another writer that suspended them first.
+            return;
+        }
+        publish.run();
+        for (BabysitPairing pairing : paused) {
+            // The track is kept, not dropped: on resume the engagement
+            // continues diffing from the observation frozen at suspension,
+            // so the next read delivers only what changed while it was
+            // paused -- no synthetic status wake on resume.
+            stopBabysitter(pairing, registry);
+            LOG.log(Level.INFO, "Babysitting PR #" + pairing.prNumber() + " of " + watchedId
+                    + " is suspended: its watched session is deactivated");
+        }
+    }
+
+    /**
+     * Resumes every engagement {@code watchedId} suspended earlier: the
+     * pairings return to {@link BabysitState#WATCHING} and the babysitters'
+     * agents are resumed (background, no prompt, unconditional -- even one
+     * the human had deactivated while the watched session was down), so the
+     * engagement is fully live again without a click. A babysitter already
+     * running or launching is left alone; one with no bound conversation is
+     * skipped with a log (a resume without one is a picker). The monitor's
+     * next read of each resumed engagement delivers whatever changed on its
+     * pull request while it was paused. No-op when nothing of {@code
+     * watchedId} is suspended.
+     */
+    public void resumeEngagementsOf(ManagedSessionId watchedId) {
+        if (stopped) {
+            return;
+        }
+        List<BabysitPairing> woken = BabysitStateTransforms.suspendedWatchedPairings(
+                stateStore.get().state(), watchedId);
+        if (woken.isEmpty()) {
+            return;
+        }
+        AtomicBoolean changed = new AtomicBoolean();
+        stateStore.get().update(state -> {
+            ApplicationState updated = BabysitStateTransforms.withWatchedResumed(state, watchedId);
+            changed.set(updated != state);
+            return updated;
+        });
+        if (!changed.get()) {
+            // Raced another writer that resumed them first.
+            return;
+        }
+        publish.run();
+        AgentExecutionRegistry registry = AgentExecutionRegistry.getInstance();
+        for (BabysitPairing pairing : woken) {
+            resumeBabysitter(pairing, registry);
+            LOG.log(Level.INFO, "Babysitting PR #" + pairing.prNumber() + " of " + watchedId
+                    + " is watching again: its watched session is active");
+        }
+    }
+
+    /**
+     * Stops {@code pairing}'s babysitter's agent wherever it runs, keeping
+     * its row. A local agent that does not run is nothing to stop (and no
+     * session service is resolved for it); anything running goes through a
+     * hosting project's session service -- whose Stop is also what ends a
+     * box-side agent. With no project to serve a box row, its agent keeps
+     * running detached on the box and is reported as such -- the registry
+     * fallback can only end a local agent. Fire-and-forget; a failed stop of
+     * a local agent is logged, and the monitor skips waking a suspended
+     * engagement either way.
+     */
+    private void stopBabysitter(BabysitPairing pairing, AgentExecutionRegistry registry) {
+        ManagedSessionId babysitterId = pairing.babysitterId();
+        ManagedAgentSession row = DrydockSessionService.findIn(stateStore.get().state(), babysitterId);
+        if (row == null) {
+            return;
+        }
+        if (row.workspaceBox().isEmpty() && !registry.isRunning(babysitterId)
+                && !registry.isStarting(babysitterId)) {
+            return;
+        }
+        Optional<DrydockSessionService> sessions = sessionsFor(pairing);
+        if (sessions.isPresent()) {
+            sessions.get().stopSession(babysitterId)
+                    .handle((ignored, failure) -> {
+                        if (failure != null) {
+                            LOG.log(Level.WARNING, "Could not stop the suspended babysitter "
+                                    + babysitterId + ": " + failure);
+                        }
+                        return null;
+                    });
+            return;
+        }
+        if (row.workspaceBox().isPresent()) {
+            LOG.log(Level.WARNING, "No open project can stop the box-side agent of the suspended babysitter "
+                    + babysitterId + "; it keeps running on the box while its engagement is suspended");
+            return;
+        }
+        LOG.log(Level.WARNING, "No open project can stop the suspended babysitter " + babysitterId
+                + "; its local agent is stopped and its row stays");
+        registry.stop(babysitterId);
+    }
+
+    /**
+     * Resumes {@code pairing}'s babysitter's agent in the background, no
+     * prompt: skipped when it already runs, is launching, has no bound
+     * conversation (an unbound resume is a picker, never an automation), or
+     * when no open project can serve the resume. Fire-and-forget; a failure
+     * is logged and the next watched activation retries.
+     */
+    private void resumeBabysitter(BabysitPairing pairing, AgentExecutionRegistry registry) {
+        ManagedSessionId babysitterId = pairing.babysitterId();
+        if (registry.isRunning(babysitterId) || registry.isStarting(babysitterId)
+                || registry.launchClaims().isClaimed(babysitterId)) {
+            return;
+        }
+        ManagedAgentSession row = DrydockSessionService.findIn(stateStore.get().state(), babysitterId);
+        if (row == null || row.agentSessionId().isEmpty()) {
+            LOG.log(Level.INFO, "Babysitter " + babysitterId + " has no bound conversation; it is not"
+                    + " resumed automatically (a resume without one is a picker)");
+            return;
+        }
+        Optional<DrydockSessionService> sessions = sessionsFor(pairing);
+        if (sessions.isEmpty()) {
+            LOG.log(Level.WARNING, "No open project can resume the babysitter " + babysitterId
+                    + " of the reactivated session " + pairing.watchedId() + "; it stays stopped");
+            return;
+        }
+        sessions.get().resumeSession(babysitterId)
+                .handle((ignored, failure) -> {
+                    if (failure != null) {
+                        LOG.log(Level.WARNING, "Could not resume the babysitter " + babysitterId
+                                + " of the reactivated session " + pairing.watchedId() + ": " + failure);
+                    }
+                    return null;
+                });
+    }
+
     @Override
     public void dispose() {
         stopped = true;
@@ -391,7 +591,11 @@ public final class BabysitMonitorService implements Disposable {
                 setStateIf(store, pairing, BabysitState.ACTING, BabysitState.WATCHING);
             }
             // What a restored engagement's PR shows now predates this run:
-            // its first read is a silent baseline.
+            // its first read is a silent baseline. A restored SUSPENDED
+            // engagement (its watched session is idle and stays so until the
+            // human resumes it) gets one too, so resuming it later never
+            // wakes its babysitter with a status dump of a PR nothing has
+            // changed on since before the restart.
             tracks.computeIfAbsent(pairing.babysitterId(), id -> new Track()).silentBaseline = true;
         }
     }
@@ -414,7 +618,7 @@ public final class BabysitMonitorService implements Disposable {
             if (stopped || Thread.currentThread().isInterrupted()) {
                 return;
             }
-            if (pairing.state() == BabysitState.STOPPED) {
+            if (pairing.state() == BabysitState.STOPPED || pairing.state() == BabysitState.SUSPENDED) {
                 continue;
             }
             try {
