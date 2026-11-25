@@ -26,6 +26,10 @@ import com.intellij.terminal.TerminalExecutionConsole;
 import com.jediterm.core.util.TermSize;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.JComponent;
+import javax.swing.Timer;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.System.Logger;
@@ -599,6 +603,7 @@ public final class AgentExecutionRegistry implements Disposable {
         NopProcessHandler output = new NopProcessHandler();
         console.attachToProcess(output, tty, true);
         output.startNotify();
+        attachReshowRedraw(console, tty);
         execution.shownIn(target, console);
         ProcessHandlerTtyConnector input = tty;
         // Set by the console's own disposal (a window closing, or a move):
@@ -622,6 +627,31 @@ public final class AgentExecutionRegistry implements Disposable {
         previous.ifPresent(Disposer::dispose);
         publish().executionShown(sessionId, target);
         return execution;
+    }
+
+    /**
+     * Forces an agent redraw when a console becomes visible again. While its
+     * pane is out of the layout hierarchy (a background editor tab or an
+     * unselected slot), window resizes never reach the PTY, and the re-show's
+     * own size catch-up leaves the agent's screen state drifted: jediterm
+     * truncates the alternate screen instead of reflowing it, so a
+     * differentially-rendering TUI then paints into a screen it believes
+     * unchanged. The one-column-wider-and-back nudge every supported TUI
+     * answers with a full redraw, exactly like the move path above. One
+     * shot, 600 ms after the show settles, so the size catch-up has landed
+     * before the nudge reads the size.
+     */
+    private static void attachReshowRedraw(TerminalExecutionConsole console, ProcessHandlerTtyConnector tty) {
+        JComponent component = console.getComponent();
+        Timer nudge = new Timer(600, event -> redraw(console, tty));
+        nudge.setRepeats(false);
+        Disposer.register(console, nudge::stop);
+        component.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentShown(ComponentEvent event) {
+                nudge.restart();
+            }
+        });
     }
 
     /**
