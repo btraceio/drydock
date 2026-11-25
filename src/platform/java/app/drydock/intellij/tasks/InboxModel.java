@@ -24,10 +24,12 @@ import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.Optional;
 import java.util.Set;
 
@@ -126,12 +128,24 @@ final class InboxModel {
         Optional<ProjectRef> project();
     }
 
-    /** A session's row, with the titles of the live tasks it carries (for its tooltip). */
-    record SessionItem(TaskRow row, Optional<ProjectRef> project, List<String> taskTitles) implements Item {
+    /**
+     * A session's row, with the titles of the live tasks it carries (for its
+     * tooltip) and the active engagement's babysitter sessions nested beneath
+     * it — the inbox's rendering of the tree model's nesting: the engagement
+     * shows through the watched session's entry, the babysitter as its
+     * indented child row, never as a session of its own.
+     */
+    record SessionItem(TaskRow row, Optional<ProjectRef> project, List<String> taskTitles,
+                       List<SessionItem> babysitters) implements Item {
         SessionItem {
             Objects.requireNonNull(row, "row");
             Objects.requireNonNull(project, "project");
             taskTitles = List.copyOf(taskTitles);
+            babysitters = List.copyOf(babysitters);
+        }
+
+        SessionItem(TaskRow row, Optional<ProjectRef> project, List<String> taskTitles) {
+            this(row, project, taskTitles, List.of());
         }
 
         @Override
@@ -365,7 +379,7 @@ final class InboxModel {
         Map<Path, Integer> activeByRoot = new LinkedHashMap<>();
         for (Placed one : placed) {
             if (one.kind().active()) {
-                one.item().project().ifPresent(project -> activeByRoot.merge(project.root(), 1, Integer::sum));
+                forActivity(one.item(), project -> activeByRoot.merge(project.root(), 1, Integer::sum));
             }
         }
         List<Suggestion> projects = in.projects().stream()
@@ -388,7 +402,7 @@ final class InboxModel {
                     .equals(query.project())) {
                 continue;
             }
-            if (!needle.isEmpty() && !one.item().title().toLowerCase(Locale.ROOT).contains(needle)) {
+            if (!needle.isEmpty() && !matchesTitle(one.item(), needle)) {
                 continue;
             }
             if (!terms.matchPullRequests(one.pullRequests()) || !terms.matchIssues(one.issues())) {
@@ -594,15 +608,47 @@ final class InboxModel {
                 && one.item() instanceof SessionItem session && session.row().session().flagged();
     }
 
+    /**
+     * Whether the search text matches the session or any babysitter nested
+     * beneath it: a hit on the nested row keeps its watched entry, as a
+     * listing hit keeps its container.
+     */
+    private static boolean matchesTitle(Item item, String needle) {
+        if (item.title().toLowerCase(Locale.ROOT).contains(needle)) {
+            return true;
+        }
+        return item instanceof SessionItem session
+                && session.babysitters().stream().anyMatch(babysitter -> matchesTitle(babysitter, needle));
+    }
+
+    /**
+     * Merges the item — and every babysitter nested beneath a session — into
+     * an activity counter: a task counts once, a session counts itself and
+     * its nested rows.
+     */
+    private static void forActivity(Item item, Consumer<ProjectRef> consumer) {
+        if (item instanceof SessionItem session) {
+            session.project().ifPresent(consumer);
+            session.babysitters().forEach(babysitter -> forActivity(babysitter, consumer));
+        } else {
+            item.project().ifPresent(consumer);
+        }
+    }
+
     /** Every item in its group, in group order and then each group's own order. */
     private static List<Placed> place(Inputs in, boolean matchReferences) {
         Map<String, SessionAt> sessions = new LinkedHashMap<>();
         collectSessions(in.nodes(), Optional.empty(), sessions);
 
+        // The join matches a task against every session the inbox shows,
+        // nested babysitters included: a task attached to a babysitter
+        // session attaches to its nested row.
+        Set<String> sessionIds = new LinkedHashSet<>();
+        sessions.values().forEach(at -> collectIds(at, sessionIds));
         Map<String, List<DelayedTaskRow>> attached = new LinkedHashMap<>();
         List<DelayedTaskRow> loose = new ArrayList<>();
         for (DelayedTaskRow row : DelayedTaskRows.sorted(in.tasks())) {
-            Optional<String> session = DelayedTaskRows.attachedSession(row, sessions.keySet());
+            Optional<String> session = DelayedTaskRows.attachedSession(row, sessionIds);
             session.ifPresent(id -> attached.computeIfAbsent(id, any -> new ArrayList<>()).add(row));
             if (session.isEmpty() || row.presentation() != TaskState.Presentation.STARTED) {
                 loose.add(row);
@@ -613,16 +659,7 @@ final class InboxModel {
         List<SessionAt> ordered = new ArrayList<>(sessions.values());
         ordered.sort(Comparator.comparing((SessionAt at) -> at.row().session().lastOpenedAt()).reversed());
         for (SessionAt at : ordered) {
-            String id = at.row().session().id().toString();
-            List<DelayedTaskRow> children = attached.getOrDefault(id, List.of());
-            List<String> titles = children.stream()
-                    .filter(child -> child.presentation() == TaskState.Presentation.STARTED)
-                    .map(DelayedTaskRow::title).toList();
-            SearchRefs.ItemRefs refs = matchReferences ? SearchRefs.sessionRefs(at.row(), children) : null;
-            List<SearchTerms.PrRef> pullRequests = refs == null ? List.of() : refs.pullRequests();
-            List<SearchTerms.IssueRef> issues = refs == null ? List.of() : refs.issues();
-            placed.add(new Placed(sessionKind(at.row()), new SessionItem(at.row(), at.project(), titles),
-                    pullRequests, issues));
+            placed.add(placedSession(at, attached, matchReferences));
         }
         LocalDate today = LocalDate.ofInstant(in.now(), in.zone());
         for (DelayedTaskRow row : loose) {
@@ -636,6 +673,80 @@ final class InboxModel {
         }
         placed.sort(Comparator.comparing(Placed::kind));
         return placed;
+    }
+
+    /**
+     * One session's placed entry: its item carries the engagement's
+     * babysitters nested beneath it, and its {@code pr:}/{@code issue:}
+     * references union theirs — a term that matches only the engagement's
+     * pull request keeps the watched session's entry, as a hit keeps its
+     * container.
+     */
+    private static Placed placedSession(SessionAt at, Map<String, List<DelayedTaskRow>> attached,
+                                        boolean matchReferences) {
+        List<SessionItem> children = at.babysitters().stream()
+                .map(child -> sessionItem(child, attached))
+                .toList();
+        List<SearchTerms.PrRef> pullRequests = new ArrayList<>();
+        List<SearchTerms.IssueRef> issues = new ArrayList<>();
+        if (matchReferences) {
+            SearchRefs.ItemRefs refs = SearchRefs.sessionRefs(at.row(),
+                    attached.getOrDefault(at.row().session().id().toString(), List.of()));
+            pullRequests.addAll(refs.pullRequests());
+            issues.addAll(refs.issues());
+            for (SessionAt child : at.babysitters()) {
+                SearchRefs.ItemRefs childRefs = SearchRefs.sessionRefs(child.row(),
+                        attached.getOrDefault(child.row().session().id().toString(), List.of()));
+                childRefs.pullRequests().forEach(ref -> {
+                    if (!pullRequests.contains(ref)) {
+                        pullRequests.add(ref);
+                    }
+                });
+                childRefs.issues().forEach(ref -> {
+                    if (!issues.contains(ref)) {
+                        issues.add(ref);
+                    }
+                });
+            }
+        }
+        return new Placed(sessionKind(at), sessionItem(at, attached, children),
+                List.copyOf(pullRequests), List.copyOf(issues));
+    }
+
+    /**
+     * The group of a session that carries nested babysitters: an engagement
+     * is live while its babysitter runs, so a watched session whose row is
+     * otherwise idle rises to Running (or stays in Needs you) — the entry's
+     * child chip says what runs beneath it. The flagged chip follows the
+     * session either way.
+     */
+    private static GroupKind sessionKind(SessionAt at) {
+        GroupKind kind = sessionKind(at.row());
+        boolean anyChildRunning = at.babysitters().stream().anyMatch(child -> child.row().running());
+        if (!anyChildRunning || kind == GroupKind.NEEDS_YOU) {
+            return kind;
+        }
+        return GroupKind.RUNNING;
+    }
+
+    /** The session's item: its live task titles and its nested babysitter items. */
+    private static SessionItem sessionItem(SessionAt at, Map<String, List<DelayedTaskRow>> attached,
+                                           List<SessionItem> children) {
+        return new SessionItem(at.row(), at.project(), liveTitles(at, attached), children);
+    }
+
+    private static SessionItem sessionItem(SessionAt at, Map<String, List<DelayedTaskRow>> attached) {
+        List<SessionItem> children = at.babysitters().stream()
+                .map(child -> sessionItem(child, attached))
+                .toList();
+        return sessionItem(at, attached, children);
+    }
+
+    /** The titles of the live (started) tasks the session carries. */
+    private static List<String> liveTitles(SessionAt at, Map<String, List<DelayedTaskRow>> attached) {
+        return attached.getOrDefault(at.row().session().id().toString(), List.of()).stream()
+                .filter(child -> child.presentation() == TaskState.Presentation.STARTED)
+                .map(DelayedTaskRow::title).toList();
     }
 
     /**
@@ -694,8 +805,8 @@ final class InboxModel {
                 ? Optional.of(root) : Optional.empty();
     }
 
-    /** A session row and the project whose rows it came from. */
-    private record SessionAt(TaskRow row, Optional<ProjectRef> project) {
+    /** A session row — with the babysitter rows nested beneath it — and the project whose rows it came from. */
+    private record SessionAt(TaskRow row, Optional<ProjectRef> project, List<SessionAt> babysitters) {
     }
 
     private static void collectSessions(List<TaskNode> nodes, Optional<ProjectRef> project,
@@ -720,11 +831,21 @@ final class InboxModel {
         }
     }
 
-    /** Puts the row and every babysitter nested beneath it, watched side first. */
+    /** Puts the row with its nested babysitters beneath it; a nested babysitter is never an entry of its own. */
     private static void collect(TaskRow row, Optional<ProjectRef> project, Map<String, SessionAt> out) {
-        out.putIfAbsent(row.session().id().toString(), new SessionAt(row, project));
-        for (TaskRow babysitter : row.babysitters()) {
-            collect(babysitter, project, out);
-        }
+        out.putIfAbsent(row.session().id().toString(), sessionAt(row, project));
+    }
+
+    private static SessionAt sessionAt(TaskRow row, Optional<ProjectRef> project) {
+        List<SessionAt> children = row.babysitters().stream()
+                .map(babysitter -> sessionAt(babysitter, project))
+                .toList();
+        return new SessionAt(row, project, children);
+    }
+
+    /** The id of the session and of every babysitter nested beneath it. */
+    private static void collectIds(SessionAt at, Set<String> out) {
+        out.add(at.row().session().id().toString());
+        at.babysitters().forEach(child -> collectIds(child, out));
     }
 }

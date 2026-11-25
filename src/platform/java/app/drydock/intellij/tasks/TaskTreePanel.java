@@ -2494,13 +2494,18 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             switch (node) {
                 case ProjectRow project -> sessionRowsOf(project.children(), rows);
                 case Section section -> sessionRowsOf(section.children(), rows);
-                case WorktreeGroup group -> group.tasks().forEach(
-                        task -> rows.putIfAbsent(task.session().id().toString(), task));
-                case TaskRow task -> rows.putIfAbsent(task.session().id().toString(), task);
+                case WorktreeGroup group -> group.tasks().forEach(task -> collectSessionRows(task, rows));
+                case TaskRow task -> collectSessionRows(task, rows);
                 default -> {
                 }
             }
         }
+    }
+
+    /** The row and every babysitter nested beneath it. */
+    private static void collectSessionRows(TaskRow row, Map<String, TaskRow> rows) {
+        rows.putIfAbsent(row.session().id().toString(), row);
+        row.babysitters().forEach(babysitter -> collectSessionRows(babysitter, rows));
     }
 
     /**

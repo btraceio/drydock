@@ -189,6 +189,18 @@ class TaskTreePanelTargetTest {
     }
 
     @Test
+    void sessionRowLookupIncludesNestedBabysittersBelowTheFirstChild() {
+        TaskRow grandchild = sessionRow("nested babysitter");
+        TaskRow babysitter = sessionRow("babysitter").withBabysitters(List.of(grandchild));
+        TaskRow watched = sessionRow("watched").withBabysitters(List.of(babysitter));
+
+        Map<String, TaskRow> rows = TaskTreePanel.sessionRowsOf(List.<TaskNode>of(watched));
+
+        assertEquals(3, rows.size());
+        assertSame(grandchild, rows.get(grandchild.session().id().toString()));
+    }
+
+    @Test
     void taskInTheMainCheckoutKeepsTheNormalMainProjectChoices() {
         ManagedAgentSession session = new ManagedAgentSession.Builder(
                 ManagedSessionId.newId(), RepositoryId.newId(), "Main checkout task",
