@@ -124,6 +124,12 @@ class BabysitHandoverTest {
     }
 
     @Test
+    void suspendedEngagementsAreNotDetached() {
+        assertEquals(Optional.empty(), BabysitHandover.detachmentOf(withEngagement(ApplicationState.empty(),
+                BabysitState.SUSPENDED), UUID.randomUUID(), AT, root -> Optional.empty()));
+    }
+
+    @Test
     void detachWritesTheDetachmentBeforeItSpawnsTheWatcherWithItsGeneration() {
         List<UUID> spawned = new ArrayList<>();
 

@@ -22,7 +22,7 @@ implementation changes) back to the main session.
 | B2 | The babysitter may push new commits to the PR branch AND rebase/force-push (`--force-with-lease`) it to resolve merge conflicts — only under the write guard (see Mechanics). |
 | B3 | Escalation/post-back goes through a NEW structured escalation record (own `ApplicationState` field — NOT `handoffBriefs`, which is replace-wholesale per session and would clobber the watched session's own brief), surfaced in the UI. |
 | B4 | The 3-retry cap for retriggering CI is per failed run; when the same failure survives 3 reruns, the babysitter escalates. The plugin enforces the cap (persisted counter); the agent judges flakiness. |
-| B5 | Babysitting stops when the PR merges or closes, when the watched main session is deleted, or on explicit stop. If the IDE closes first, the engagement detaches (see Detached mode) instead of stopping. |
+| B5 | Babysitting stops when the PR merges or closes, when the watched main session is deleted, or on explicit stop. While the IDE is open, the engagement instead follows the watched session's life: deactivating the watched session (an explicit Deactivate, the Done flow's stop, a window close that stops it, or the agent ending on its own) suspends the engagement — its pairing is marked `SUSPENDED`, the babysitter's agent is stopped, and the monitor polls nothing. Resuming (or starting) the watched session resumes it: the pairing returns to `WATCHING` and the babysitter's agent is resumed in the background, unconditionally. An IDE quit does neither: the engagement detaches (see Detached mode) instead. |
 | B6 | The main-session ↔ babysitter pairing is persisted in `ApplicationState`; after restart the pairing restores and polling resumes. |
 | B7 | When the IDE is closed, a detached watcher process keeps polling and resumes the babysitter agent headlessly per event; escalations queue in a state file the plugin ingests on restart. |
 | B8 | UI: the engagement is visually distinct (the babysitter nests beneath the watched session's inbox entry with its own engagement chip; the watched entry wears `babysat · <state>`) with navigation both ways between babysitter and watched session. |
@@ -75,6 +75,19 @@ implementation changes) back to the main session.
   latest 50 are kept). A gh failure, timeout or unavailable result is never
   read as "no change" or "PR gone": keep a last-known-good state and back
   off on errors.
+- A `SUSPENDED` engagement (its watched session's agent is not running) is
+  skipped by every tick: no reads, no events, no wakes. Its observation
+  track is frozen, so the first read after a resume diffs against what the
+  PR showed at suspension and delivers exactly what changed in between —
+  no synthetic status wake. This holds while the IDE stays open; if the
+  IDE restarts while the engagement is suspended, the restore re-baselines
+  it silently (like every restored engagement), so the first read after
+  the later resume starts from the restart-time PR state and changes made
+  before the restart are not delivered as a catch-up wake. Its
+  babysitter's MCP tools answer "no active engagement" and a detached
+  watcher is never handed it. Stop Babysitting still works on a suspended
+  engagement, and resuming the watched session returns the pairing to
+  `WATCHING` and resumes the babysitter's agent.
 - The engagement's first read is always delivered: a first-status delta
   that states the PR as it stands (checks, mergeability, review counts)
   even when nothing is wrong, so the babysitter orients itself instead of
@@ -169,7 +182,10 @@ implementation changes) back to the main session.
 - On IDE shutdown with an active engagement, the plugin spawns a detached
   watcher process carrying the same monitor core. On events it resumes the
   babysitter agent headlessly (no MCP server is running) and records
-  escalations in the shared state file. Detached Codex runs use the
+  escalations in a shared state file. A `SUSPENDED` engagement is not
+  handed to the watcher: its watched session's agent is not running, and
+  babysitting it headlessly would run behind the human's back. It stays
+  suspended across the restart and resumes when its watched session does. Detached Codex runs use the
   `workspace-write` sandbox with the shared babysit directory as an added
   writable root. Codex `git`/`gh` operations are limited by that sandbox:
   network access and writes under the main repository's `.git` directory for

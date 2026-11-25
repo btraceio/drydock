@@ -28,6 +28,7 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.ManagedAgentSession;
 import app.drydock.domain.Repository;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.intellij.agent.AgentExecutionListener;
 import app.drydock.domain.SessionStatus;
 import app.drydock.git.WorktreeService;
 import app.drydock.intellij.projects.SharedProjectsService;
@@ -751,6 +752,40 @@ public final class DrydockPluginService implements Disposable {
             // ask a watcher still finishing a run to stop. The monitor's
             // first tick is seconds away and reads the result.
             reattachBabysitting();
+            // The babysitting engagement's life follows its watched session's:
+            // an agent that starts again resumes the engagements suspended
+            // when it last stopped (their pairings back to WATCHING, their
+            // babysitters' agents resumed). The pause half rides the end
+            // recorder (SessionEnds) and the explicit remote Stop; an IDE
+            // quit reaches neither, on purpose -- the detach handover governs
+            // engagements at quit.
+            ApplicationManager.getApplication().getMessageBus().connect(this)
+                    .subscribe(AgentExecutionListener.TOPIC, new AgentExecutionListener() {
+                        @Override
+                        public void executionStarted(ManagedSessionId id) {
+                            BabysitMonitorService monitor = babysitMonitor;
+                            if (monitor == null) {
+                                return;
+                            }
+                            // The bus publishes synchronously (an EDT thread
+                            // for a start): the cascade's state write and
+                            // resume kick-off must not sit inline between the
+                            // other executionStarted subscribers.
+                            try {
+                                executor.execute(() -> {
+                                    try {
+                                        monitor.resumeEngagementsOf(id);
+                                    } catch (RuntimeException e) {
+                                        LOG.log(Level.WARNING,
+                                                () -> "Resuming the suspended engagements of " + id + " failed", e);
+                                    }
+                                });
+                            } catch (RejectedExecutionException e) {
+                                LOG.log(Level.DEBUG, () -> "Not resuming the suspended engagements of " + id
+                                        + ": the executor is shut down");
+                            }
+                        }
+                    });
         }
         recoverWorkflowResources();
         registry = AgentRegistry.create(
@@ -794,6 +829,21 @@ public final class DrydockPluginService implements Disposable {
             monitor.start();
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "The babysitting monitor could not start; engagements are not watched", e);
+        }
+    }
+
+    /**
+     * The running babysitting monitor, for callers outside the plugin's own
+     * lifecycle (the babysitting monitor's static suspend entry) that may
+     * run with no IDE application at all: a resolve that fails returns null
+     * and the caller skips the babysitting cascade. Null too when none is
+     * running (not started, tests, disposed).
+     */
+    public static BabysitMonitorService babysitMonitorOrNull() {
+        try {
+            return getInstance().babysitMonitor;
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 

@@ -5090,8 +5090,10 @@ class DrydockSessionServiceTest {
         // over the ~3,000 reviewability cap at base (see the 3,174 pin's comment); the persisted
         // merged-PR record added 36 more and the discovered-PR transform 63. The pin moves to
         // today's actual to keep guarding against GROWTH; the split itself is upstream's debt,
-        // recorded as a follow-up task, not solved by this pin.
-        assertTrue(Files.readAllLines(source).size() <= 3324, "lines");
-        assertTrue(Files.size(source) <= 181_100, "bytes");
+        // recorded as a follow-up task, not solved by this pin. The babysit suspension on a
+        // concluded box Stop added 5 (3,329/181,442): one call in the kill
+        // stage plus its comment.
+        assertTrue(Files.readAllLines(source).size() <= 3329, "lines");
+        assertTrue(Files.size(source) <= 181_500, "bytes");
     }
 }
