@@ -174,7 +174,7 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         return entries.stream().map(entry -> switch (entry) {
             case Header header -> (header.collapsed() ? "> " : "v ") + header.group().label();
             case InboxList.GraphHeader header -> (header.collapsed() ? "> " : "v ") + "graph " + header.graph().key();
-            case Row row -> "  " + row.item().title();
+            case Row row -> "  ".repeat(1 + row.depth()) + row.item().title();
             case More more -> more.showingAll() ? "  Show less" : "  + " + more.hidden() + " more";
         }).toList();
     }
@@ -538,6 +538,29 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         assertFalse(tooltip, tooltip.contains("conflicts") || tooltip.contains("failing CI"));
     }
 
+    public void testNestedBabysittersRenderAtEachDepthAndCountsUseGroupItems() {
+        TaskRow watched = running("Watched", NOW).withBabysitters(List.of(
+                running("Babysitter", NOW.minusSeconds(1)).withBabysitters(List.of(
+                        running("Nested babysitter", NOW.minusSeconds(2))))));
+        List<TaskNode> rows = List.of(watched, running("Other 1", NOW.minusSeconds(3)),
+                running("Other 2", NOW.minusSeconds(4)), running("Other 3", NOW.minusSeconds(5)),
+                running("Other 4", NOW.minusSeconds(6)));
+        Inbox inbox = InboxModel.build(new InboxModel.Inputs(
+                List.of(new ProjectRow(ALPHA_PROJECT, false, false, rows, List.of(), rows.size())),
+                List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE);
+
+        list.show(inbox, false);
+
+        assertEquals(List.of("v Running", "  Watched", "    Babysitter", "      Nested babysitter",
+                "  Other 1", "  Other 2", "  Other 3", "  + 1 more"), describe(list.entries()));
+        Header header = list.entries().stream().filter(Header.class::isInstance).map(Header.class::cast)
+                .findFirst().orElseThrow();
+        assertEquals("the header count uses the same top-level scope as truncation", 5, header.count());
+        More more = list.entries().stream().filter(More.class::isInstance).map(More.class::cast)
+                .findFirst().orElseThrow();
+        assertEquals("only the one hidden top-level item is counted", 1, more.hidden());
+    }
+
     /** {@code row} with its part in a babysitting engagement. */
     private static TaskRow withBabysit(TaskRow row, SessionBabysit part) {
         return new TaskRow(row.session(), row.activity(), row.running(), row.branch(), row.placement(),
@@ -557,12 +580,14 @@ public class InboxListPlatformTest extends BasePlatformTestCase {
         TaskRow babysitter = withBabysit(babysitterRow, parts.get(babysitterRow.session().id()));
         TaskRow plain = running("Plain", NOW.minusSeconds(120));
         list.show(InboxModel.build(new InboxModel.Inputs(
-                List.of(new ProjectRow(ALPHA_PROJECT, false, false, List.<TaskNode>of(watched, babysitter, plain),
+                List.of(new ProjectRow(ALPHA_PROJECT, false, false,
+                        List.<TaskNode>of(watched.withBabysitters(List.of(babysitter)), plain),
                         List.of(), 3)),
                 List.of(ALPHA_PROJECT), List.of(), Map.of(), Map.of(TASKS, ALPHA), NOW, ZoneOffset.UTC), Query.NONE),
                 false);
 
-        assertEquals(List.of("v Needs you", "  Watched", "  babysit PR #12", "v Running", "  Plain"),
+        assertEquals("the babysitter renders as the watched session's indented child, not an entry of its own",
+                List.of("v Needs you", "  Watched", "    babysit PR #12", "v Running", "  Plain"),
                 describe(list.entries()));
         assertEquals("the engagement chip comes last, after the project tag",
                 List.of("babysit PR #12", "alpha", "escalated #12"), renderedLabels(indexOf("babysit PR #12")));

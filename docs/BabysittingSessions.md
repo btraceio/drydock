@@ -25,7 +25,7 @@ implementation changes) back to the main session.
 | B5 | Babysitting stops when the PR merges or closes, when the watched main session is deleted, or on explicit stop. If the IDE closes first, the engagement detaches (see Detached mode) instead of stopping. |
 | B6 | The main-session ↔ babysitter pairing is persisted in `ApplicationState`; after restart the pairing restores and polling resumes. |
 | B7 | When the IDE is closed, a detached watcher process keeps polling and resumes the babysitter agent headlessly per event; escalations queue in a state file the plugin ingests on restart. |
-| B8 | UI: babysitter sessions are visually distinct (own section/group, distinct badge/monospace styling) with navigation both ways between babysitter and watched session. |
+| B8 | UI: the engagement is visually distinct (the babysitter nests beneath the watched session's inbox entry with its own engagement chip; the watched entry wears `babysat · <state>`) with navigation both ways between babysitter and watched session. |
 
 ## Mechanics
 
@@ -201,16 +201,34 @@ implementation changes) back to the main session.
   babysitter re-reads the PR and finds nothing new to do); this is
   accepted rather than persisting per-engagement observation state.
 
-### UI (B8)
+### UI (B8, as shipped)
 
-- Babysitter sessions are visually distinct: own section/group in the
-  plugin's session UI with a distinct badge/monospace styling, never mixed
-  into the regular session list.
+- An active engagement's babysitter session is never a session row of its
+  own. In the tool window's Inbox (the view that shows sessions), it
+  renders as an indented child row beneath the watched session's entry,
+  wearing its engagement chip (`watching #N` / `escalated #N`); the
+  watched session's entry wears `babysat · <state>`. An engagement is
+  visible through its watched session or not at all: a babysitter whose
+  watched session's row is built nowhere is hidden. A running babysitter
+  lifts an otherwise idle watched entry into Running and counts as the
+  project's activity.
+- The tool window's Projects view lists no session rows at all — only
+  registered projects with their issues, pull requests, worktrees and
+  branches. Sessions live in the Inbox view; the Projects view has shown
+  no Sessions section since the inbox rewrite (#151), which is why a
+  filter or search hit on a nested babysitter keeps the watched session's
+  Inbox entry (a hit keeps its container).
 - Navigation: a jump affordance from a babysitter to its watched session's
   console, and from the watched session to its babysitter.
-- Engagement state (watching / acting / escalated / stopped, rerun counts)
-  is visible at a glance on the babysitter's row, fed from the monitor
-  through the plugin's normal UI update paths.
+- Engagement state (watching / acting / escalated / stopped) is visible at
+  a glance on the babysitter's chip, fed from the monitor through the
+  plugin's normal UI update paths. Rerun counts are not shown: the
+  persisted counter is keyed by workflow run only, so no per-engagement
+  count exists to display.
+- When an engagement ends, the babysitter session is removed by every
+  end path (explicit stop, monitor-detected merge/close, watched-session
+  deletion, reattach ingest); a stopped pairing's lingering row places
+  like any ordinary session.
 
 ## Out of scope
 

@@ -63,6 +63,7 @@ The old status tabs are **replaced** by state groups (Needs you / Flagged become
 - **Project tag**: small bordered label with repo name. Click → apply `project:` filter. Hidden while a project filter is active (redundant).
 - Removed vs. today: `here · Pi`, `ready · 1d old`, `in review · 2d old` inline text. Move age/agent/location to tooltip.
 - Double-click / Enter: same as today's default action on the item. Right-click: existing context menu (keep "Focus project", now = apply project filter).
+- **Babysitting engagement**: an active engagement's babysitter session is never a row of its own — it renders as an indented child row (one indent step, 14px) directly beneath its watched session's entry, with its engagement chip (`watching #N` / `escalated #N`); the watched entry wears `babysat · <state>`. A search or filter hit on the child keeps the watched entry visible (a hit keeps its container), and the entry's pr:/issue: references union the engagement's pull request. A running babysitter lifts an otherwise idle watched entry into Running and counts as its project's activity; a stopped pairing's babysitter places like any ordinary session.
 
 ### 3.3 Search + project filter
 - One `SearchTextField`. Plain text filters titles (case-insensitive substring).
@@ -78,6 +79,7 @@ The old status tabs are **replaced** by state groups (Needs you / Flagged become
 
 ## 4. Projects view
 - Back button "← Inbox" + title.
+- **No session rows**: the Projects view lists registered projects and their issues, pull requests, worktrees and branches only. Sessions — including babysitting engagements — live in the Inbox view (§3.2); the old project → Sessions tree was replaced by this split and never shows a Sessions section.
 - One row per registered repo: chevron, **name**, "`I` issues · `P` PRs" meta, and (if it has active items) a pill "`K` in inbox" → returns to Inbox with `project:` filter.
 - Expanding a repo shows *Issues · count* (first few + link to open all in browser) and *Pull requests · count* (each marked `mine` / `review`). "No open PRs" when empty.
 - Issues/PRs load lazily on first expand (they are the expensive, noisy data — this is the point of moving them here).

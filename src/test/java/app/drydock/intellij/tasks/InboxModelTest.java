@@ -374,6 +374,21 @@ class InboxModelTest {
                 .flatMap(group -> group.items().stream()).map(Item::title).toList();
     }
 
+    /** The group's titles with every babysitter nested beneath its session's title, indented by depth. */
+    private static List<String> nestedTitles(Inbox inbox, GroupKind kind) {
+        List<String> out = new ArrayList<>();
+        inbox.groups().stream().filter(group -> group.kind() == kind).flatMap(group -> group.items().stream())
+                .forEach(item -> nestedTitles(item, 0, out));
+        return out;
+    }
+
+    private static void nestedTitles(Item item, int depth, List<String> out) {
+        out.add("  ".repeat(depth) + item.title());
+        if (item instanceof SessionItem session) {
+            session.babysitters().forEach(babysitter -> nestedTitles(babysitter, depth + 1, out));
+        }
+    }
+
     private static List<GroupKind> kinds(Inbox inbox) {
         return inbox.groups().stream().map(InboxModel.Group::kind).toList();
     }
@@ -588,21 +603,81 @@ class InboxModelTest {
         return SessionBabysit.join(List.of(pairing), escalations);
     }
 
+    /** The tree model's nesting shape: {@code babysitter} is a row beneath {@code watched}, never of its own. */
+    private static TaskRow nested(TaskRow watched, TaskRow babysitter,
+                                  Map<ManagedSessionId, SessionBabysit> parts) {
+        return withBabysit(watched, parts.get(watched.session().id()))
+                .withBabysitters(List.of(withBabysit(babysitter, parts.get(babysitter.session().id()))));
+    }
+
     @Test
-    void anActiveBabysitterRunsInTheRegularGroups() {
+    void anActiveEngagementNestsItsBabysitterBeneathTheWatchedEntry() {
         TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
         TaskRow watched = running("Watched", NOW);
         Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
-        alphaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
-        alphaRows.add(withBabysit(watched, parts.get(watched.session().id())));
+        alphaRows.add(nested(watched, babysitter, parts));
         task("Ready one", Presentation.READY);
         betaRows.add(session("Stopped", false, Optional.empty(), false, NOW));
 
         Inbox inbox = inbox(Query.NONE);
 
         assertEquals(List.of(GroupKind.RUNNING, GroupKind.READY, GroupKind.IDLE), kinds(inbox));
-        assertEquals(List.of("babysit PR #12", "Watched"), titles(inbox, GroupKind.RUNNING),
-                "a babysitter runs like any session; no group of its own any more");
+        assertEquals(List.of("Watched", "  babysit PR #12"), nestedTitles(inbox, GroupKind.RUNNING),
+                "the engagement shows through the watched session's entry: the babysitter as its indented child");
+        assertEquals(List.of("Watched"), titles(inbox, GroupKind.RUNNING),
+                "the babysitter is never an entry of its own");
+    }
+
+    @Test
+    void nestedEngagementSubtreesStayUnderTheWatchedInboxEntry() {
+        TaskRow watched = running("Watched", NOW);
+        TaskRow babysitter = running("Babysitter", NOW.minusSeconds(1));
+        TaskRow grandchild = running("Nested babysitter", NOW.minusSeconds(2));
+        BabysitPairing watchedPair = new BabysitPairing(babysitter.session().id(), watched.session().id(),
+                watched.session().repositoryId(), 12, BabysitState.WATCHING);
+        BabysitPairing childPair = new BabysitPairing(grandchild.session().id(), babysitter.session().id(),
+                babysitter.session().repositoryId(), 13, BabysitState.WATCHING);
+        Map<ManagedSessionId, SessionBabysit> parts = SessionBabysit.join(List.of(watchedPair, childPair), List.of());
+        TaskRow nested = withBabysit(watched, parts.get(watched.session().id()))
+                .withBabysitters(List.of(withBabysit(babysitter, parts.get(babysitter.session().id()))
+                        .withBabysitters(List.of(withBabysit(grandchild, parts.get(grandchild.session().id()))))));
+        alphaRows.add(nested);
+        task("Task under grandchild", Presentation.STARTED, TaskStatus.STARTED, Optional.empty(),
+                List.of(grandchild.session().id().toString()));
+
+        Inbox inbox = inbox(Query.NONE);
+        SessionItem watchedItem = (SessionItem) inbox.groups().stream()
+                .filter(group -> group.kind() == GroupKind.RUNNING).findFirst().orElseThrow().items().getFirst();
+        SessionItem childItem = watchedItem.babysitters().getFirst();
+        SessionItem grandchildItem = childItem.babysitters().getFirst();
+
+        assertEquals(List.of("Watched", "  Babysitter", "    Nested babysitter"),
+                nestedTitles(inbox, GroupKind.RUNNING));
+        assertEquals(List.of("Watched"), titles(inbox, GroupKind.RUNNING),
+                "nested sessions stay under their watched entry instead of becoming group entries");
+        assertEquals(List.of("Task under grandchild"), grandchildItem.taskTitles(),
+                "task attachment includes session ids below the first babysitter");
+        assertEquals(List.of("Watched", "  Babysitter", "    Nested babysitter"),
+                nestedTitles(inbox(new Query(Optional.empty(), "nested babysitter")), GroupKind.RUNNING),
+                "a deeply nested title match keeps the watched entry");
+    }
+
+    @Test
+    void aRunningBabysitterLiftsAnIdleWatchedEntryIntoRunning() {
+        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
+        TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
+        alphaRows.add(nested(watched, babysitter, parts));
+        betaRows.add(session("Quiet idle", false, Optional.empty(), false, NOW));
+
+        Inbox inbox = inbox(Query.NONE);
+
+        assertEquals(List.of(GroupKind.RUNNING, GroupKind.IDLE), kinds(inbox),
+                "the engagement is live while its babysitter runs: the watched entry rises to Running");
+        assertEquals(List.of("Watched", "  babysit PR #12"), nestedTitles(inbox, GroupKind.RUNNING));
+        assertEquals(List.of("alpha"), inbox.projects().stream().filter(suggestion -> suggestion.active() > 0)
+                        .map(suggestion -> suggestion.project().name()).toList(),
+                "the running engagement counts as the project's activity");
     }
 
     @Test
@@ -624,17 +699,49 @@ class InboxModelTest {
         TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
         TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
         Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.ESCALATED, true);
-        betaRows.add(withBabysit(babysitter, parts.get(babysitter.session().id())));
-        alphaRows.add(withBabysit(watched, parts.get(watched.session().id())));
+        alphaRows.add(nested(watched, babysitter, parts));
+        betaRows.add(session("Beta work", true, Optional.of(SessionActivity.NEEDS_ATTENTION), false, NOW));
 
         Inbox inbox = inbox(Query.NONE);
 
         assertEquals(List.of(GroupKind.NEEDS_YOU), kinds(inbox));
-        assertEquals(List.of("Watched", "babysit PR #12"), titles(inbox, GroupKind.NEEDS_YOU),
+        assertEquals(List.of("Watched", "  babysit PR #12", "Beta work"), nestedTitles(inbox, GroupKind.NEEDS_YOU),
                 "both sides ask for the human: the escalation is the babysitter asking, the human acts on the watched session");
         assertEquals(1, inbox.quietProjects(), "only the project with no session at all is quiet");
         assertEquals(List.of("alpha", "beta"), inbox.projects().stream().filter(suggestion -> suggestion.active() > 0)
                 .map(suggestion -> suggestion.project().name()).toList());
+    }
+
+    @Test
+    void aSearchHitOnTheNestedBabysitterKeepsTheWatchedEntry() {
+        TaskRow babysitter = session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW);
+        TaskRow watched = running("Watched", NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
+        alphaRows.add(nested(watched, babysitter, parts));
+        alphaRows.add(running("Unrelated", NOW));
+
+        Inbox inbox = inbox(new Query(Optional.empty(), "babysit"));
+
+        assertEquals(List.of("Watched", "  babysit PR #12"), nestedTitles(inbox, GroupKind.RUNNING),
+                "a hit on the nested row keeps the watched entry that hosts it");
+        assertTrue(!titles(inbox, GroupKind.RUNNING).contains("Unrelated"));
+    }
+
+    @Test
+    void aPrTermOnTheEngagementKeepsTheWatchedEntry() {
+        TaskRow babysitter = withBranchPr(
+                session("babysit PR #12", true, Optional.of(SessionActivity.IDLE), false, NOW),
+                new GhCliService.BranchPullRequest(12, GhCliService.PrInfo.PrLifecycle.OPEN, false, "babysit/pr-12",
+                        "The watched fix", Optional.empty()));
+        TaskRow watched = session("Watched", false, Optional.empty(), false, NOW);
+        Map<ManagedSessionId, SessionBabysit> parts = paired(watched, babysitter, BabysitState.WATCHING, false);
+        alphaRows.add(nested(watched, babysitter, parts));
+        alphaRows.add(session("Idle other", false, Optional.empty(), false, NOW));
+
+        Inbox inbox = inbox(new Query(Optional.empty(), "pr:12"));
+
+        assertEquals(List.of("Watched", "  babysit PR #12"), nestedTitles(inbox, GroupKind.RUNNING),
+                "the engagement's pull request keeps its watched entry; the child runs, so the entry sits in Running");
     }
 
     // -- the pr: and issue: terms -----------------------------------------

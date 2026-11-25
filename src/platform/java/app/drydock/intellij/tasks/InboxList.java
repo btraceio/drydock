@@ -90,10 +90,20 @@ final class InboxList extends JBList<InboxList.Entry> {
 
     /**
      * One item of a group, or (with {@code group} null and {@code node} set) one task of a dependency graph.
+     * {@code depth} indents a session nested beneath the session row above it — a babysitter under its
+     * watched session; zero for every row that is its own entry.
      */
-    record Row(Group group, Item item, GraphNode node) implements Entry {
+    record Row(Group group, Item item, GraphNode node, int depth) implements Entry {
         Row(Group group, Item item) {
-            this(group, item, null);
+            this(group, item, null, 0);
+        }
+
+        Row(Group group, Item item, GraphNode node) {
+            this(group, item, node, 0);
+        }
+
+        Row(Group group, Item item, int depth) {
+            this(group, item, null, depth);
         }
     }
 
@@ -414,6 +424,11 @@ final class InboxList extends JBList<InboxList.Entry> {
             boolean all = showingAll.contains(group.kind());
             for (Item item : group.shown(all)) {
                 entries.addElement(new Row(group, item));
+                // The engagement renders through its watched session: babysitters are indented
+                // child rows, never sessions of their own.
+                if (item instanceof SessionItem session) {
+                    addBabysitters(entries, group, session, 1);
+                }
             }
             int hidden = group.hidden(all);
             if (hidden > 0 || all && group.hidden(false) > 0) {
@@ -434,6 +449,14 @@ final class InboxList extends JBList<InboxList.Entry> {
             }
         }
         setSelectedIndices(indices.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    private static void addBabysitters(DefaultListModel<Entry> entries, Group group,
+                                        SessionItem parent, int depth) {
+        for (SessionItem babysitter : parent.babysitters()) {
+            entries.addElement(new Row(group, babysitter, depth));
+            addBabysitters(entries, group, babysitter, depth + 1);
+        }
     }
 
     /** The graph tasks that are ready to start (or interrupted, which the group lists as ready); blocked and in-review ones are not counted. */
@@ -907,7 +930,8 @@ final class InboxList extends JBList<InboxList.Entry> {
                     });
                     trailing.setVisible(pr.isPresent() || project.isPresent() || window.isPresent()
                             || flag.isPresent() || babysit.isPresent() || chip.isPresent());
-                    panel.setBorder(JBUI.Borders.empty(0, row.node() == null ? 30 : 48 + 14 * row.node().depth(),
+                    panel.setBorder(JBUI.Borders.empty(0,
+                            row.node() == null ? 30 + 14 * row.depth() : 48 + 14 * row.node().depth(),
                             0, 12));
                 }
             }
