@@ -11,6 +11,8 @@ import app.drydock.agent.api.McpAccess;
 import app.drydock.agent.api.RemotePersistence;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
+import app.drydock.agent.spi.AgentProvider.EditorAskRequest;
+import app.drydock.editorqa.EditorAskRecord;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
@@ -666,6 +668,46 @@ class ClaudeAgentProviderTest {
     private static final String REMOTE_SSH_PREFIX =
             "ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -- 'build-box'"
                     + " 'export TERM=xterm-256color; cd '\\''/srv/repo'\\'' && ";
+
+    /** A validated launch receives its private hooks; an earlier refusal leaves no nonce directory. */
+    @Test
+    void editorAskInstallsLaunchHooksOnlyAfterValidation(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        ClaudeAgentProvider provider = fullCapsProvider(dir);
+        McpAccess mcp = new McpAccess("http://127.0.0.1:0/mcp", "token", Optional.of(dir.resolve("mcp.json")));
+        CreateContext valid = new CreateContext("Q&A", "gen-42", dir, Optional.empty(), Optional.of(mcp),
+                Optional.empty(), false, true, Optional.empty(), List.of(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty());
+        Path obstruction = dir.resolve("editor-ask");
+        Files.writeString(obstruction, "not a directory");
+        String blockedMarker = EditorAskRecord.newId();
+        var armRefused = provider.prepareEditorAskCreate(valid,
+                new EditorAskRequest("launch-blocked", blockedMarker, "Answer " + blockedMarker));
+        assertFalse(armRefused.accepted());
+        // The obstruction is only detectable by the filesystem, and nothing
+        // was created for the blocked nonce: it is untouched.
+        assertTrue(Files.isRegularFile(obstruction));
+        assertTrue(armRefused.refusal().contains("launch"), armRefused.refusal());
+        Files.delete(obstruction);
+
+        String marker = EditorAskRecord.newId();
+        var accepted = provider.prepareEditorAskCreate(valid,
+                new EditorAskRequest("launch-0001", marker, "Answer " + marker));
+        Path launchDirectory = dir.resolve("editor-ask/launch-0001");
+        assertTrue(accepted.accepted(), accepted.refusal());
+        assertTrue(accepted.plan().command().contains(launchDirectory.resolve("settings.json").toString()));
+        assertTrue(Files.isRegularFile(launchDirectory.resolve("settings.json")));
+        assertTrue(Files.isRegularFile(launchDirectory.resolve("events.log")));
+        accepted.observer().orElseThrow().close();
+        assertFalse(Files.exists(launchDirectory));
+
+        String refusedMarker = EditorAskRecord.newId();
+        var refused = provider.prepareEditorAskCreate(new CreateContext("Q&A", "gen-42", dir,
+                        Optional.empty(), Optional.empty()),
+                new EditorAskRequest("launch-0002", refusedMarker, "No tools " + refusedMarker));
+        assertFalse(refused.accepted());
+        assertFalse(Files.exists(dir.resolve("editor-ask/launch-0002")),
+                "a preflight refusal must not create launch-private hook artifacts");
+    }
 
     /**
      * A stub {@code claude} whose {@code --help} advertises every flag the

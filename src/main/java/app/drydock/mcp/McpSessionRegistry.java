@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-session tokens, spawn grants, and creation budgets for the MCP server.
@@ -68,7 +69,8 @@ public final class McpSessionRegistry {
     }
 
     private final SecureRandom random = new SecureRandom();
-    private final Map<String, ManagedSessionId> byToken = new ConcurrentHashMap<>();
+    private final Map<String, Credential> byToken = new ConcurrentHashMap<>();
+    private final AtomicLong generations = new AtomicLong();
     private final Map<ManagedSessionId, String> bySession = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, Spawn> grants = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> worktreesCreated = new ConcurrentHashMap<>();
@@ -77,8 +79,33 @@ public final class McpSessionRegistry {
     private final Map<ManagedSessionId, AtomicInteger> handoffsApplied = new ConcurrentHashMap<>();
     private final Map<ManagedSessionId, AtomicInteger> escalationsRaised = new ConcurrentHashMap<>();
 
+    /**
+     * A resolved credential: the session, the nonsecret generation of the mint
+     * that created it, and whether requests under it get the bounded read of
+     * {@link #rotateAndMint}. Immutable, so one lookup freezes all three.
+     */
+    public record Credential(ManagedSessionId session, long generation, boolean boundedReads) {
+    }
+
+    /**
+     * Revokes any previous token of the session, then mints a fresh one with a
+     * new generation and bounded request reads (editor Q&amp;A launches). Call
+     * under the launch's exclusive claim: {@link #mint} alone is idempotent per
+     * session and would hand the old generation back.
+     */
+    public synchronized String rotateAndMint(ManagedSessionId sessionId, Spawn spawn) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(spawn, "spawn");
+        revoke(sessionId);
+        return mint(sessionId, spawn, true);
+    }
+
     /** Returns this session's token, minting one on first call. Idempotent per session. */
-    public String mint(ManagedSessionId sessionId, Spawn spawn) {
+    public synchronized String mint(ManagedSessionId sessionId, Spawn spawn) {
+        return mint(sessionId, spawn, false);
+    }
+
+    private String mint(ManagedSessionId sessionId, Spawn spawn, boolean boundedReads) {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(spawn, "spawn");
         grants.put(sessionId, spawn);
@@ -86,7 +113,7 @@ public final class McpSessionRegistry {
             byte[] bytes = new byte[TOKEN_BYTES];
             random.nextBytes(bytes);
             String token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-            byToken.put(token, id);
+            byToken.put(token, new Credential(id, generations.incrementAndGet(), boundedReads));
             return token;
         });
     }
@@ -97,16 +124,28 @@ public final class McpSessionRegistry {
      * not timing, but a uniform compare costs nothing here.
      */
     public Optional<ManagedSessionId> resolve(String presented) {
+        return authenticate(presented).map(Credential::session);
+    }
+
+    /** Like {@link #resolve}, but freezes the session with its generation in one lookup. */
+    public Optional<Credential> authenticate(String presented) {
         if (presented == null || presented.isEmpty()) {
             return Optional.empty();
         }
-        ManagedSessionId match = null;
-        for (Map.Entry<String, ManagedSessionId> entry : byToken.entrySet()) {
+        Credential match = null;
+        for (Map.Entry<String, Credential> entry : byToken.entrySet()) {
             if (constantTimeEquals(entry.getKey(), presented)) {
                 match = entry.getValue();
             }
         }
         return Optional.ofNullable(match);
+    }
+
+    /** Whether {@code generation} is still the session's live credential generation. */
+    public boolean isCurrent(ManagedSessionId sessionId, long generation) {
+        String token = bySession.get(sessionId);
+        Credential credential = token == null ? null : byToken.get(token);
+        return credential != null && credential.generation() == generation;
     }
 
     public Optional<String> tokenFor(ManagedSessionId sessionId) {
@@ -221,7 +260,7 @@ public final class McpSessionRegistry {
     }
 
     /** Drops the session's token and grant. Budget charges are kept, so a reconnect cannot refill them. */
-    public void revoke(ManagedSessionId sessionId) {
+    public synchronized void revoke(ManagedSessionId sessionId) {
         String token = bySession.remove(sessionId);
         if (token != null) {
             byToken.remove(token);

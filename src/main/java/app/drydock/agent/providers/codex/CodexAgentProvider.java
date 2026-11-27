@@ -17,6 +17,7 @@ import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.api.SnapshotClaimDiscovery;
 import app.drydock.agent.providers.AgentCommands;
+import app.drydock.agent.providers.codex.internal.CodexEditorAskRolloutReader;
 import app.drydock.agent.providers.codex.internal.CodexExecHelpProbe;
 import app.drydock.agent.providers.codex.internal.CodexExecutableLocator;
 import app.drydock.agent.providers.codex.internal.CodexRolloutStore;
@@ -25,10 +26,16 @@ import app.drydock.agent.spi.AgentProvider;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
@@ -47,6 +54,9 @@ public final class CodexAgentProvider implements AgentProvider {
     /** Server name under {@code mcp_servers}; matches the key McpConfigWriter uses for Claude. */
     private static final String SERVER_NAME = "drydock";
 
+    /** Budget of one rollout observation scan (the reader's own limits bound bytes and files). */
+    private static final Duration ROLLOUT_SCAN_DEADLINE = Duration.ofSeconds(5);
+
     /** Kept in step with {@code McpConfigWriter} and {@code McpServer}. */
     private static final String TOKEN_HEADER = "X-Drydock-Session-Token";
 
@@ -56,6 +66,7 @@ public final class CodexAgentProvider implements AgentProvider {
     private final CodexExecutableLocator locator;
     private final ConcurrentMap<Path, CodexExecHelpProbe.Result> headlessProbeCache = new ConcurrentHashMap<>();
     private CodexConversationSource conversationSource;
+    private CodexRolloutStore rolloutStore;
     private SessionIdDiscovery idDiscovery;
 
     /** Public no-arg constructor required by {@link java.util.ServiceLoader}. */
@@ -81,6 +92,7 @@ public final class CodexAgentProvider implements AgentProvider {
     @Override
     public void init(AgentContext ctx) {
         CodexRolloutStore store = new CodexRolloutStore();
+        this.rolloutStore = store;
         this.conversationSource = new CodexConversationSource(store);
         this.idDiscovery = new SnapshotClaimDiscovery(store);
     }
@@ -166,6 +178,79 @@ public final class CodexAgentProvider implements AgentProvider {
      * (remote is refused outright, eval is a local process), so a requested
      * directory is always renderable here: no refusal branch is needed.
      */
+    @Override
+    public EditorAskLaunch prepareEditorAskCreate(CreateContext c, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(c);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        CreateContext withPrompt = new CreateContext(c.displayName(), c.sessionId(), c.workingDirectory(),
+                c.remote(), c.mcp(), c.model(), false, c.readOnly(), Optional.of(request.firstTurnPrompt()),
+                c.stdioMcpServers(), c.launchResources(), c.persistence(), c.workflowAccess(),
+                c.remoteLaunchSupport());
+        return prepareEditorAsk(request, c.mcp(), buildCreateCommand(withPrompt),
+                new CodexEditorAskRolloutReaderFactory(c.workingDirectory(), Optional.empty()));
+    }
+
+    @Override
+    public EditorAskLaunch prepareEditorAskResume(ResumeContext r, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(r);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        ResumeContext withPrompt = new ResumeContext(r.agentSessionId(), r.agentSessionName(),
+                r.workingDirectory(), r.remote(), r.mcp(), false, r.readOnly(), r.stdioMcpServers(),
+                Optional.of(request.firstTurnPrompt()), r.launchResources(), r.persistence(),
+                r.workflowAccess(), r.remoteLaunchSupport());
+        return prepareEditorAsk(request, r.mcp(), buildResumeCommand(withPrompt),
+                new CodexEditorAskRolloutReaderFactory(r.workingDirectory(), r.agentSessionId()));
+    }
+
+    /** How the rollout reader of one launch is built: create-mode (by cwd/time) or the exact resumed thread. */
+    private record CodexEditorAskRolloutReaderFactory(Path cwd, Optional<String> resumeThreadId) {
+        CodexEditorAskRolloutReader open(CodexRolloutStore store) {
+            return resumeThreadId.isPresent()
+                    ? new CodexEditorAskRolloutReader(store, cwd, resumeThreadId.get(), Clock.systemUTC(),
+                            ROLLOUT_SCAN_DEADLINE)
+                    : new CodexEditorAskRolloutReader(store, cwd, Instant.now(), Clock.systemUTC(),
+                            ROLLOUT_SCAN_DEADLINE);
+        }
+    }
+
+    /** Evidence from the rendered command: the endpoint overrides, the token read from its file, the prompt. */
+    private EditorAskLaunch prepareEditorAsk(EditorAskRequest request, Optional<McpAccess> mcp, LaunchPlan plan,
+                                             CodexEditorAskRolloutReaderFactory readers) {
+        if (!plan.supported() || rolloutStore == null) {
+            return EditorAskLaunch.refused("Codex cannot serve this launch.");
+        }
+        Optional<Path> tokenFile = mcp.flatMap(McpAccess::credentialFile);
+        Set<EditorAskPiece> pieces = EnumSet.noneOf(EditorAskPiece.class);
+        if (tokenFile.isPresent() && Files.isReadable(tokenFile.get())) {
+            if (plan.command().startsWith(tokenEnvPrefix(tokenFile.get()))) {
+                pieces.add(EditorAskPiece.CODEX_TOKEN_ENV_FROM_FILE);
+            }
+            if (plan.command().contains(endpointOverrides(mcp.get()))) {
+                pieces.add(EditorAskPiece.CODEX_ENDPOINT_OVERRIDES);
+            }
+        }
+        if (plan.command().endsWith(" -- " + AgentCommands.shellQuote(request.firstTurnPrompt()))) {
+            pieces.add(EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+        }
+        if (!pieces.containsAll(EditorAskDelivery.required(AgentKind.CODEX))) {
+            return EditorAskLaunch.refused("Codex does not carry the answer tool on this launch.");
+        }
+        CodexEditorAskRolloutReader observer = readers.open(rolloutStore);
+        try {
+            observer.arm(request.firstTurnMarker());
+        } catch (RuntimeException e) {
+            observer.close();
+            return EditorAskLaunch.refused("The first turn could not be armed.");
+        }
+        return EditorAskLaunch.accepted(plan,
+                new EditorAskDelivery(AgentKind.CODEX, pieces, EditorAskConversationProof.CODEX_ROLLOUT_THREAD),
+                observer);
+    }
+
     private static String addDirFlags(Optional<LaunchResources> resources) {
         if (resources.isEmpty()) {
             return "";
@@ -345,10 +430,17 @@ public final class CodexAgentProvider implements AgentProvider {
             return AgentCommands.envPrefix(ENV_SCRUB) + codexBinary() + sandbox;
         }
         McpAccess mcp = access.get();
-        return AgentCommands.envPrefixFromFiles(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, tokenFile.get()))
-                + codexBinary()
-                + sandbox
-                + " -c " + AgentCommands.shellQuote(
+        return tokenEnvPrefix(tokenFile.get()) + codexBinary() + sandbox + endpointOverrides(mcp);
+    }
+
+    /** The environment prefix scrubbing the sandbox variables and reading the token from its owner-only file. */
+    private static String tokenEnvPrefix(Path tokenFile) {
+        return AgentCommands.envPrefixFromFiles(ENV_SCRUB, Map.of(TOKEN_ENV_VAR, tokenFile));
+    }
+
+    /** The two {@code -c} overrides that point Codex at the endpoint and name the token header's variable. */
+    private static String endpointOverrides(McpAccess mcp) {
+        return " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".url=" + tomlString(mcp.endpointUrl()))
                 + " -c " + AgentCommands.shellQuote(
                         "mcp_servers." + SERVER_NAME + ".env_http_headers={"

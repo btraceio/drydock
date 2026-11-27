@@ -84,6 +84,17 @@ import java.util.Optional;
  * the human sets or clears it (the task tree's Flag for Follow-up toggle);
  * nothing clears it on its own.</p>
  *
+ * <p>{@link #purpose()} records why this managed row exists. Every row a
+ * human created through the ordinary flows is {@link SessionPurpose#ORDINARY};
+ * {@link SessionPurpose#EDITOR_QA} marks the one dedicated read-only
+ * question-and-answer session a canonical Git checkout owns. The marker plus
+ * the row's canonical working directory is the durable directory→session
+ * index: persisted, so a restart (or a second IDE window) resolves the same
+ * row instead of minting another one for the same checkout. Rows persisted
+ * before the marker existed decode as {@code ORDINARY} — that is what they
+ * are. The marker names the row's <em>purpose</em>, never its identity: the
+ * display name is chosen for humans and is not the key.</p>
+ *
  * <p>{@link #workspaceBox()} names the Datadog workspace box this session
  * runs on, and is empty for every local session — a row is <em>remote</em>
  * iff the binding is present. The binding is the row's only remote truth, so
@@ -112,8 +123,43 @@ public record ManagedAgentSession(
         boolean startedWithTask,
         boolean flagged,
         Optional<WorkspaceBoxBinding> workspaceBox,
-        Optional<PullRequestTarget> targetPullRequest
+        Optional<PullRequestTarget> targetPullRequest,
+        SessionPurpose purpose
 ) {
+
+    /**
+     * Why this managed row exists. The persisted names are a wire contract
+     * (like {@link SessionMode}'s): never rename an existing constant.
+     */
+    public enum SessionPurpose {
+
+        /** A session a human created through the ordinary flows. The default: every
+         * row persisted before the purpose marker existed is ordinary. */
+        ORDINARY,
+
+        /** The one dedicated editor question-and-answer session a canonical Git
+         * checkout owns (read-only; its checkout, not its name, identifies it). */
+        EDITOR_QA;
+
+        /** The persisted name — a wire contract; never rename an existing constant. */
+        public String persistedName() {
+            return name();
+        }
+
+        /**
+         * The purpose persisted under {@code value}, or empty when the name is
+         * not one this build knows. Callers decode leniently: an unrecognized
+         * purpose must not cost the session row.
+         */
+        public static Optional<SessionPurpose> fromPersisted(String value) {
+            for (SessionPurpose purpose : values()) {
+                if (purpose.persistedName().equals(value)) {
+                    return Optional.of(purpose);
+                }
+            }
+            return Optional.empty();
+        }
+    }
 
     public ManagedAgentSession {
         Objects.requireNonNull(id, "id");
@@ -157,6 +203,23 @@ public record ManagedAgentSession(
         this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
                 pr, namePinned, forkedFrom, evalMode, workflowId, startedWithTask, flagged, workspaceBox,
                 Optional.empty());
+    }
+
+    /**
+     * As the canonical constructor with {@code purpose = ORDINARY} — the
+     * signature every pre-purpose-marker construction site used. A session
+     * built this way is an ordinary session by construction.
+     */
+    public ManagedAgentSession(ManagedSessionId id, RepositoryId repositoryId, String displayName,
+                               AgentBinding binding, SessionWorkspace workspace, SessionStatus status,
+                               Instant createdAt, Instant lastOpenedAt, Optional<Integer> lastExitCode,
+                               PrLink pr, boolean namePinned, Optional<ManagedSessionId> forkedFrom,
+                               boolean evalMode, Optional<WorkflowId> workflowId, boolean startedWithTask,
+                               boolean flagged, Optional<WorkspaceBoxBinding> workspaceBox,
+                               Optional<PullRequestTarget> targetPullRequest) {
+        this(id, repositoryId, displayName, binding, workspace, status, createdAt, lastOpenedAt, lastExitCode,
+                pr, namePinned, forkedFrom, evalMode, workflowId, startedWithTask, flagged, workspaceBox,
+                targetPullRequest, SessionPurpose.ORDINARY);
     }
 
     /**
@@ -256,6 +319,11 @@ public record ManagedAgentSession(
         return workspace.branchCreatedHere();
     }
 
+    /** Why this row exists; {@link SessionPurpose#EDITOR_QA} marks a checkout's Q&A session. */
+    public boolean editorQa() {
+        return purpose == SessionPurpose.EDITOR_QA;
+    }
+
     public PrState prState() {
         return pr.state();
     }
@@ -352,6 +420,11 @@ public record ManagedAgentSession(
         return toBuilder().flagged(newFlagged).build();
     }
 
+    /** Set once, when the row is created; a Q&A row never becomes an ordinary one in place. */
+    public ManagedAgentSession withPurpose(SessionPurpose newPurpose) {
+        return toBuilder().purpose(newPurpose).build();
+    }
+
     /**
      * The single construction path. Adding a component touches this class in
      * one place instead of once per {@code with*} method, which is the whole
@@ -377,6 +450,7 @@ public record ManagedAgentSession(
         private boolean flagged;
         private Optional<WorkspaceBoxBinding> workspaceBox;
         private Optional<PullRequestTarget> targetPullRequest;
+        private SessionPurpose purpose;
 
         private Builder(ManagedAgentSession from) {
             this.id = from.id;
@@ -397,6 +471,7 @@ public record ManagedAgentSession(
             this.flagged = from.flagged;
             this.workspaceBox = from.workspaceBox;
             this.targetPullRequest = from.targetPullRequest;
+            this.purpose = from.purpose;
         }
 
         /**
@@ -425,6 +500,7 @@ public record ManagedAgentSession(
             this.flagged = false;
             this.workspaceBox = Optional.empty();
             this.targetPullRequest = Optional.empty();
+            this.purpose = SessionPurpose.ORDINARY;
         }
 
         public Builder id(ManagedSessionId value) {
@@ -523,10 +599,15 @@ public record ManagedAgentSession(
             return this;
         }
 
+        public Builder purpose(SessionPurpose value) {
+            this.purpose = value;
+            return this;
+        }
+
         public ManagedAgentSession build() {
             return new ManagedAgentSession(id, repositoryId, displayName, binding, workspace, status,
                     createdAt, lastOpenedAt, lastExitCode, pr, namePinned, forkedFrom, evalMode, workflowId,
-                    startedWithTask, flagged, workspaceBox, targetPullRequest);
+                    startedWithTask, flagged, workspaceBox, targetPullRequest, purpose);
         }
     }
 }

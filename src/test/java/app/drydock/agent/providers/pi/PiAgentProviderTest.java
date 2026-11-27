@@ -9,6 +9,8 @@ import app.drydock.agent.api.McpDelivery;
 import app.drydock.agent.api.ResumeContext;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.StdioMcpServer;
+import app.drydock.agent.spi.AgentProvider.EditorAskRequest;
+import app.drydock.editorqa.EditorAskRecord;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiActivityExtensionSource;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
@@ -304,6 +306,35 @@ class PiAgentProviderTest {
 
     private static McpAccess access(Path configFile) {
         return new McpAccess("http://127.0.0.1:1234/mcp", "tok-abc", Optional.of(configFile));
+    }
+
+    @Test
+    void editorAskReceiptDirectoryIsCreatedOnlyForAnAcceptedLaunch(@TempDir Path state) throws Exception {
+        PiAgentProvider p = bridgeProvider(state);
+        Path config = state.resolve("mcp.json");
+        Files.writeString(config, "{}");
+        CreateContext valid = new CreateContext("Q&A", "pi-session", state, Optional.empty(),
+                Optional.of(access(config)), Optional.empty(), false, true, Optional.empty(), List.of(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        String marker = EditorAskRecord.newId();
+        var accepted = p.prepareEditorAskCreate(valid,
+                new EditorAskRequest("launch-0001", marker, "Answer " + marker));
+        Path receipts = state.resolve("pi/editor-ask/launch-0001");
+        assertTrue(accepted.accepted(), accepted.refusal());
+        assertTrue(Files.isDirectory(receipts));
+        assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(receipts));
+        assertTrue(accepted.plan().command().contains(receipts.toString()));
+        accepted.observer().orElseThrow().close();
+        assertFalse(Files.exists(receipts));
+        assertTrue(Files.isDirectory(receipts.getParent()), "the shared receipt parent must remain");
+
+        String refusedMarker = EditorAskRecord.newId();
+        var refused = p.prepareEditorAskCreate(new CreateContext("Q&A", "pi-session", state,
+                        Optional.empty(), Optional.empty()),
+                new EditorAskRequest("launch-0002", refusedMarker, "No tools " + refusedMarker));
+        assertFalse(refused.accepted());
+        assertFalse(Files.exists(state.resolve("pi/editor-ask/launch-0002")),
+                "a context refusal must not create a receipt directory");
     }
 
     @Test

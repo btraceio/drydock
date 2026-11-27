@@ -22,6 +22,9 @@ import app.drydock.intellij.workspace.RemoteSessionLiveness;
 import app.drydock.sdlc.SessionWorkflowResourceOwner;
 import app.drydock.workspace.BoxShell;
 
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
+import com.intellij.openapi.ui.Messages;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Instant;
@@ -309,6 +312,10 @@ final class SessionEnds implements AgentExecutionListener {
         });
         DrydockSessionsListener.publishChanged();
         suspendEngagementsOf(id);
+        if (row != null && row.purpose() != ManagedAgentSession.SessionPurpose.ORDINARY) {
+            // A Q&A conversation is bound only by proof, never by a late scan.
+            return;
+        }
         // The agent is gone; its eval side channel (e.g. Claude's proxy
         // marking) must not outlive it. Best-effort, off this thread — and
         // re-checked at execution time (below), so a resume that re-marked
@@ -647,8 +654,9 @@ final class SessionEnds implements AgentExecutionListener {
      */
     ManagedAgentSession lateBindAgentSessionId(ManagedSessionId id) {
         ManagedAgentSession session = DrydockSessionService.findIn(stateStore.get().state(), id);
-        if (session == null || session.agentSessionId().isPresent()) {
-            return session;
+        if (session == null || session.agentSessionId().isPresent()
+                || session.purpose() != ManagedAgentSession.SessionPurpose.ORDINARY) {
+            return session;   // bound, or a Q&A row: never bound by cwd/time/name
         }
         Optional<SessionIdDiscovery> discovery = registry.get().provider(session.agentKind())
                 .filter(provider -> provider.idStrategy() == SessionIdStrategy.DISCOVERED)
@@ -698,5 +706,25 @@ final class SessionEnds implements AgentExecutionListener {
         LOG.log(Level.INFO, "Bound agent session id {0} to session {1}", agentSessionId, id);
         DrydockSessionsListener.publishChanged();
         return bound[0] != null ? bound[0] : session;
+    }
+
+    /**
+     * The production remote confirm: the question becomes a Yes/No dialog
+     * on the EDT ({@code ModalityState.anyModal()}, because the ask comes
+     * from a background flow that may itself sit under a modal), and the
+     * future completes with the answer from there. Never called by tests —
+     * they inject a fake through the full seam.
+     */
+    static CompletableFuture<Boolean> askOnEdt(String question) {
+        CompletableFuture<Boolean> answer = new CompletableFuture<>();
+        ApplicationManager.getApplication().invokeLater(() -> {
+            try {
+                answer.complete(Messages.showYesNoDialog(question, "Drydock",
+                        Messages.getQuestionIcon()) == Messages.YES);
+            } catch (RuntimeException | Error e) {
+                answer.completeExceptionally(e);
+            }
+        }, ModalityState.any());
+        return answer;
     }
 }

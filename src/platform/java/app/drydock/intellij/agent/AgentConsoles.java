@@ -90,6 +90,35 @@ public final class AgentConsoles {
     }
 
     /**
+     * The show-only step of an editor Q&A navigation: {@link #show}, then the host epoch
+     * that show issued. Starts nothing; a later request makes the epoch stale.
+     *
+     * @return the epoch, or -1 for a disposed project
+     */
+    public static long showForEditorAsk(Project project, ManagedSessionId sessionId) {
+        show(project, sessionId);
+        return project.isDisposed() ? -1 : SessionHostController.getInstance(project).epoch();
+    }
+
+    /**
+     * Mounts {@code view} in the retained pane of {@code sessionId} if the navigation that
+     * issued {@code epoch} is still the host's newest and the session is shown. EDT.
+     *
+     * @return whether the view was mounted
+     */
+    public static boolean mountEditorAskView(Project project, ManagedSessionId sessionId, long epoch,
+                                             JComponent view) {
+        if (project.isDisposed()) {
+            return false;
+        }
+        return SessionHostController.getInstance(project).paneIfCurrent(sessionId, epoch)
+                .map(pane -> {
+                    pane.setSideView(view);
+                    return true;
+                }).orElse(false);
+    }
+
+    /**
      * Opens, or reuses, the window's one canonical "Drydock Sessions"
      * document, pins it and re-mounts any open host editor from the
      * controller's layout (a focus change of an already-open host publishes

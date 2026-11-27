@@ -2,9 +2,11 @@ package app.drydock.intellij.agent;
 
 import app.drydock.agent.api.LaunchPlan;
 import app.drydock.domain.ManagedSessionId;
+import app.drydock.editorqa.EditorAskLane;
 
 import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Predicate;
 
 /**
  * What the session orchestrator needs from a window's execution tier, and
@@ -30,4 +32,25 @@ public interface AgentConsoleHost {
 
     /** Stops and discards the session's execution and console entirely. */
     void forgetConsole(ManagedSessionId sessionId);
+
+    /**
+     * Makes the session's terminal display-only for free-form input (the
+     * editor Q&amp;A row); call before {@link #startConsole}. The guard lives in
+     * the app-level registry where the connector is bound, so every host
+     * gets it.
+     */
+    default void markDisplayOnly(ManagedSessionId sessionId) {
+        AgentExecutionRegistry.getInstance().markDisplayOnly(sessionId);
+    }
+
+    /**
+     * The one programmatic write into a display-only terminal: bound to the
+     * lane's reservation and the specific execution, off the EDT; see
+     * {@link AgentExecutionRegistry#submitAskPrompt}.
+     */
+    default PromptOutcome submitAskPrompt(ManagedSessionId sessionId, String prompt,
+                                          EditorAskLane.Reservation reservation,
+                                          Predicate<EditorAskLane.Reservation> current) {
+        return AgentExecutionRegistry.getInstance().submitAskPrompt(sessionId, prompt, reservation, current);
+    }
 }

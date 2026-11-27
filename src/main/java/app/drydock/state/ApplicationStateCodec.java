@@ -8,6 +8,7 @@ import app.drydock.domain.ApplicationState;
 import app.drydock.domain.HandoffBrief;
 import app.drydock.agent.api.AgentKind;
 import app.drydock.domain.ManagedAgentSession;
+import app.drydock.domain.ManagedAgentSession.SessionPurpose;
 import app.drydock.domain.ManagedSessionId;
 import app.drydock.domain.ModelTiers;
 import app.drydock.domain.PrLink;
@@ -90,6 +91,7 @@ import java.util.UUID;
  *       "workflowId": "<uuid>" | null,
  *       "startedWithTask": <boolean>,
  *       "flagged": <boolean>,
+ *       "purpose": "ORDINARY" | "EDITOR_QA" (optional; present only on a non-ordinary session),
  *       "workspaceBox": {"name": "<box name>", "path": "<absolute box path>"} (optional; present only on a session that runs on a workspace box)
  *     }
  *   ],
@@ -223,6 +225,15 @@ import java.util.UUID;
  * placeholder path, never a rejected state file. A remote row's {@code
  * workingDirectory} is the box's deterministic placeholder root, re-derived
  * from the binding on decode rather than trusted from the file.
+ * The session {@code purpose} member (why a managed row exists; see {@link
+ * SessionPurpose}) was likewise added leniently within version 2, after the
+ * {@code workspaceBox} member's pattern: {@link #toJson} writes it only when
+ * the purpose is not {@code ORDINARY}, so every session serialized before
+ * the marker existed keeps its exact previous shape, and an absent,
+ * malformed, or unrecognized member decodes to {@code ORDINARY} — the rows
+ * persisted before the marker existed are ordinary sessions. A Q&A row
+ * downgraded by an older build therefore reopens as ordinary rather than
+ * failing the file.
  * The {@code pairings} and {@code escalations} arrays (babysitting) were
  * likewise added leniently within version 2, decoded like {@code
  * handoffBriefs}: an absent member is an empty list and a malformed entry is
@@ -373,6 +384,12 @@ public final class ApplicationStateCodec {
                 .orElse(JsonValue.JsonNull.INSTANCE));
         obj.put("startedWithTask", new JsonBoolean(session.startedWithTask()));
         obj.put("flagged", new JsonBoolean(session.flagged()));
+        // Written only when non-ordinary (the workspaceBox member's pattern):
+        // a session serialized before the purpose marker existed must keep its
+        // exact previous byte shape, so ORDINARY rows gain no member at all.
+        if (session.purpose() != SessionPurpose.ORDINARY) {
+            obj.put("purpose", new JsonString(session.purpose().persistedName()));
+        }
         session.workspaceBox().ifPresent(binding -> {
             JsonObject box = JsonObject.empty();
             box.put("name", new JsonString(binding.boxName()));
@@ -789,6 +806,13 @@ public final class ApplicationStateCodec {
             // Lenient like evalMode: a session persisted before this member
             // existed was never flagged. No schema bump.
             boolean flagged = obj.get("flagged") instanceof JsonBoolean fl && fl.value();
+            // Lenient like workspaceBox: a session persisted before the
+            // purpose marker existed is an ordinary session, and an absent,
+            // malformed, or unrecognized value must not fail the file or
+            // promote a row to a purpose it never had. No schema bump.
+            SessionPurpose purpose = optionalString(obj, "purpose")
+                    .flatMap(SessionPurpose::fromPersisted)
+                    .orElse(SessionPurpose.ORDINARY);
             // Lenient like remoteFromJson (the member, not the row): absent,
             // malformed, or an invalid binding decodes to empty — a local
             // row — rather than failing the whole state file.
@@ -801,7 +825,8 @@ public final class ApplicationStateCodec {
                     status, createdAt, lastOpenedAt, lastExitCode,
                     PrLink.fromPersisted(prState, prNumber), namePinned, forkedFrom, evalMode, workflowId,
                     startedWithTask, flagged, workspaceBox,
-                    optionalString(obj, "targetPullRequest").map(PullRequestTarget::fromUrl));
+                    optionalString(obj, "targetPullRequest").map(PullRequestTarget::fromUrl),
+                    purpose);
         } catch (IllegalArgumentException | DateTimeException e) {
             throw new StateDecodeException("Malformed session entry: " + e.getMessage());
         }

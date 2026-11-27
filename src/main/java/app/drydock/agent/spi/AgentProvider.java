@@ -13,10 +13,17 @@ import app.drydock.agent.api.SessionIdDiscovery;
 import app.drydock.agent.api.SessionIdStrategy;
 import app.drydock.agent.api.SphinxReviewSupport;
 
+import app.drydock.editorqa.EditorAskLimits;
+import app.drydock.editorqa.EditorAskRecord;
+
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * The one interface each agentic CLI implements. Discovered via
@@ -222,5 +229,205 @@ public interface AgentProvider {
      */
     default Optional<Instant> evalTokenExpiry(String sessionKey) {
         return Optional.empty();
+    }
+
+    /**
+     * Prepares a marked editor-ask <em>create</em> launch: the one command that
+     * starts the conversation carrying {@code request}'s first turn as the
+     * provider's single positional launch prompt, plus typed proof that the
+     * rendered command reaches {@code editor_ask_answer} and observable turn
+     * evidence. Default: refused -- a provider that has not built this cannot
+     * serve Q&amp;A. May block (file installs, capability probes); call off the
+     * UI thread. Arms {@code request.firstTurnMarker()} on the returned observer
+     * before returning, i.e. before any spawn or write.
+     *
+     * <p>{@code c.initialPrompt()} must be empty: the prompt travels only in
+     * {@code request}, so the first turn is carried exactly once.</p>
+     */
+    default EditorAskLaunch prepareEditorAskCreate(CreateContext c, EditorAskRequest request) {
+        return EditorAskLaunch.refused("This agent does not support editor questions.");
+    }
+
+    /**
+     * As {@link #prepareEditorAskCreate} for a pinned <em>resume</em> of the
+     * exact conversation {@code r.agentSessionId()} (required);
+     * {@code r.resumePrompt()} must be empty. No model flag is rendered.
+     */
+    default EditorAskLaunch prepareEditorAskResume(ResumeContext r, EditorAskRequest request) {
+        return EditorAskLaunch.refused("This agent does not support editor questions.");
+    }
+
+    /**
+     * What a Q&amp;A launch carries.
+     *
+     * @param launchNonce      fresh, nonsecret nonce of this launch (also the
+     *                         environment/hook correlation value where rendered)
+     * @param firstTurnMarker  canonical turn ID armed before the launch
+     * @param firstTurnPrompt  the composed single-line first turn
+     */
+    record EditorAskRequest(String launchNonce, String firstTurnMarker, String firstTurnPrompt) {
+        private static final Pattern NONCE = Pattern.compile("[A-Za-z0-9-]{8,64}");
+
+        public EditorAskRequest {
+            if (!NONCE.matcher(Objects.requireNonNull(launchNonce, "launchNonce")).matches()) {
+                throw new IllegalArgumentException("invalid launch nonce");
+            }
+            EditorAskRecord.parseId(Objects.requireNonNull(firstTurnMarker, "firstTurnMarker"));
+            EditorAskLimits.checkPrompt(Objects.requireNonNull(firstTurnPrompt, "firstTurnPrompt"));
+            if (!firstTurnPrompt.contains(firstTurnMarker)) {
+                throw new IllegalArgumentException("the first turn does not carry its marker");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "EditorAskRequest[]";
+        }
+    }
+
+    /** One thing a rendered Q&amp;A command must contain for the tool to be reachable. */
+    enum EditorAskPiece {
+        /** Claude's supported {@code --mcp-config <owner-only file>} flag. */
+        CLAUDE_MCP_CONFIG_FLAG,
+        /** Claude's per-launch correlated hook settings ({@code --settings}). */
+        CLAUDE_LAUNCH_HOOKS,
+        /** Pi's owner-only MCP JSON, handed over by its environment variable. */
+        PI_MCP_CONFIG_FILE,
+        /** Pi's installed per-session MCP registration adapter ({@code -e}). */
+        PI_MCP_ADAPTER,
+        /** Pi's per-launch turn-evidence extension ({@code -e}). */
+        PI_EDITOR_ASK_EXTENSION,
+        /** Codex's {@code mcp_servers.*.url} and {@code env_http_headers} overrides. */
+        CODEX_ENDPOINT_OVERRIDES,
+        /** Codex's token environment variable read from the owner-only token file. */
+        CODEX_TOKEN_ENV_FROM_FILE,
+        /** The first turn as the single positional launch prompt. */
+        POSITIONAL_LAUNCH_PROMPT
+    }
+
+    /** How the provider conversation ID is proven for this launch. */
+    enum EditorAskConversationProof {
+        /** The preset session ID rendered into this command. */
+        RENDERED_PRESET_ID,
+        /** An ID reported by this launch's correlated hook. */
+        CORRELATED_HOOK,
+        /** The exact ID reported by this launch's Pi extension. */
+        PI_EXTENSION,
+        /** The thread of the Codex rollout holding this turn's user marker. */
+        CODEX_ROLLOUT_THREAD
+    }
+
+    /**
+     * Typed evidence, built from the rendering branches, that a launch plan
+     * delivers the editor-answer tool. The constructor refuses a piece set
+     * that is incomplete for the provider, so an instance IS the proof;
+     * {@code LaunchPlan.supported()}, a file existing, {@link McpDelivery} and
+     * a minted token are none of it.
+     */
+    record EditorAskDelivery(AgentKind provider, Set<EditorAskPiece> pieces,
+                             EditorAskConversationProof proof) {
+        public EditorAskDelivery {
+            Objects.requireNonNull(provider, "provider");
+            Objects.requireNonNull(proof, "proof");
+            pieces = Set.copyOf(pieces);
+            if (!pieces.containsAll(required(provider))) {
+                throw new IllegalArgumentException("incomplete editor-ask delivery for " + provider);
+            }
+        }
+
+        /** The pieces every launch of {@code provider} must render. */
+        public static Set<EditorAskPiece> required(AgentKind provider) {
+            return switch (provider) {
+                case CLAUDE -> EnumSet.of(EditorAskPiece.CLAUDE_MCP_CONFIG_FLAG,
+                        EditorAskPiece.CLAUDE_LAUNCH_HOOKS, EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+                case PI -> EnumSet.of(EditorAskPiece.PI_MCP_CONFIG_FILE, EditorAskPiece.PI_MCP_ADAPTER,
+                        EditorAskPiece.PI_EDITOR_ASK_EXTENSION, EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+                case CODEX -> EnumSet.of(EditorAskPiece.CODEX_ENDPOINT_OVERRIDES,
+                        EditorAskPiece.CODEX_TOKEN_ENV_FROM_FILE, EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+                default -> throw new IllegalArgumentException("no editor-ask delivery for " + provider);
+            };
+        }
+    }
+
+    /**
+     * The result of preparing a Q&amp;A launch: the plan to run, the delivery
+     * evidence and the already-armed observer -- or a refusal. Absent
+     * evidence means refuse: nothing may be handed to the harness.
+     */
+    record EditorAskLaunch(LaunchPlan plan, Optional<EditorAskDelivery> delivery,
+                           Optional<EditorAskTurnObserver> observer, String refusal) {
+        public EditorAskLaunch {
+            Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(delivery, "delivery");
+            Objects.requireNonNull(observer, "observer");
+            Objects.requireNonNull(refusal, "refusal");
+            if (delivery.isPresent() && (!plan.supported() || observer.isEmpty())) {
+                throw new IllegalArgumentException("delivery evidence needs a supported plan and an observer");
+            }
+        }
+
+        public static EditorAskLaunch refused(String reason) {
+            return new EditorAskLaunch(LaunchPlan.unsupported(), Optional.empty(), Optional.empty(), reason);
+        }
+
+        public static EditorAskLaunch accepted(LaunchPlan plan, EditorAskDelivery delivery,
+                                               EditorAskTurnObserver observer) {
+            return new EditorAskLaunch(plan, Optional.of(delivery), Optional.of(observer), "");
+        }
+
+        /** True only when the evidence is complete: safe to hand the prompt to the harness. */
+        public boolean accepted() {
+            return delivery.isPresent();
+        }
+
+        /** The command is never printed: it carries the endpoint and credential locations. */
+        @Override
+        public String toString() {
+            return "EditorAskLaunch[accepted=" + accepted() + "]";
+        }
+
+        /** Why a create context is not a Q&amp;A launch, or empty. */
+        public static Optional<String> refusalFor(CreateContext c) {
+            return contextRefusal(c.remote().isPresent(), c.evalMode(), c.readOnly(), c.mcp().isPresent(),
+                    c.initialPrompt().isPresent(), !c.stdioMcpServers().isEmpty(),
+                    c.launchResources().isPresent(), c.persistence().isPresent(),
+                    c.workflowAccess().isPresent(), c.remoteLaunchSupport().isPresent());
+        }
+
+        /** Why a resume context is not a pinned Q&amp;A resume, or empty. */
+        public static Optional<String> refusalFor(ResumeContext r) {
+            if (r.agentSessionId().isEmpty()) {
+                return Optional.of("Resume needs the exact conversation ID.");
+            }
+            return contextRefusal(r.remote().isPresent(), r.evalMode(), r.readOnly(), r.mcp().isPresent(),
+                    r.resumePrompt().isPresent(), !r.stdioMcpServers().isEmpty(),
+                    r.launchResources().isPresent(), r.persistence().isPresent(),
+                    r.workflowAccess().isPresent(), r.remoteLaunchSupport().isPresent());
+        }
+
+        private static Optional<String> contextRefusal(boolean remote, boolean eval, boolean readOnly,
+                                                       boolean mcp, boolean prompt, boolean stdio,
+                                                       boolean resources, boolean persistence,
+                                                       boolean workflow, boolean remoteSupport) {
+            if (remote || persistence || remoteSupport) {
+                return Optional.of("Editor questions run locally only.");
+            }
+            if (eval) {
+                return Optional.of("Editor questions do not run in eval mode.");
+            }
+            if (!readOnly) {
+                return Optional.of("Editor questions need a read-only session.");
+            }
+            if (!mcp) {
+                return Optional.of("No tool access was prepared for this launch.");
+            }
+            if (prompt) {
+                return Optional.of("The first turn must travel only in the Q&A request.");
+            }
+            if (stdio || resources || workflow) {
+                return Optional.of("Editor questions carry no extra servers or resources.");
+            }
+            return Optional.empty();
+        }
     }
 }

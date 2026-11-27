@@ -46,6 +46,7 @@ import app.drydock.mcp.McpSessionContext.RenameOutcome;
 import app.drydock.mcp.BabysitToolContext;
 import app.drydock.mcp.RemoteAuthorizationPermit;
 import app.drydock.mcp.TaskTools;
+import app.drydock.intellij.editorqa.EditorAskService;
 import app.drydock.intellij.review.ReviewBackend;
 import app.drydock.intellij.review.SessionMcpAccess;
 import app.drydock.intellij.session.BabysitMonitorService;
@@ -336,6 +337,8 @@ public final class DrydockPluginService implements Disposable {
     private volatile SessionActivityWatcher watcher;
     private volatile SessionActivityMonitor activityMonitor;
     private volatile ReviewBackend reviewBackend;
+    /** "Ask Agent" from an editor: built by initialize() independently of the review UI; null until then. */
+    private volatile EditorAskService editorAsk;
     /** The babysitting monitor; production only, null until initialization reaches it. */
     private volatile BabysitMonitorService babysitMonitor;
     /** The application-scoped remote transport owner; built once the review backend exists (T61). */
@@ -585,6 +588,28 @@ public final class DrydockPluginService implements Disposable {
         return Optional.ofNullable(reviewBackend);
     }
 
+    /** The editor Q&A feature; empty until initialization has built it. Callers await {@link #initialization()}. */
+    public Optional<EditorAskService> editorAsk() {
+        return Optional.ofNullable(editorAsk);
+    }
+
+    /**
+     * Builds the editor Q&A service over the loaded catalog and the (possibly absent) local backend, then
+     * publishes it unless {@link #dispose()} has started (same handshake as {@link #publishOrClose}).
+     */
+    private void startEditorAsk() {
+        try {
+            EditorAskService service = new EditorAskService(baseDir, stateStore, reviewBackend, () -> registry,
+                    executor);
+            editorAsk = service;
+            if (disposed.get()) {
+                isolated("close the editor ask service built after disposal", service::close);
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Drydock editor Q&A unavailable; the rest of the plugin is unaffected", e);
+        }
+    }
+
     /**
      * The application-scoped remote review transport owner (INV-41): empty until initialization has built
      * the review backend it composes over, and when that backend is unavailable. Never owned by a project or
@@ -811,6 +836,7 @@ public final class DrydockPluginService implements Disposable {
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "Drydock review backend unavailable; sessions launch without Drydock tools", e);
         }
+        startEditorAsk();
         watcher = new SessionActivityWatcher(baseDir.resolve("activity"), executor);
         installActivityReporters();
         activityMonitor = new SessionActivityMonitor(this::stateStore, this::watcher, executor);
@@ -1184,6 +1210,12 @@ public final class DrydockPluginService implements Disposable {
         RemoteReviewService theRemote = remoteReview;
         if (theRemote != null) {
             closeRemote(theRemote);
+        }
+        // Before the backend: closes intake, interrupts uncompleted asks and drains the Q&A history while the
+        // answer tool can still be reached; isolated so a failure cannot skip the backend close below.
+        EditorAskService theEditorAsk = editorAsk;
+        if (theEditorAsk != null) {
+            isolated("close the editor ask service", theEditorAsk::close);
         }
         ReviewBackend theBackend = reviewBackend;
         if (theBackend != null) {

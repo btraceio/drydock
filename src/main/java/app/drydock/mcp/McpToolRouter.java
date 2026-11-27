@@ -120,7 +120,10 @@ public final class McpToolRouter {
     private final McpSessionContext context;
     private final McpSessionRegistry registry;
     private final Function<UnifiedDiff, ChangeGraph> graphBuilder;
-    private final Set<String> allowedTools;
+    private volatile Set<String> allowedTools;
+
+    /** Local editor-answer delegate ({@link #serveEditorAskAnswer}); null: tool neither listed nor served. */
+    private volatile EditorAskAnswerDelegate editorAsk;
 
     /**
      * The optional task-tool delegate (T11): null on every router built the
@@ -333,6 +336,16 @@ public final class McpToolRouter {
                 .collect(Collectors.toUnmodifiableSet());
     }
 
+    /** Opts a local router into exactly {@code editor_ask_answer} via {@code delegate}; once per router. */
+    public synchronized void serveEditorAskAnswer(EditorAskAnswerDelegate delegate) {
+        if (editorAsk != null) {
+            throw new IllegalStateException("editor_ask_answer delegate already set");
+        }
+        allowedTools = Stream.concat(allowedTools.stream(), Stream.of(EditorAskAnswerDelegate.TOOL_NAME))
+                .collect(Collectors.toUnmodifiableSet());
+        editorAsk = Objects.requireNonNull(delegate, "delegate");
+    }
+
     /** Whether {@link #call} serves {@code tool}: true only for a name in this router's allowed set. */
     public boolean serves(String tool) {
         return allowedTools.contains(tool);
@@ -362,6 +375,9 @@ public final class McpToolRouter {
                             && o.members().get("name") instanceof JsonString n
                             && allowedTools.contains(n.value()))
                     .toList());
+        }
+        if (editorAsk != null) {
+            descriptors.add(EditorAskAnswerDelegate.descriptor());
         }
         return descriptors;
     }
@@ -612,6 +628,15 @@ public final class McpToolRouter {
     }
 
     public JsonValue call(ManagedSessionId caller, String tool, JsonValue arguments) throws McpToolException {
+        return call(caller, -1, tool, arguments);
+    }
+
+    /** As {@link #call(ManagedSessionId, String, JsonValue)}, with the generation frozen at authentication. */
+    public JsonValue call(ManagedSessionId caller, long generation, String tool, JsonValue arguments)
+            throws McpToolException {
+        if (EditorAskAnswerDelegate.TOOL_NAME.equals(tool) && editorAsk != null) {
+            return EditorAskAnswerDelegate.invoke(editorAsk, caller, generation, arguments);
+        }
         if (!allowedTools.contains(tool)) {
             throw new McpToolException("Unknown tool: " + tool);
         }

@@ -21,6 +21,8 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.spi.AgentProvider;
+import app.drydock.agent.providers.claude.internal.ClaudeEditorAskObserver;
+import app.drydock.agent.providers.claude.internal.ClaudeHookInstaller.EditorAskLaunchHooks;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilities;
 import app.drydock.agent.providers.claude.internal.ClaudeCapabilityService;
 import app.drydock.agent.providers.claude.internal.ClaudeEvalContainer;
@@ -41,9 +43,12 @@ import java.lang.System.Logger.Level;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
 /**
@@ -157,6 +162,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
     private ClaudeCapabilityService capabilityService;
     private ClaudeConversationSource conversationSource;
     private ClaudeActivityReporter activityReporter;
+    private ClaudeHookInstaller hookInstaller;
     /** The eval container; a test stub from the constructor, or the real one built at {@link #init}. */
     private ClaudeEvalContainer evalContainer;
     /** The activity state-word dir, needed to mount it into the eval container. Set at {@link #init}. */
@@ -233,7 +239,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
     public void init(AgentContext ctx) {
         this.capabilityService = new ClaudeCapabilityService(locator, ctx.backgroundExecutor());
         this.conversationSource = new ClaudeConversationSource(new ConversationCatalog());
-        this.activityReporter = new ClaudeActivityReporter(new ClaudeHookInstaller(ctx.stateDirectory()));
+        this.hookInstaller = new ClaudeHookInstaller(ctx.stateDirectory());
+        this.activityReporter = new ClaudeActivityReporter(hookInstaller);
         this.activityDirectory = ctx.activityDirectory();
         if (evalContainer == null) {
             evalContainer = new ClaudeEvalContainer(ctx.stateDirectory());
@@ -309,6 +316,17 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     @Override
     public LaunchPlan buildCreateCommand(CreateContext c) {
+        return buildCreate(c, Optional.empty(), Optional.empty());
+    }
+
+    /**
+     * The create command; {@code settingsOverride} replaces the ordinary activity
+     * {@code --settings} file (an editor-ask launch's correlated hooks, which
+     * still run the ordinary activity script) and {@code knownCaps} the probe, so
+     * a Q&A launch derives its evidence from the very capabilities rendered.
+     */
+    private LaunchPlan buildCreate(CreateContext c, Optional<Path> settingsOverride,
+                                   Optional<ClaudeCapabilities> knownCaps) {
         if (c.remote().isPresent()) {
             // A remote claude runs on another host: an extra working directory
             // or the task-guidance location is a path on THIS machine, invisible
@@ -333,7 +351,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             // to it -- the same refusal stance as remote, for the same reason.
             return LaunchPlan.unsupported();
         }
-        ClaudeCapabilities caps = detectCaps();
+        ClaudeCapabilities caps = knownCaps.orElseGet(this::detectCaps);
         // Eval runs inside a container whose PATH has `claude` (installed by the
         // claudeEvalImage Dockerfile at /root/.local/bin), not the host's absolute
         // path -- which does not exist in the container's filesystem.
@@ -349,7 +367,7 @@ public final class ClaudeAgentProvider implements AgentProvider {
             command.append(" --session-id ").append(AgentCommands.shellQuote(c.sessionId()));
             sessionIdUsed = true;
         }
-        command.append(activitySettingsFlag(caps));
+        command.append(activitySettingsFlag(caps, settingsOverride));
         command.append(mcpConfigFlag(caps, c.mcp().flatMap(McpAccess::credentialFile)));
         command.append(stdioMcpConfigFlag(caps, c.stdioMcpServers()));
         command.append(planModeFlag(caps, c.readOnly()));
@@ -374,6 +392,12 @@ public final class ClaudeAgentProvider implements AgentProvider {
 
     @Override
     public LaunchPlan buildResumeCommand(ResumeContext r) {
+        return buildResume(r, Optional.empty(), Optional.empty());
+    }
+
+    /** The resume command; the overrides are as on {@link #buildCreate}. */
+    private LaunchPlan buildResume(ResumeContext r, Optional<Path> settingsOverride,
+                                   Optional<ClaudeCapabilities> knownCaps) {
         if (r.remote().isPresent()) {
             // As on create: a remote claude cannot see this machine's extra
             // working directories or task guidance, so a resume that requests
@@ -398,8 +422,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
             // covering the guidance location too.
             return LaunchPlan.unsupported();
         }
-        ClaudeCapabilities caps = detectCaps();
-        String suffix = activitySettingsFlag(caps) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
+        ClaudeCapabilities caps = knownCaps.orElseGet(this::detectCaps);
+        String suffix = activitySettingsFlag(caps, settingsOverride) + mcpConfigFlag(caps, r.mcp().flatMap(McpAccess::credentialFile))
                 + stdioMcpConfigFlag(caps, r.stdioMcpServers()) + planModeFlag(caps, r.readOnly())
                 + addDirFlags(r.launchResources())
                 + workflowReadRootFlags(r.workflowAccess(), r.launchResources(), r.evalMode())
@@ -435,6 +459,101 @@ public final class ClaudeAgentProvider implements AgentProvider {
                     r.workflowAccess().flatMap(LocalWorkflowAccess::evalNamespace)), false);
         }
         return LaunchPlan.of(inner, false);
+    }
+
+    @Override
+    public EditorAskLaunch prepareEditorAskCreate(CreateContext c, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(c);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        CreateContext withPrompt = new CreateContext(c.displayName(), c.sessionId(), c.workingDirectory(),
+                c.remote(), c.mcp(), c.model(), false, c.readOnly(), Optional.of(request.firstTurnPrompt()),
+                c.stdioMcpServers(), c.launchResources(), c.persistence(), c.workflowAccess(),
+                c.remoteLaunchSupport());
+        return prepareEditorAsk(request, c.mcp(), true,
+                (caps, hooks) -> buildCreate(withPrompt, Optional.of(hooks.settingsFile()), Optional.of(caps)));
+    }
+
+    @Override
+    public EditorAskLaunch prepareEditorAskResume(ResumeContext r, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(r);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        ResumeContext withPrompt = new ResumeContext(r.agentSessionId(), r.agentSessionName(),
+                r.workingDirectory(), r.remote(), r.mcp(), false, r.readOnly(), r.stdioMcpServers(),
+                Optional.of(request.firstTurnPrompt()), r.launchResources(), r.persistence(),
+                r.workflowAccess(), r.remoteLaunchSupport());
+        return prepareEditorAsk(request, r.mcp(), false,
+                (caps, hooks) -> buildResume(withPrompt, Optional.of(hooks.settingsFile()), Optional.of(caps)));
+    }
+
+    /**
+     * Whether the installed Claude's hook semantics are verified for the
+     * editor-ask evidence: the flags the evidence rides on ({@code --settings},
+     * {@code --mcp-config}) are advertised and the version was actually
+     * detected (the conservative fallback reports {@code "unknown"}). Live
+     * confirmation of the {@code Stop} + {@code idle_prompt} pair stays the
+     * opt-in live gate; an unverified version makes every observation
+     * unavailable rather than guessing.
+     */
+    static boolean hookSemanticsVerified(ClaudeCapabilities caps) {
+        return caps.supportsSettings() && caps.supportsMcpConfig()
+                && !caps.version().isBlank() && !"unknown".equals(caps.version());
+    }
+
+    /** Renders through {@code build}, then derives the evidence from what the command actually contains. */
+    private EditorAskLaunch prepareEditorAsk(EditorAskRequest request, Optional<McpAccess> mcp, boolean created,
+                                             BiFunction<ClaudeCapabilities, EditorAskLaunchHooks, LaunchPlan> build) {
+        if (hookInstaller == null || activityReporter == null || activityReporter.settingsFile().isEmpty()) {
+            return EditorAskLaunch.refused("Claude activity hooks are not installed.");
+        }
+        ClaudeCapabilities caps = detectCaps();
+        EditorAskLaunchHooks hooks;
+        try {
+            hooks = hookInstaller.editorAskLaunchPaths(request.launchNonce());
+        } catch (RuntimeException e) {
+            return EditorAskLaunch.refused("Claude launch hooks could not be prepared.");
+        }
+        LaunchPlan plan = build.apply(caps, hooks);
+        if (!plan.supported()) {
+            return EditorAskLaunch.refused("Claude cannot serve this launch.");
+        }
+        Set<EditorAskPiece> pieces = EnumSet.noneOf(EditorAskPiece.class);
+        String mcpFlag = mcpConfigFlag(caps, mcp.flatMap(McpAccess::credentialFile));
+        if (!mcpFlag.isEmpty() && plan.command().contains(mcpFlag)) {
+            pieces.add(EditorAskPiece.CLAUDE_MCP_CONFIG_FLAG);
+        }
+        String settingsFlag = caps.supportsSettings()
+                ? " --settings " + AgentCommands.shellQuote(hooks.settingsFile().toString()) : "";
+        if (!settingsFlag.isEmpty() && plan.command().contains(settingsFlag)) {
+            pieces.add(EditorAskPiece.CLAUDE_LAUNCH_HOOKS);
+        }
+        if (plan.command().endsWith(" -- " + AgentCommands.shellQuote(request.firstTurnPrompt()))) {
+            pieces.add(EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+        }
+        if (!pieces.containsAll(EditorAskDelivery.required(AgentKind.CLAUDE))) {
+            return EditorAskLaunch.refused("Claude does not carry the answer tool on this launch.");
+        }
+        // Artifacts exist only after every validation: a refusal path above
+        // this point must have created nothing on disk.
+        try {
+            hookInstaller.installEditorAskLaunch(request.launchNonce());
+        } catch (IOException | RuntimeException e) {
+            return EditorAskLaunch.refused("Claude launch hooks could not be installed.");
+        }
+        ClaudeEditorAskObserver observer = ClaudeEditorAskObserver.forLaunch(hooks, hookSemanticsVerified(caps));
+        try {
+            observer.arm(request.firstTurnMarker());
+        } catch (RuntimeException e) {
+            observer.close();
+            hookInstaller.deleteEditorAskLaunch(request.launchNonce());
+            return EditorAskLaunch.refused("The first turn could not be armed.");
+        }
+        EditorAskConversationProof proof = created && plan.sessionIdUsed()
+                ? EditorAskConversationProof.RENDERED_PRESET_ID : EditorAskConversationProof.CORRELATED_HOOK;
+        return EditorAskLaunch.accepted(plan, new EditorAskDelivery(AgentKind.CLAUDE, pieces, proof), observer);
     }
 
     @Override
@@ -809,8 +928,8 @@ public final class ClaudeAgentProvider implements AgentProvider {
                 .orElse("");
     }
 
-    private String activitySettingsFlag(ClaudeCapabilities caps) {
-        Optional<Path> settings = activityReporter.settingsFile();
+    private String activitySettingsFlag(ClaudeCapabilities caps, Optional<Path> settingsOverride) {
+        Optional<Path> settings = settingsOverride.isPresent() ? settingsOverride : activityReporter.settingsFile();
         if (!caps.supportsSettings() || settings.isEmpty()) {
             return "";
         }

@@ -19,6 +19,8 @@ import app.drydock.agent.api.StdioMcpServer;
 import app.drydock.agent.providers.AgentCommands;
 import app.drydock.agent.providers.HostBinaryLocator;
 import app.drydock.agent.providers.pi.internal.PiCapabilities;
+import app.drydock.agent.providers.pi.internal.PiEditorAskExtensionSource;
+import app.drydock.agent.providers.pi.internal.PiEditorAskReceipts;
 import app.drydock.agent.providers.pi.internal.PiExecutableLocator;
 import app.drydock.agent.providers.pi.internal.PiExtensionInstaller;
 import app.drydock.agent.providers.pi.internal.PiModelCatalog;
@@ -39,13 +41,16 @@ import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -109,6 +114,9 @@ public final class PiAgentProvider implements AgentProvider {
     private PiExtensionInstaller evalInstaller;
     private PiExtensionInstaller initialPromptInstaller;
     private PiExtensionInstaller activityInstaller;
+    private PiExtensionInstaller editorAskInstaller;
+    /** Parent of the per-launch editor-ask receipt directories. */
+    private Path editorAskDirectory;
     private PiActivityReporter activityReporter;
     private ExecutorService background;
     /** Snapshotted by the settings read at {@link #init}; read by {@link #sphinxReview()} on the EDT. */
@@ -170,6 +178,8 @@ public final class PiAgentProvider implements AgentProvider {
         this.evalInstaller = PiExtensionInstaller.eval(ctx.stateDirectory());
         this.initialPromptInstaller = PiExtensionInstaller.initialPrompt(ctx.stateDirectory());
         this.activityInstaller = PiExtensionInstaller.activity(ctx.stateDirectory());
+        this.editorAskInstaller = PiExtensionInstaller.editorAsk(ctx.stateDirectory());
+        this.editorAskDirectory = ctx.stateDirectory().resolve("pi").resolve("editor-ask");
         this.activityReporter = new PiActivityReporter(activityInstaller, ctx.activityDirectory());
         this.background = ctx.backgroundExecutor();
         // A settings read (a few ms), so it runs here rather than on the
@@ -272,6 +282,88 @@ public final class PiAgentProvider implements AgentProvider {
         }
         // Unknown id -> picker. NEVER --continue/--last (same-cwd ambiguity).
         return LaunchPlan.of(pi + " --resume", false);
+    }
+
+    @Override
+    public EditorAskLaunch prepareEditorAskCreate(CreateContext c, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(c);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        return prepareEditorAsk(request, c.mcp(), c.model(), c.launchResources(), Optional.empty());
+    }
+
+    @Override
+    public EditorAskLaunch prepareEditorAskResume(ResumeContext r, EditorAskRequest request) {
+        Optional<String> refusal = EditorAskLaunch.refusalFor(r);
+        if (refusal.isPresent()) {
+            return EditorAskLaunch.refused(refusal.get());
+        }
+        return prepareEditorAsk(request, r.mcp(), Optional.empty(), r.launchResources(), r.agentSessionId());
+    }
+
+    /**
+     * The Q&A launch: Pi's single positional prompt path ({@code -- <prompt>}),
+     * never the initial-prompt extension (its split task injector would carry the
+     * first turn on a second channel). Evidence is read off the rendered command
+     * and the {@link PiCommand} branch flags, never off a file merely existing.
+     */
+    private EditorAskLaunch prepareEditorAsk(EditorAskRequest request, Optional<McpAccess> mcp,
+                                             Optional<String> model, Optional<LaunchResources> resources,
+                                             Optional<String> resumeSessionId) {
+        if (editorAskInstaller == null || !supportsLaunch(currentCapabilities())) {
+            return EditorAskLaunch.refused("Pi cannot serve this launch.");
+        }
+        Path extension;
+        Path receipts = editorAskDirectory.resolve(request.launchNonce());
+        try {
+            extension = editorAskInstaller.install();
+        } catch (IOException | RuntimeException e) {
+            return EditorAskLaunch.refused("Pi turn-evidence extension could not be installed.");
+        }
+        PiCommand pi = piCommand(mcp, List.of(), false, Optional.empty(), model, resources,
+                Optional.of(new EditorAskWiring(extension, receipts, request.launchNonce())));
+        String tail = " -- " + AgentCommands.shellQuote(request.firstTurnPrompt());
+        String command = resumeSessionId
+                .map(id -> pi.command() + " --session " + AgentCommands.shellQuote(id) + tail)
+                .orElseGet(() -> pi.command() + tail);
+        Set<EditorAskPiece> pieces = EnumSet.noneOf(EditorAskPiece.class);
+        Optional<Path> config = mcp.flatMap(McpAccess::credentialFile);
+        if (pi.mcpConfigRendered() && config.isPresent() && command.contains(
+                CONFIG_ENV_VAR + "=" + AgentCommands.shellQuote(config.get().toString()))) {
+            pieces.add(EditorAskPiece.PI_MCP_CONFIG_FILE);
+        }
+        if (pi.mcpAdapterRendered() && pi.mcpAdapter() != null && command.contains(
+                " -e " + AgentCommands.shellQuote(pi.mcpAdapter().toString()))) {
+            pieces.add(EditorAskPiece.PI_MCP_ADAPTER);
+        }
+        if (command.contains(" -e " + AgentCommands.shellQuote(extension.toString()))
+                && command.contains(PiEditorAskExtensionSource.DIR_ENV_VAR + "="
+                        + AgentCommands.shellQuote(receipts.toString()))) {
+            pieces.add(EditorAskPiece.PI_EDITOR_ASK_EXTENSION);
+        }
+        if (command.endsWith(tail)) {
+            pieces.add(EditorAskPiece.POSITIONAL_LAUNCH_PROMPT);
+        }
+        if (!pieces.containsAll(EditorAskDelivery.required(AgentKind.PI))) {
+            return EditorAskLaunch.refused("Pi does not carry the answer tool on this launch.");
+        }
+        PiEditorAskReceipts observer = new PiEditorAskReceipts(receipts, request.launchNonce());
+        try {
+            observer.arm(request.firstTurnMarker());
+        } catch (RuntimeException e) {
+            observer.close();
+            return EditorAskLaunch.refused("The first turn could not be armed.");
+        }
+        try {
+            Files.createDirectories(receipts, PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwx------")));
+        } catch (IOException | RuntimeException e) {
+            observer.close();
+            return EditorAskLaunch.refused("Pi receipt directory could not be prepared.");
+        }
+        return EditorAskLaunch.accepted(LaunchPlan.of(command, false),
+                new EditorAskDelivery(AgentKind.PI, pieces, EditorAskConversationProof.PI_EXTENSION), observer);
     }
 
     @Override
@@ -485,6 +577,16 @@ public final class PiAgentProvider implements AgentProvider {
     private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
                                 Optional<String> initialPrompt, Optional<String> model,
                                 Optional<LaunchResources> launchResources) {
+        return piCommand(access, stdioServers, eval, initialPrompt, model, launchResources, Optional.empty());
+    }
+
+    /** A Q&A launch's per-launch evidence wiring: the installed extension, its receipt directory and nonce. */
+    private record EditorAskWiring(Path extension, Path directory, String nonce) {
+    }
+
+    private PiCommand piCommand(Optional<McpAccess> access, List<StdioMcpServer> stdioServers, boolean eval,
+                                Optional<String> initialPrompt, Optional<String> model,
+                                Optional<LaunchResources> launchResources, Optional<EditorAskWiring> editorAsk) {
         Optional<Path> configFile = access.flatMap(McpAccess::credentialFile);
         // PI_SESSION_ID: the user's pi models.json sends `x-claude-code-session-id: $PI_SESSION_ID`
         // to omlx_proxy for per-session correlation, but pi does NOT set PI_SESSION_ID in its
@@ -533,11 +635,15 @@ public final class PiAgentProvider implements AgentProvider {
         if (useActivity) {
             literals.put(ACTIVITY_ENV_VAR, activityReporter.activityDirectory());
         }
+        editorAsk.ifPresent(wiring -> literals.put(PiEditorAskExtensionSource.DIR_ENV_VAR, wiring.directory()));
         StringBuilder command = new StringBuilder(AgentCommands.envPrefix(ENV_SCRUB, literals, Map.of()));
         if (useEval) {
             command.append("DRYDOCK_EVAL=1 ");
         }
         command.append(piSessionId);
+        // The nonce is nonsecret correlation, so it rides the environment as a quoted literal.
+        editorAsk.ifPresent(wiring -> command.append(PiEditorAskExtensionSource.NONCE_ENV_VAR).append('=')
+                .append(AgentCommands.shellQuote(wiring.nonce())).append(' '));
         if (useInitialPrompt) {
             String encoded = Base64.getEncoder().encodeToString(
                     initialPrompt.orElseThrow().getBytes(StandardCharsets.UTF_8));
@@ -561,12 +667,15 @@ public final class PiAgentProvider implements AgentProvider {
         if (useActivity) {
             command.append(" -e ").append(AgentCommands.shellQuote(activityExtension.toString()));
         }
+        editorAsk.ifPresent(wiring -> command.append(" -e ")
+                .append(AgentCommands.shellQuote(wiring.extension().toString())));
         // --model <m> for a picked starting model; empty for the harness's own
         // default. Launch-time only: buildResumeCommand never appends it, so a
         // resume keeps whatever model the conversation last used.
         model.ifPresent(m -> command.append(" --model ").append(AgentCommands.shellQuote(m)));
         appendSkillFlag(command, launchResources, configFile);
-        return new PiCommand(command.toString(), useInitialPrompt);
+        return new PiCommand(command.toString(), useInitialPrompt, useMcp && configFile.isPresent(), useMcp,
+                mcpExtension);
     }
 
     /**
@@ -622,7 +731,13 @@ public final class PiAgentProvider implements AgentProvider {
                 .orElse(List.of());
     }
 
-    private record PiCommand(String command, boolean initialPromptInjected) {
+    /**
+     * @param mcpConfigRendered whether the owner-only MCP JSON was handed over by its variable
+     * @param mcpAdapterRendered whether the MCP registration adapter's {@code -e} was rendered
+     * @param mcpAdapter the adapter's installed path, or null when none was rendered
+     */
+    private record PiCommand(String command, boolean initialPromptInjected, boolean mcpConfigRendered,
+                             boolean mcpAdapterRendered, Path mcpAdapter) {
     }
 
     /**
