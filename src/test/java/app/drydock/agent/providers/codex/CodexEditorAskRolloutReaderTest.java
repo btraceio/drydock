@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Duration;
@@ -233,10 +234,13 @@ class CodexEditorAskRolloutReaderTest {
         r2.arm(M2);
         Path g = fresh(T2);
         append(g, started("t1"));
-        r2.read(0);
-        Files.delete(g);
-        Files.writeString(g, "x".repeat(4096));
-        assertTrue(r2.read(0).unavailable().isPresent());
+        assertTrue(r2.read(0).unavailable().isEmpty());
+        // Allocate the replacement while the original exists; delete-then-create
+        // can reuse the original file key and never exercise the rotation check.
+        Path replacement = Files.createTempFile(g.getParent(), "replacement-", ".jsonl");
+        Files.writeString(replacement, "x".repeat(4096));
+        Files.move(replacement, g, StandardCopyOption.REPLACE_EXISTING);
+        assertEquals("rollout rotated", r2.read(0).unavailable().orElseThrow());
     }
 
     @Test
