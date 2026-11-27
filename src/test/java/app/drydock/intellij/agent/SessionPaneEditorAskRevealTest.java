@@ -15,12 +15,12 @@ import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.SwingUtilities;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.LineBorder;
 
 import java.awt.BorderLayout;
-import java.awt.Component;
-import java.awt.Container;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,7 +35,7 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
     private final ManagedSessionId session = ManagedSessionId.newId();
     private final AtomicInteger submits = new AtomicInteger();
     private final List<Runnable> uiQueue = new ArrayList<>();
-    private final EditorAskUiModel model = new EditorAskUiModel(Runnable::run, 0);
+    private final EditorAskUiModel model = new EditorAskUiModel();
     private List<EditorAskRecord> history = List.of();
     private final List<JComponent> mountedViews = new ArrayList<>();
     private long epoch;
@@ -78,11 +78,21 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
         }
     };
 
+    @Override
+    protected void tearDown() throws Exception {
+        try {
+            model.close();
+        } finally {
+            super.tearDown();
+        }
+    }
+
     private EditorAskNavigation navigation() {
         return new EditorAskNavigation(source, host, Runnable::run, uiQueue::add);
     }
 
     private void drain() {
+        assertTrue("navigation completion must run on the EDT", SwingUtilities.isEventDispatchThread());
         List<Runnable> run = new ArrayList<>(uiQueue);
         uiQueue.clear();
         run.forEach(Runnable::run);
@@ -94,24 +104,16 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
                 Status.ACCEPTED, null, null, null, null).answered("same answer", Instant.EPOCH);
     }
 
-    private static void cards(Component c, List<JPanel> out) {
-        if (c instanceof JPanel p && p.getLayout() instanceof javax.swing.BoxLayout && p.getBorder() != null) {
-            out.add(p);
-        }
-        if (c instanceof Container k) {
-            for (Component child : k.getComponents()) {
-                cards(child, out);
-            }
-        }
-    }
-
-    /** The positions, in list order, of cards with the highlight border. */
-    private static List<Integer> highlighted(JComponent view) {
-        List<JPanel> all = new ArrayList<>();
-        cards(view, all);
+    /** The positions, in list order, of history cards with the highlight border. */
+    private static List<Integer> highlighted(JComponent view, int expectedCards) {
+        var history = (EditorAskHistoryPanel) ((BorderLayout) view.getLayout()).getLayoutComponent(BorderLayout.CENTER);
+        var scroll = (JScrollPane) ((BorderLayout) history.getLayout()).getLayoutComponent(BorderLayout.CENTER);
+        var list = (JPanel) scroll.getViewport().getView();
+        assertEquals("one history card per exchange", expectedCards, list.getComponentCount());
         List<Integer> out = new ArrayList<>();
-        for (int i = 0; i < all.size(); i++) {
-            if (all.get(i).getBorder() instanceof CompoundBorder b && b.getOutsideBorder() instanceof LineBorder) {
+        for (int i = 0; i < list.getComponentCount(); i++) {
+            if (((JPanel) list.getComponent(i)).getBorder() instanceof CompoundBorder b
+                    && b.getOutsideBorder() instanceof LineBorder) {
                 out.add(i);
             }
         }
@@ -128,7 +130,7 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
         history = List.of(newer, older);
         open(older.id());
         assertEquals(1, mountedViews.size());
-        assertEquals(List.of(0), highlighted(mountedViews.get(0)));
+        assertEquals(List.of(0), highlighted(mountedViews.get(0), 2));
         assertEquals(1, shows);
     }
 
@@ -144,7 +146,7 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
         history = List.of(kept);
         open(EditorAskRecord.newId());   // an ID that trim already dropped
         assertEquals(1, mountedViews.size());
-        assertEquals(List.of(), highlighted(mountedViews.get(0)));
+        assertEquals(List.of(), highlighted(mountedViews.get(0), 1));
     }
 
     public void testStaleNavigationIsFencedAndLaterOneWins() {
@@ -155,7 +157,7 @@ public class SessionPaneEditorAskRevealTest extends BasePlatformTestCase {
         nav.open(getProject(), ROOT, session, b.id(), () -> true);
         drain();
         assertEquals(1, mountedViews.size());
-        assertEquals(List.of(1), highlighted(mountedViews.get(0)));
+        assertEquals(List.of(1), highlighted(mountedViews.get(0), 2));
     }
 
     public void testStaleLoadCompletingLateLeavesNewerModelIntact() {
