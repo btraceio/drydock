@@ -170,6 +170,10 @@ public final class EditorAskUiModel implements Events, AutoCloseable {
                 r.items.put(record.id(), new Item(record));
                 trim(r);
             } else {
+                if (i.record != null && i.record.isSettled() && !record.isSettled()) {
+                    // Save callbacks can publish older snapshots after a settled record.
+                    return;
+                }
                 i.record = record;
                 if (record.isSettled()) {
                     i.label = null; // the persisted status is the label now

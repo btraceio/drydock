@@ -293,6 +293,17 @@ class EditorAskHistoryPanelTest {
     }
 
     @Test
+    void latePendingRecordNeverReopensASettledExchange() {
+        EditorAskUiModel m = model();
+        EditorAskRecord pending = record(0, Status.SUBMITTING, null, null);
+        EditorAskRecord refused = pending.settled(Status.FAILED_NOT_SENT, "MCP server is not ready");
+        m.recorded("/r", refused);
+        m.recorded("/r", pending);
+
+        assertEquals(refused, m.rows("/r").getFirst().record());
+    }
+
+    @Test
     void selectScrollsToTheIdKeyedComponentEvenWhenItMountsLater() {
         EditorAskUiModel m = model();
         EditorAskRecord one = record(0, Status.ANSWERED, null, "a");
