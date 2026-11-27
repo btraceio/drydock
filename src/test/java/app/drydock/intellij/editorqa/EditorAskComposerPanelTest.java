@@ -4,10 +4,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
@@ -102,6 +104,9 @@ class EditorAskComposerPanelTest {
         if (coordinator != null) {
             coordinator.close();
         }
+        if (store != null) {
+            store.close();
+        }
         if (model != null) {
             model.close();
         }
@@ -154,23 +159,37 @@ class EditorAskComposerPanelTest {
         Path root = Files.createDirectories(tmp.resolve("repo")).toRealPath();
         model = new EditorAskUiModel(Runnable::run, 1);
         Lane lane = wire(root, model);
-        EditorAskComposerPanel panel = new EditorAskComposerPanel(q -> coordinator.submit(tabQuestion(root, q)));
+        List<CompletableFuture<Result>> admissions = new ArrayList<>();
+        var ui = new LinkedBlockingQueue<Runnable>();
+        EditorAskComposerPanel panel = new EditorAskComposerPanel(q -> {
+            var admitted = coordinator.submit(tabQuestion(root, q));
+            admissions.add(admitted);
+            return admitted;
+        }, Runnable::run, ui::add);
         panel.setQuestion("what does this do?");
         panel.submit();
+        Result first = admissions.getFirst().get(10, TimeUnit.SECONDS);
+        assertTrue(first.accepted(), first.refusal());
+        Runnable showFirst = ui.poll(10, TimeUnit.SECONDS);
+        assertNotNull(showFirst, "admission completion was not delivered to the UI");
+        showFirst.run();
         await(() -> !lane.launches.isEmpty());
         LaunchRequest launch = lane.launches.getFirst();
         assertTrue(launch.prompt().contains("what does this do?"));
-        String id = store.records(root.toString()).getFirst().id();
+        String id = first.id();
         assertTrue(launch.prompt().contains(id), "same ID is the turn marker");
         assertEquals(0, store.records(root.toString()).getFirst().acceptanceSequence());
         assertTrue(panel.isSendEnabled(), "progress is cleared once admitted");
         assertTrue(panel.statusText().contains(id));
         assertTrue(coordinator.commit(store.records(root.toString()).getFirst().owner(), 7, id, "an answer"));
-        await(() -> store.records(root.toString()).getFirst().status() == Status.ANSWERED);
-        // second question is an ordinary FIFO turn with the next sequence
+        assertEquals(Status.ANSWERED, store.records(root.toString()).getFirst().status());
+        // A record is visible in memory before admission saves it. Wait for
+        // durable admission, not just the row count, before allowing teardown.
         panel.setQuestion("and then?");
         panel.submit();
-        await(() -> store.records(root.toString()).size() == 2);
+        Result second = admissions.get(1).get(10, TimeUnit.SECONDS);
+        assertTrue(second.accepted(), second.refusal());
+        assertEquals(2, store.records(root.toString()).size());
         assertEquals(1, store.records(root.toString()).get(1).acceptanceSequence());
     }
 
