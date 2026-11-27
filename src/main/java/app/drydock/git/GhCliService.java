@@ -378,6 +378,14 @@ public final class GhCliService implements AutoCloseable {
                 () -> searchPullRequestsWith(locate(), root, repository, query, PROCESS_TIMEOUT), executor);
     }
 
+    /** The open, non-draft PR listing narrowed by a label {@code filter} (see {@link #filteredPullRequestsWith}). */
+    public CompletableFuture<PullRequestListing> filteredPullRequests(Path root, Optional<String> repository,
+                                                                      PullRequestLabelFilter filter) {
+        Objects.requireNonNull(filter, "filter");
+        return CompletableFuture.supplyAsync(
+                () -> filteredPullRequestsWith(locate(), root, repository, filter, PROCESS_TIMEOUT), executor);
+    }
+
     /** The open-issue listing narrowed by {@code query} (see {@link #searchIssuesWith}). */
     public CompletableFuture<IssueListing> searchIssues(Path root, Optional<String> repository, String query) {
         return CompletableFuture.supplyAsync(
@@ -421,6 +429,31 @@ public final class GhCliService implements AutoCloseable {
             return new PullRequestListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
         }
         return pullRequestListing(gh, root, repository, List.of("--search", query), timeout);
+    }
+
+    /**
+     * The open, non-draft PR listing narrowed by a label expression, with
+     * {@code gh} already looked up (empty: not installed); static so argv,
+     * bounds and failure logging are testable with a scripted gh. Both
+     * {@code --draft=false} and {@code --search=...} are applied server-side
+     * before {@code --limit}, so drafts and non-matching PRs never consume
+     * slots in the {@link #PR_LIST_LIMIT} window. {@code --search=} keeps a
+     * leading {@code -label:...} bound to the option rather than parsed as a
+     * flag.
+     */
+    static PullRequestListing filteredPullRequestsWith(Optional<Path> located, Path root,
+                                                       Optional<String> repository, PullRequestLabelFilter filter,
+                                                       Duration timeout) {
+        Objects.requireNonNull(filter, "filter");
+        Path gh = located.orElse(null);
+        if (gh == null) {
+            return new PullRequestListing.Unsupported();
+        }
+        if (repository.filter(value -> !validRepository(value)).isPresent()) {
+            return new PullRequestListing.Failed("The configured GitHub repository is not OWNER/REPO or HOST/OWNER/REPO");
+        }
+        return pullRequestListing(gh, root, repository,
+                List.of("--draft=false", "--search=" + filter.toGitHubSearchQuery()), timeout);
     }
 
     /**

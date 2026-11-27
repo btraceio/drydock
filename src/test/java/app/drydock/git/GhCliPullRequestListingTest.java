@@ -476,6 +476,42 @@ class GhCliPullRequestListingTest {
         assertInstanceOf(GhCliService.PullRequestListing.Failed.class, GhCliService.parsePullRequestListing(stdout));
     }
 
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @Test
+    void filteredPullRequestsPassesNonDraftAndCompiledLabelSearch(@TempDir Path dir) throws Exception {
+        Path argsFile = dir.resolve("args.txt");
+        Path gh = scriptedGh(dir, "printf '%s\\n' \"$@\" > " + argsFile + "\n"
+                + "printf '%s' '[{\"number\":42,\"title\":\"Profile allocs\",\"headRefName\":\"prof\","
+                + "\"baseRefName\":\"main\",\"isDraft\":false,\"author\":{\"login\":\"jb\"},"
+                + "\"url\":\"https://github.com/o/r/pull/42\"}]'\n");
+        PullRequestLabelFilter filter = PullRequestLabelFilter.parse("!wip & comp: profiling");
+
+        GhCliService.PullRequestListing listing = GhCliService.filteredPullRequestsWith(
+                Optional.of(gh), dir, Optional.of("o/r"), filter, Duration.ofSeconds(15));
+
+        List<GhCliService.OpenPullRequest> prs =
+                assertInstanceOf(GhCliService.PullRequestListing.Listed.class, listing).pullRequests();
+        assertEquals(1, prs.size());
+        assertEquals(42, prs.get(0).number());
+        List<String> args = Files.readAllLines(argsFile);
+        assertTrue(args.contains("--draft=false"), args::toString);
+        assertTrue(args.contains("--search=-label:\"wip\" AND label:\"comp: profiling\""), args::toString);
+        assertTrue(args.contains("--repo") && args.contains("o/r"), args::toString);
+    }
+
+    @Test
+    void filteredPullRequestsHandlesMissingGhAndInvalidRepository(@TempDir Path dir) {
+        PullRequestLabelFilter filter = PullRequestLabelFilter.parse("bug");
+
+        assertInstanceOf(GhCliService.PullRequestListing.Unsupported.class,
+                GhCliService.filteredPullRequestsWith(
+                        Optional.empty(), dir, Optional.empty(), filter, Duration.ofSeconds(5)));
+        assertInstanceOf(GhCliService.PullRequestListing.Failed.class,
+                GhCliService.filteredPullRequestsWith(
+                        Optional.of(Path.of("/usr/bin/gh")), dir, Optional.of("not a repo"),
+                        filter, Duration.ofSeconds(5)));
+    }
+
     /** A fake gh in {@code dir/bin} running {@code body} under {@code /bin/sh}. */
     static Path scriptedGh(Path dir, String body) throws IOException {
         Path bin = Files.createDirectories(dir.resolve("bin"));
