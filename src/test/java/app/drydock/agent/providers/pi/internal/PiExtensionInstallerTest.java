@@ -95,6 +95,23 @@ class PiExtensionInstallerTest {
                 "the IDE-hosted stdio servers ride the same bridge");
         assertTrue(PiMcpExtensionSource.SOURCE.contains("registerMcpServer"),
                 "the stdio servers have no direct-tool requirement and stay on Pi's native registration");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("pi-mcp-adapter:runtime-register:v1"),
+                "the IDE server must register through the adapter's runtime-register event:"
+                        + " Pi's own config translation drops literalEnv, and without it the adapter"
+                        + " interpolates ${NAME} and runs a leading ! as a secret command"
+                        + " in the literal worktree path");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("literalEnv: true"),
+                "the IDE server's env values are literals, not adapter templates");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("refusing to register a server whose routing values could be rewritten"),
+                "without the adapter, env values the built-in templates could touch"
+                        + " (a $ or a leading !) must not pass silently: a rewritten"
+                        + " IJ_MCP_SERVER_PROJECT_PATH routes another project's answers"
+                        + " into this session, and a leading ! is arbitrary execution");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("ide_search_symbol"),
+                "the curated IDE tools must be declared to the model directly:"
+                        + " invisible tools are never used, and the agent greps instead");
+        assertTrue(PiMcpExtensionSource.SOURCE.contains("ideInstructions"),
+                "the system prompt must point at the IDE tools and the rest of the toolset");
     }
 
     @Test
