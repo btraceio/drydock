@@ -51,10 +51,21 @@ public class AgentExecutionRegistryEditorAskTest extends BasePlatformTestCase {
     }
 
     private AgentExecution start(Path into) throws Exception {
-        List<String> argv = List.of("/bin/sh", "-c", "stty raw -echo; cat > '" + into + "'");
-        var started = registry.startArgv(id, Path.of(System.getProperty("java.io.tmpdir")), argv, getProject(), OWNER);
-        waitFor(started::isDone);
-        return started.get(1, TimeUnit.SECONDS);
+        Path ready = into.resolveSibling(into.getFileName() + ".ready");
+        List<String> argv = List.of("/bin/sh", "-c",
+                "stty raw -echo && exec > \"$1\" && : > \"$2\" && exec cat",
+                "ask-pty", into.toString(), ready.toString());
+        try {
+            var started = registry.startArgv(id, into.getParent(), argv, getProject(), OWNER);
+            waitFor(started::isDone);
+            AgentExecution execution = started.get(1, TimeUnit.SECONDS);
+            // Process start can precede stty. Don't send input until the child
+            // has disabled CR-to-LF translation and opened the capture file.
+            waitFor(() -> Files.exists(ready));
+            return execution;
+        } finally {
+            Files.deleteIfExists(ready);
+        }
     }
 
     private static void waitFor(BooleanSupplier condition) throws InterruptedException {
