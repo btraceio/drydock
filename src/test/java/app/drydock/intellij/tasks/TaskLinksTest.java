@@ -543,4 +543,22 @@ class TaskLinksTest {
         assertTrue(TaskLinks.taskOfSession(shown, List.of(shown),
                 layer(List.of(), Map.of("hidden-session", List.of(attachedToHidden)))).isEmpty());
     }
+
+    @Test
+    void pullRequestLinksResolveInsidePrSubgroupsAndAllFolder() {
+        TaskRow inGroup = session("feat/prof", Optional.of(branchPr(40, "feat/prof")));
+        TaskRow inAll = session("feat/other", Optional.of(branchPr(41, "feat/other")));
+        PullRequestRow groupPr = pullRequest(ROOT_A, "feat/prof", 40);
+        PullRequestRow allPr = pullRequest(ROOT_A, "feat/other", 41);
+        TaskNode.PrGroupRow subgroup = new TaskNode.PrGroupRow(ROOT_A,
+                new PrGroup("pg-1", "Profiling", "comp: profiling"), List.of(groupPr));
+        TaskNode.AllPullRequestsRow all = new TaskNode.AllPullRequestsRow(ROOT_A, List.of(allPr));
+        TaskNode.Section prSection = new TaskNode.Section(TaskNode.SectionKind.PULL_REQUESTS, List.of(subgroup, all));
+        TaskNode project = project(REPO_A, ROOT_A, prSection, inGroup, inAll);
+
+        assertEquals(Optional.of(groupPr), TaskLinks.pullRequestOf(inGroup, List.of(project)));
+        assertEquals(Optional.of(allPr), TaskLinks.pullRequestOf(inAll, List.of(project)));
+        assertEquals(Optional.of(inGroup), TaskLinks.sessionOf(groupPr, List.of(project)));
+        assertEquals(Optional.of(inAll), TaskLinks.sessionOf(allPr, List.of(project)));
+    }
 }

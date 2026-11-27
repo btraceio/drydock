@@ -76,6 +76,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Collects what {@link TaskTreeModel} needs: the shared projects, the
@@ -143,6 +144,7 @@ final class TaskTreeInputs implements AutoCloseable {
     private final Map<Path, Boolean> remoteCache = new ConcurrentHashMap<>();
     private final Map<IssueKey, CachedIssues> issueCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedPullRequests> pullRequestCache = new ConcurrentHashMap<>();
+    private final Map<PrGroupKey, CachedPullRequests> prGroupCache = new ConcurrentHashMap<>();
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestCache = new ConcurrentHashMap<>();
     /** The badge join's own listing: the light field set, keyed like the heavy cache it decorates from. */
     private final Map<PullRequestKey, CachedBranchPullRequests> branchPullRequestRowCache = new ConcurrentHashMap<>();
@@ -207,6 +209,11 @@ final class TaskTreeInputs implements AutoCloseable {
     private record IssueKey(Path root, Optional<String> repository) { }
 
     private record PullRequestKey(Path root, Optional<String> repository) { }
+
+    private record PrGroupKey(Path root, Optional<String> repository, String filter) { }
+
+    /** A PR subgroup's shown answer: an edited filter never shows the old filter's pull requests. */
+    private record PrGroupAnswerKey(Path root, Optional<String> repository, String groupId, String filter) { }
 
     private record CachedIssues(long expiresAt, CompletableFuture<IssueListing> listing) { }
 
@@ -314,6 +321,7 @@ final class TaskTreeInputs implements AutoCloseable {
     void invalidateGitHub() {
         issueCache.clear();
         pullRequestCache.clear();
+        prGroupCache.clear();
         branchPullRequestCache.clear();
         branchPullRequestRowCache.clear();
         searchPullRequestCache.clear();
@@ -367,6 +375,7 @@ final class TaskTreeInputs implements AutoCloseable {
     /** Forgets {@code root}'s cached pull-request listing, so the next gather re-queries it. */
     void invalidatePullRequests(Path root) {
         pullRequestCache.keySet().removeIf(key -> key.root().equals(root));
+        prGroupCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestCache.keySet().removeIf(key -> key.root().equals(root));
         branchPullRequestRowCache.keySet().removeIf(key -> key.root().equals(root));
         searchPullRequestCache.remove(root);
@@ -393,7 +402,10 @@ final class TaskTreeInputs implements AutoCloseable {
     TaskTreeModel.Inputs gather(Project here, String filter,
                                 Set<Path> requestedWorktrees, Set<Path> requestedGitHubIssues,
                                 Set<ListingExpansionTracker.GroupKey> requestedJiraGroups,
-                                Set<Path> requestedPullRequests, Set<Path> requestedBranches,
+                                Set<Path> requestedPullRequests,
+                                Set<Path> requestedAllPullRequests,
+                                Set<ListingExpansionTracker.GroupKey> requestedPrGroups,
+                                Set<Path> requestedBranches,
                                 ListingSearch search) {
         DrydockPluginService plugin = DrydockPluginService.getInstance();
         List<SharedProject> projects = new ArrayList<>();
@@ -409,6 +421,9 @@ final class TaskTreeInputs implements AutoCloseable {
         Map<Path, List<JiraGroup>> jiraGroupRequests = new LinkedHashMap<>();
         Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
         Map<Path, PullRequestListing> pullRequests = new HashMap<>();
+        Map<Path, List<PrGroups.Listing>> prGroupListings = new HashMap<>();
+        Set<Path> pendingAllPullRequests = new HashSet<>();
+        Set<ListingExpansionTracker.GroupKey> pendingPrGroups = new HashSet<>();
         Set<Path> worktreeContainers = new HashSet<>();
         Set<Path> pullRequestContainers = new HashSet<>();
         Set<Path> githubIssueRoots = new HashSet<>();
@@ -481,32 +496,74 @@ final class TaskTreeInputs implements AutoCloseable {
                 jiraGhostRoots.add(root);
             }
             if (githubSettings.pullRequestsEnabled()) {
-                pullRequestContainers.add(root);
                 // Keyed by the main-checkout path, not the project id: a
                 // session's repositoryId is a state-store id that shares no
                 // UUID space with the shared-projects file's ids, so an id
                 // join matches nothing (the badge-everywhere-missing bug).
                 badgeSources.put(root, new BadgeSource(root, githubSettings.repository()));
-                // Only once the user opened the project's pull requests here.
-                if (requestedPullRequests.contains(root)) {
-                    // The badge map lookup rides the same fetch the session
-                    // badges use: the one heavy listing, on its slower TTL.
-                    // A fetch still running serves the previous answer (none
-                    // on the first pass) and its completion requests one
-                    // more rebuild, when the joined signals appear.
-                    Map<String, BranchPullRequest> badges =
-                            branchPullRequestsNow(root, githubSettings.repository());
-                    listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
-                                    pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
-                            .ifPresent(listing -> pullRequests.put(root, withBadges(
-                                    searchedPullRequests(root, githubSettings.repository(), listing, search),
-                                    badges)));
-                    // Dedup needs the worktree list even when the user has never
-                    // opened the Worktrees section (byMain is filled lazily), but
-                    // only once pull requests themselves have been requested.
-                    if (!byMain.containsKey(root)) {
+                List<PrGroup> prGroups = PrGroups.load(project.id()).groups();
+                if (prGroups.isEmpty()) {
+                    pullRequestContainers.add(root);
+                    // Only once the user opened the project's pull requests here.
+                    if (requestedPullRequests.contains(root)) {
+                        // The badge map lookup rides the same fetch the session
+                        // badges use: the one heavy listing, on its slower TTL.
+                        // A fetch still running serves the previous answer (none
+                        // on the first pass) and its completion requests one
+                        // more rebuild, when the joined signals appear.
+                        Map<String, BranchPullRequest> badges =
+                                branchPullRequestsNow(root, githubSettings.repository());
+                        listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
+                                        pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
+                                .ifPresent(listing -> pullRequests.put(root, withBadges(
+                                        searchedPullRequests(root, githubSettings.repository(), listing, search),
+                                        badges)));
+                        // Dedup needs the worktree list even when the user has never
+                        // opened the Worktrees section (byMain is filled lazily), but
+                        // only once pull requests themselves have been requested.
+                        if (!byMain.containsKey(root)) {
+                            pullRequestDedupWorktrees.put(root, worktreesOf(root));
+                        }
+                    }
+                } else {
+                    // Grouped mode: definitions travel without fetching. Only
+                    // opened subgroups and an opened "All" folder fetch.
+                    boolean allWanted = requestedAllPullRequests.contains(root);
+                    boolean anyGroupWanted = prGroups.stream().anyMatch(group ->
+                            requestedPrGroups.contains(new ListingExpansionTracker.GroupKey(root, group.id())));
+                    Map<String, BranchPullRequest> badges = allWanted || anyGroupWanted
+                            ? branchPullRequestsNow(root, githubSettings.repository()) : Map.of();
+                    if ((allWanted || anyGroupWanted) && !byMain.containsKey(root)) {
                         pullRequestDedupWorktrees.put(root, worktreesOf(root));
                     }
+                    if (allWanted) {
+                        listingAnswers.now(root, new PullRequestKey(root, githubSettings.repository()),
+                                        pullRequestsOf(root, githubSettings.repository()), PULL_REQUESTS_DID_NOT_COMPLETE)
+                                .ifPresentOrElse(
+                                        listing -> pullRequests.put(root, withBadges(
+                                                searchedPullRequests(root, githubSettings.repository(), listing, search),
+                                                badges)),
+                                        () -> pendingAllPullRequests.add(root));
+                    }
+                    List<PrGroups.Listing> listings = new ArrayList<>(prGroups.size());
+                    for (PrGroup group : prGroups) {
+                        ListingExpansionTracker.GroupKey groupKey =
+                                new ListingExpansionTracker.GroupKey(root, group.id());
+                        Optional<PullRequestListing> answer = Optional.empty();
+                        if (requestedPrGroups.contains(groupKey)) {
+                            Optional<PullRequestListing> raw = listingAnswers.now(root,
+                                    new PrGroupAnswerKey(root, githubSettings.repository(), group.id(), group.filter()),
+                                    prGroupListingOf(root, githubSettings.repository(), group),
+                                    PULL_REQUESTS_DID_NOT_COMPLETE);
+                            if (raw.isPresent()) {
+                                answer = Optional.of(withBadges(raw.get(), badges));
+                            } else {
+                                pendingPrGroups.add(groupKey);
+                            }
+                        }
+                        listings.add(new PrGroups.Listing(group, answer));
+                    }
+                    prGroupListings.put(root, listings);
                 }
             }
             // One listing pass serves both sections: the Worktrees trigger
@@ -622,7 +679,8 @@ final class TaskTreeInputs implements AutoCloseable {
                 openFolders, freshActivity(), Instant.now(),
                 issues, jiraGroupListings, pullRequests, pullRequestDedupWorktrees, plugin.sharedProjects().problem(),
                 filter, List.of(), List.of(), Optional.empty(), resumable, sessionPullRequests,
-                Map.of(), Map.of(), pendingIssues, pendingJiraGroups, babysit, branches);
+                Map.of(), Map.of(), pendingIssues, pendingJiraGroups, babysit, branches,
+                prGroupListings, pendingAllPullRequests, pendingPrGroups);
     }
 
     /** Where a project's pull-request badges come from: its main checkout and its configured repository. */
@@ -1067,9 +1125,20 @@ final class TaskTreeInputs implements AutoCloseable {
     }
 
     private CompletableFuture<PullRequestListing> pullRequestsOf(Path root, Optional<String> repository) {
-        PullRequestKey key = new PullRequestKey(root, repository);
+        return cachedPullRequests(pullRequestCache, new PullRequestKey(root, repository),
+                () -> github.openPullRequests(root, repository));
+    }
+
+    private CompletableFuture<PullRequestListing> prGroupListingOf(Path root, Optional<String> repository,
+                                                                   PrGroup group) {
+        return cachedPullRequests(prGroupCache, new PrGroupKey(root, repository, group.filter()),
+                () -> github.filteredPullRequests(root, repository, group.parsedFilter()));
+    }
+
+    private <K> CompletableFuture<PullRequestListing> cachedPullRequests(
+            Map<K, CachedPullRequests> cache, K key, Supplier<CompletableFuture<PullRequestListing>> fetch) {
         long now = System.nanoTime();
-        CachedPullRequests cached = pullRequestCache.get(key);
+        CachedPullRequests cached = cache.get(key);
         if (cached != null && cached.expiresAt() > now) {
             if (!failed(cached.listing())) {
                 return cached.listing();
@@ -1083,12 +1152,12 @@ final class TaskTreeInputs implements AutoCloseable {
             // listing shares. During the backoff the section keeps its
             // error row; after it the retry gets one bounded run (the
             // listing itself retries once without its heaviest fields).
-            pullRequestCache.replace(key, cached,
+            cache.replace(key, cached,
                     new CachedPullRequests(Math.min(cached.expiresAt(), now + FAILED_LISTING_NANOS), cached.listing()));
             return cached.listing();
         }
-        CompletableFuture<PullRequestListing> listing = github.openPullRequests(root, repository);
-        pullRequestCache.put(key, new CachedPullRequests(now + ISSUE_CACHE_NANOS, listing));
+        CompletableFuture<PullRequestListing> listing = fetch.get();
+        cache.put(key, new CachedPullRequests(now + ISSUE_CACHE_NANOS, listing));
         return listing;
     }
 

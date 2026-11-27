@@ -25,6 +25,7 @@ import app.drydock.git.JiraIssue;
 import app.drydock.git.JiraIssueListing;
 import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.AllPullRequestsRow;
 import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
@@ -34,6 +35,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.PrGroupRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -104,6 +106,10 @@ class TaskTreeModelTest {
         final Set<Path> pendingIssueRoots = new HashSet<>();
         final Set<ListingExpansionTracker.GroupKey> pendingJiraGroups = new HashSet<>();
         final Map<ManagedSessionId, SessionBabysit> babysit = new HashMap<>();
+        final Map<Path, List<PrGroups.Listing>> prGroups = new HashMap<>();
+        final Set<Path> pendingAllPullRequests = new HashSet<>();
+        final Set<ListingExpansionTracker.GroupKey> pendingPrGroups = new HashSet<>();
+        final List<String> prTerms = new ArrayList<>();
 
         In project(Path root) {
             projects.add(SharedProject.local(RepositoryId.newId(), root, root.getFileName().toString(), T));
@@ -170,9 +176,10 @@ class TaskTreeModelTest {
                     pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
                     openFolders, lastActivity, T,
                     issues, jiraGroups, pullRequests, pullRequestDedupWorktrees, problem, filter,
-                    List.of(), List.of(), Optional.empty(),
+                    prTerms, List.of(), Optional.empty(),
                     resumable, pullRequestsBySession, Map.of(), Map.of(),
-                    pendingIssueRoots, pendingJiraGroups, babysit, branches);
+                    pendingIssueRoots, pendingJiraGroups, babysit, branches,
+                    prGroups, pendingAllPullRequests, pendingPrGroups);
         }
     }
 
@@ -1504,5 +1511,105 @@ class TaskTreeModelTest {
 
         ProjectRow row = projectRow(TaskTreeModel.build(in.build()), DRYDOCK);
         assertTrue(section(row, SectionKind.BRANCHES).isEmpty());
+    }
+
+    @Test
+    void prSubgroupsAppearInOrderFollowedByLazyAllFolder() {
+        In in = new In().project(BTRACE);
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        PrGroup ci = new PrGroup("pg-2", "CI", "comp: ci");
+        in.prGroups.put(BTRACE, List.of(
+                new PrGroups.Listing(prof, Optional.empty()),
+                new PrGroups.Listing(ci, Optional.empty())));
+
+        Section prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS)
+                .orElseThrow();
+        assertEquals(3, prs.children().size());
+        PrGroupRow first = assertInstanceOf(PrGroupRow.class, prs.children().get(0));
+        PrGroupRow second = assertInstanceOf(PrGroupRow.class, prs.children().get(1));
+        AllPullRequestsRow all = assertInstanceOf(AllPullRequestsRow.class, prs.children().get(2));
+        assertEquals("Profiling", first.group().name());
+        assertEquals("CI", second.group().name());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), first.children());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), second.children());
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)), all.children());
+
+        in.pendingPrGroups.add(new ListingExpansionTracker.GroupKey(BTRACE, "pg-1"));
+        in.pendingAllPullRequests.add(BTRACE);
+        prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS).orElseThrow();
+        assertEquals(List.of(new TaskNode.Deferred(TaskTreeModel.LOADING_PULL_REQUESTS)),
+                assertInstanceOf(PrGroupRow.class, prs.children().get(0)).children());
+        assertEquals(List.of(new TaskNode.Deferred(TaskTreeModel.LOADING_PULL_REQUESTS)),
+                assertInstanceOf(AllPullRequestsRow.class, prs.children().get(2)).children());
+    }
+
+    @Test
+    void prSubgroupsDeduplicateWorktreesHideDraftsSortNewestFirstAndShowEmptyOrFailed() {
+        In in = new In().project(BTRACE);
+        in.pullRequestDedupWorktrees.put(BTRACE, List.of(
+                linked(Path.of("/wt/checked-out"), "feat/held")));
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        PrGroup empty = new PrGroup("pg-2", "Empty", "comp: none");
+        PrGroup broken = new PrGroup("pg-3", "Broken", "comp: err");
+        in.prGroups.put(BTRACE, List.of(
+                new PrGroups.Listing(prof, Optional.of(new PullRequestListing.Listed(List.of(
+                        new OpenPullRequest(10, "Older", "feat/older", "main", false, Optional.of("a"), Optional.empty()),
+                        new OpenPullRequest(12, "Draft", "feat/draft", "main", true, Optional.of("a"), Optional.empty()),
+                        new OpenPullRequest(13, "Held", "feat/held", "main", false, Optional.of("a"), Optional.empty()),
+                        new OpenPullRequest(15, "Newer", "feat/newer", "main", false, Optional.of("b"), Optional.empty()))))),
+                new PrGroups.Listing(empty, Optional.of(new PullRequestListing.Listed(List.of()))),
+                new PrGroups.Listing(broken, Optional.of(new PullRequestListing.Failed("rate limited")))));
+        in.pullRequests.put(BTRACE, new PullRequestListing.Listed(List.of()));
+
+        Section prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS)
+                .orElseThrow();
+        PrGroupRow profRow = assertInstanceOf(PrGroupRow.class, prs.children().get(0));
+        assertEquals(List.of(15, 10), profRow.children().stream()
+                .map(node -> ((PullRequestRow) node).pullRequest().number()).toList());
+        PrGroupRow emptyRow = assertInstanceOf(PrGroupRow.class, prs.children().get(1));
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NO_PULL_REQUESTS)), emptyRow.children());
+        PrGroupRow brokenRow = assertInstanceOf(PrGroupRow.class, prs.children().get(2));
+        assertEquals(List.of(new TaskNode.ListProblem("PR group \"Broken\": rate limited")), brokenRow.children());
+        AllPullRequestsRow allRow = assertInstanceOf(AllPullRequestsRow.class, prs.children().get(3));
+        assertEquals(List.of(new TaskNode.Placeholder(TaskTreeModel.NO_PULL_REQUESTS)), allRow.children());
+    }
+
+    @Test
+    void searchFilterMatchesPrGroupNameNarrowsRowsAndDropsUnmatchedUnloadedFolders() {
+        In in = new In().project(BTRACE);
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        PrGroup ci = new PrGroup("pg-2", "CI", "comp: ci");
+        in.prGroups.put(BTRACE, List.of(
+                new PrGroups.Listing(prof, Optional.of(new PullRequestListing.Listed(List.of(
+                        new OpenPullRequest(21, "Alloc fix", "fix/alloc", "main", false, Optional.of("jb"), Optional.empty()),
+                        new OpenPullRequest(22, "Other change", "feat/other", "main", false, Optional.of("jb"), Optional.empty()))))),
+                new PrGroups.Listing(ci, Optional.empty())));
+
+        // Matching a PR title keeps only the matching PR and drops unloaded non-matching CI & All.
+        in.filter = "alloc";
+        Section prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS)
+                .orElseThrow();
+        assertEquals(1, prs.children().size());
+        PrGroupRow matched = assertInstanceOf(PrGroupRow.class, prs.children().get(0));
+        assertEquals(List.of(21), matched.children().stream()
+                .map(node -> ((PullRequestRow) node).pullRequest().number()).toList());
+
+        // Matching a subgroup's name keeps the whole subgroup even when unloaded.
+        in.filter = "ci";
+        prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS).orElseThrow();
+        assertEquals(1, prs.children().size());
+        assertEquals("CI", assertInstanceOf(PrGroupRow.class, prs.children().get(0)).group().name());
+
+        // Matching nothing drops the entire project (no unloaded husk survives).
+        in.filter = "nothing-matches";
+        assertTrue(projectRoots(TaskTreeModel.build(in.build())).isEmpty());
+
+        // pr: terms match inside PR subgroups.
+        in.filter = "";
+        in.prTerms.add("22");
+        prs = section(projectRow(TaskTreeModel.build(in.build()), BTRACE), SectionKind.PULL_REQUESTS).orElseThrow();
+        assertEquals(1, prs.children().size());
+        assertEquals(List.of(22), assertInstanceOf(PrGroupRow.class, prs.children().get(0)).children().stream()
+                .map(node -> ((PullRequestRow) node).pullRequest().number()).toList());
     }
 }

@@ -780,4 +780,36 @@ class TaskMenuTest {
         assertTrue(afterStop.stream().noneMatch(section -> section.contains(TaskMenu.Item.STOP_BABYSITTING)
                 || section.contains(TaskMenu.Item.BABYSIT_PR)));
     }
+
+    @Test
+    void prSubgroupMenuEntriesFollowPullRequestsEnabledAndRowKind() {
+        TaskMenu.MenuFacts prsEnabled = new TaskMenu.MenuFacts(false, false, true, false, false,
+                List.of(), List.of(), List.of(), null, null, null);
+        TaskNode.ProjectRow project = new TaskNode.ProjectRow(
+                SharedProject.local(RepositoryId.newId(), ROOT, "profiling-backend", NOW),
+                false, true, List.of(), List.of(), 0);
+        TaskNode.Section prSection = new TaskNode.Section(TaskNode.SectionKind.PULL_REQUESTS,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.PrGroupRow prGroup = new TaskNode.PrGroupRow(ROOT, new PrGroup("pg-1", "Profiling", "comp: profiling"),
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.AllPullRequestsRow allPrs = new TaskNode.AllPullRequestsRow(ROOT,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.ADD_PR_GROUP,
+                TaskMenu.Item.REPOSITORY_SETTINGS)),
+                TaskMenu.sections(prSection, List.of(prSection), prsEnabled));
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS)),
+                TaskMenu.sections(prSection, List.of(prSection), NO_TRANSFER));
+        assertTrue(TaskMenu.sections(project, List.of(project), prsEnabled).stream()
+                .anyMatch(section -> section.contains(TaskMenu.Item.ADD_PR_GROUP)));
+        assertTrue(TaskMenu.sections(project, List.of(project), NO_TRANSFER).stream()
+                .noneMatch(section -> section.contains(TaskMenu.Item.ADD_PR_GROUP)));
+
+        assertEquals(List.of(
+                List.of(TaskMenu.Item.EDIT_PR_GROUP, TaskMenu.Item.DELETE_PR_GROUP),
+                List.of(TaskMenu.Item.REFRESH)),
+                TaskMenu.sections(prGroup, List.of(prGroup), NO_TRANSFER));
+        assertEquals(List.of(List.of(TaskMenu.Item.REFRESH, TaskMenu.Item.REPOSITORY_SETTINGS)),
+                TaskMenu.sections(allPrs, List.of(allPrs), NO_TRANSFER));
+    }
 }

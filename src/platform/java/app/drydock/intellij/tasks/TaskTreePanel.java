@@ -22,6 +22,7 @@ import app.drydock.intellij.agent.SessionActivityListener;
 import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.projects.SharedProject;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.AllPullRequestsRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -29,6 +30,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.PrGroupRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -401,6 +403,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         @Override
         public void requestJiraGroup(Path root, String groupId) {
             expansions.requestedJiraGroups().add(new ListingExpansionTracker.GroupKey(root, groupId));
+        }
+
+        @Override
+        public void requestAllPullRequests(Path root) {
+            expansions.requestedAllPullRequests().add(root);
+        }
+
+        @Override
+        public void requestPrGroup(Path root, String groupId) {
+            expansions.requestedPrGroups().add(new ListingExpansionTracker.GroupKey(root, groupId));
         }
 
         @Override
@@ -947,6 +959,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         AnAction repositorySettings = repositorySettingsAction(node -> node instanceof IssueRow
                 || node instanceof JiraIssueRow || node instanceof ProjectRow
                 || node instanceof GitHubNode
+                || node instanceof AllPullRequestsRow
                 || node instanceof Section section
                         && (section.kind() == SectionKind.ISSUES || section.kind() == SectionKind.PULL_REQUESTS)
                 || node instanceof Ghost);
@@ -1041,6 +1054,13 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         menuActions.put(TaskMenu.Item.ADD_JIRA_GROUP, JiraTreeActions.addGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.EDIT_JIRA_GROUP, JiraTreeActions.editGroup(project, afterJiraGroupChange));
         menuActions.put(TaskMenu.Item.DELETE_JIRA_GROUP, JiraTreeActions.deleteGroup(project, afterJiraGroupChange));
+        Consumer<Path> afterPrGroupChange = root -> {
+            inputs.invalidatePullRequests(root);
+            requestRebuild(false);
+        };
+        menuActions.put(TaskMenu.Item.ADD_PR_GROUP, PrTreeActions.addGroup(project, afterPrGroupChange));
+        menuActions.put(TaskMenu.Item.EDIT_PR_GROUP, PrTreeActions.editGroup(project, afterPrGroupChange));
+        menuActions.put(TaskMenu.Item.DELETE_PR_GROUP, PrTreeActions.deleteGroup(project, afterPrGroupChange));
         menuActions.put(TaskMenu.Item.REFRESH, refresh);
         menuActions.put(TaskMenu.Item.FOCUS_PROJECT, focusProject);
         menuActions.put(TaskMenu.Item.SHOW_TASK, showLinkedAction(ShowKind.TASK, "Show Task",
@@ -1054,8 +1074,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         // the one registration gesture that creates one.
         AnAction addRemoteRepository = addRemoteRepositoryAction();
         TreeMenu treeMenu = new TreeMenu(menuActions, addRemoteRepository, delayedTaskActions,
-                newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, () -> displayedNodes,
-                () -> displayedTasks, TaskTreePanel::watchedSnapshot, GraphActions.startAction(project, inbox));
+                newDelayedTask, refreshTasksAction, JiraTreeActions::jiraEnabled, PrTreeActions::pullRequestsEnabled,
+                () -> displayedNodes, () -> displayedTasks, TaskTreePanel::watchedSnapshot,
+                GraphActions.startAction(project, inbox));
         popups = new BackgroundPopupDispatcher(project, treeMenu, "Drydock.TaskTree.Popup");
         Disposer.register(this, popups);
         popups.register(tree, treeScroll.getViewport());
@@ -1223,6 +1244,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                 TaskMenu.Item.IMPLEMENT, TaskMenu.Item.TRIAGE,
                 TaskMenu.Item.REPOSITORY_SETTINGS,
                 TaskMenu.Item.ADD_JIRA_GROUP, TaskMenu.Item.EDIT_JIRA_GROUP, TaskMenu.Item.DELETE_JIRA_GROUP,
+                TaskMenu.Item.ADD_PR_GROUP, TaskMenu.Item.EDIT_PR_GROUP, TaskMenu.Item.DELETE_PR_GROUP,
                 TaskMenu.Item.REFRESH, TaskMenu.Item.FOCUS_PROJECT);
     }
 
@@ -1256,6 +1278,12 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         /** Records the user's intent to see one Jira group's listing. */
         void requestJiraGroup(Path root, String groupId);
 
+        /** Records the user's intent to see the built-in {@code All} PR folder's listing. */
+        void requestAllPullRequests(Path root);
+
+        /** Records the user's intent to see one PR subgroup's listing. */
+        void requestPrGroup(Path root, String groupId);
+
         /** Schedules one rebuild; {@code changedWorktrees} re-lists worktrees. */
         void requestRebuild(boolean changedWorktrees);
 
@@ -1282,110 +1310,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         };
     }
 
-    /**
-     * One refresh gesture, two scopes. From the toolbar — or the project
-     * row's context menu, which names a whole project — it is the user
-     * saying "show me now", so the cached GitHub listings (issues, pull
-     * requests) are dropped too, and the delayed-task store is asked for a
-     * fresh re-read (its refusal is its own balloon), not just the worktree
-     * scan. From an
-     * issues node's own context menu it re-reads only that project's
-     * listing(s): the GitHub node its GitHub listing, the Jira node every
-     * group it shows, a Jira group its own query. The refresh records the
-     * fetch intent it needs, so a refresh of a not-yet-loaded node loads
-     * it instead of staying unloaded. A node with no root above it — or no
-     * listing of its own — fetches nothing rather than silently broadening
-     * to a global fetch. Pure dispatch over {@code target}'s effects; EDT.
-     */
+    /** Pure refresh dispatch over {@code target}'s effects; EDT (see {@link TaskTreeRefresh#dispatch}). */
     static void refresh(RefreshTarget target, boolean fromContextMenu, TaskNode node, Path root) {
-        if (!fromContextMenu) {
-            target.invalidateAll();
-            target.refreshTasks();
-            target.requestRebuild(true);
-            return;
-        }
-        // A node with no project above it has no listing to scope to; fetch
-        // nothing rather than silently broadening to a global fetch.
-        if (root == null) {
-            return;
-        }
-        if (node instanceof ProjectRow) {
-            // The project row's menu entry names a whole project: the
-            // toolbar's scope.
-            target.invalidateAll();
-            target.refreshTasks();
-            target.requestRebuild(true);
-            return;
-        }
-        if (node instanceof TaskNode.JiraGroupRow group) {
-            // A group's refresh re-queries its project's Jira groups and
-            // records the group's fetch intent, so a group that is visible
-            // but not yet fetched actually loads instead of staying unloaded.
-            target.invalidateJiraIssues(root);
-            target.requestJiraGroup(root, group.group().id());
-            target.requestRebuild(false);
-            return;
-        }
-        if (node instanceof GitHubNode) {
-            target.invalidateIssues(root);
-            target.requestGitHubIssues(root);
-            target.requestRebuild(false);
-            return;
-        }
-        if (node instanceof JiraNode) {
-            target.invalidateJiraIssues(root);
-            for (String groupId : jiraGroupIdsUnder(node)) {
-                target.requestJiraGroup(root, groupId);
-            }
-            target.requestRebuild(false);
-            return;
-        }
-        if (!(node instanceof Section section)) {
-            // Ghosts and every non-listing row have nothing to re-fetch; a
-            // stray dispatch must not turn into a global fetch.
-            return;
-        }
-        switch (section.kind()) {
-            case ISSUES -> {
-                target.invalidateIssues(root);
-                target.invalidateJiraIssues(root);
-                // The section's GitHub node and every group it shows are
-                // what "refresh" means here: fetch them, even if none of
-                // them was ever opened.
-                target.requestGitHubIssues(root);
-                for (String groupId : jiraGroupIdsUnder(node)) {
-                    target.requestJiraGroup(root, groupId);
-                }
-                target.requestRebuild(false);
-            }
-            case PULL_REQUESTS -> {
-                target.invalidatePullRequests(root);
-                target.requestPullRequests(root);
-                target.requestRebuild(false);
-            }
-            // Sessions/worktrees sections have no listing to scope to; the
-            // menu never offers Refresh on them, and a stray dispatch must
-            // not turn into a global fetch.
-            default -> {
-            }
-        }
-    }
-
-    /** The ids of the Jira groups displayed under {@code node} (a section or the Jira node). */
-    private static List<String> jiraGroupIdsUnder(TaskNode node) {
-        List<String> ids = new ArrayList<>();
-        collectJiraGroupIds(node, ids);
-        return ids;
-    }
-
-    private static void collectJiraGroupIds(TaskNode node, List<String> ids) {
-        switch (node) {
-            case JiraGroupRow group -> ids.add(group.group().id());
-            case Section section -> section.children().forEach(child -> collectJiraGroupIds(child, ids));
-            case JiraNode jira -> jira.children().forEach(child -> collectJiraGroupIds(child, ids));
-            default -> {
-            }
-        }
+        TaskTreeRefresh.dispatch(target, fromContextMenu, node, root);
     }
 
     /**
@@ -1405,6 +1332,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
         private final AnAction refreshTasksAction;
         /** Whether a project root's Jira connection is enabled; it canonicalizes the root (filesystem IO). */
         private final Predicate<Path> jiraEnabled;
+        /** Whether a project root's GitHub pull-request listing is enabled; canonicalizes the root (filesystem IO). */
+        private final Predicate<Path> pullRequestsEnabled;
         /** The tree's current nodes, its task layer and the task service's cached snapshot,
          * for the cross-row links. */
         private final Supplier<List<TaskNode>> displayed;
@@ -1418,6 +1347,16 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                  AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
                  Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
                  Supplier<WatchedSnapshot> watched, @Nullable AnAction startGraph) {
+            this(actions, addRemoteRepository, delayedTaskActions, newDelayedTask, refreshTasksAction,
+                    jiraEnabled, root -> false, displayed, tasks, watched, startGraph);
+        }
+
+        TreeMenu(Map<TaskMenu.Item, AnAction> actions, AnAction addRemoteRepository,
+                 AnAction[] delayedTaskActions,
+                 AnAction newDelayedTask, AnAction refreshTasksAction, Predicate<Path> jiraEnabled,
+                 Predicate<Path> pullRequestsEnabled,
+                 Supplier<List<TaskNode>> displayed, Supplier<TaskLayer> tasks,
+                 Supplier<WatchedSnapshot> watched, @Nullable AnAction startGraph) {
             this.startGraph = startGraph;
             this.actions = actions;
             this.addRemoteRepository = addRemoteRepository;
@@ -1425,6 +1364,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             this.newDelayedTask = newDelayedTask;
             this.refreshTasksAction = refreshTasksAction;
             this.jiraEnabled = jiraEnabled;
+            this.pullRequestsEnabled = pullRequestsEnabled;
             this.displayed = displayed;
             this.tasks = tasks;
             this.watched = watched;
@@ -1471,7 +1411,9 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // TaskMenu skips an Item without an action.
             return TaskActions.withRemoteReveal(e.getData(SELECTED_NODE),
                     TaskMenu.group(e.getData(SELECTED_NODE), selection == null ? List.of() : selection, this.actions,
-                    root != null && jiraEnabled.test(root), displayed.get(), tasks.get(), watched.get())
+                    root != null && jiraEnabled.test(root),
+                    root != null && pullRequestsEnabled.test(root),
+                    displayed.get(), tasks.get(), watched.get())
                             .getChildActionsOrStubs());
         }
     }
@@ -2055,6 +1997,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
                     Set.copyOf(expansions.requestedGitHubIssues()),
                     Set.copyOf(expansions.requestedJiraGroups()),
                     Set.copyOf(expansions.requested(SectionKind.PULL_REQUESTS)),
+                    Set.copyOf(expansions.requestedAllPullRequests()),
+                    Set.copyOf(expansions.requestedPrGroups()),
                     Set.copyOf(expansions.requested(SectionKind.BRANCHES)),
                     new TaskTreeInputs.ListingSearch(terms.pullRequestSearchQuery(), terms.issueSearchQuery(),
                             terms.pullRequestNumbers()));
@@ -2062,6 +2006,7 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             // group, an unregistered project or a disabled connection stops being
             // remembered as open. A failed gather never gets here and forgets nothing.
             expansions.retainDefinedJiraGroups(gathered.jiraGroupsByMainRoot());
+            expansions.retainDefinedPrGroups(gathered.prGroupsByMainRoot());
             List<TaskNode> nodes = TaskTreeModel.build(gathered);
             // T17a: derive linked task rows once from this unscoped base model;
             // the inbox and item-search references must see the same snapshot and PR index.
@@ -2328,6 +2273,11 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case JiraGroupRow group -> root != null && expandsIssuesNode(
                     expansions.requestedJiraGroups().contains(
                             new ListingExpansionTracker.GroupKey(root, group.group().id())));
+            case PrGroupRow group -> root != null
+                    && expansions.requestedPrGroups().contains(
+                            new ListingExpansionTracker.GroupKey(root, group.group().id()));
+            case AllPullRequestsRow ignored -> root != null
+                    && expansions.requestedAllPullRequests().contains(root);
             default -> false;
         };
         if (expanded) {
@@ -2373,6 +2323,8 @@ public final class TaskTreePanel extends SimpleToolWindowPanel implements Dispos
             case WorktreeGroup group -> group.tasks();
             case TaskRow row -> row.babysitters();
             case JiraGroupRow group -> group.children();
+            case PrGroupRow group -> group.children();
+            case AllPullRequestsRow all -> all.children();
             case GitHubNode github -> github.children();
             case JiraNode jira -> jira.children();
             default -> List.of();
