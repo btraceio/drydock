@@ -638,6 +638,16 @@ class TaskTreePanelTargetTest {
         }
 
         @Override
+        public void requestAllPullRequests(Path root) {
+            calls.add("allPullRequests:" + root);
+        }
+
+        @Override
+        public void requestPrGroup(Path root, String groupId) {
+            calls.add("prGroup:" + root + ":" + groupId);
+        }
+
+        @Override
         public void requestRebuild(boolean changedWorktrees) {
             calls.add("rebuild:" + changedWorktrees);
         }
@@ -1399,5 +1409,97 @@ class TaskTreePanelTargetTest {
         }
         tracker.retainDefinedJiraGroups(defined);
         assertEquals(definedKeys, tracker.requestedJiraGroups());
+    }
+
+    @Test
+    void groupedPullRequestsStayStrictlyLazyAndForgetDescendantsOnCollapse() {
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        PrGroup ci = new PrGroup("pg-2", "CI", "comp: ci");
+        TaskNode.PrGroupRow profRow = new TaskNode.PrGroupRow(REGISTERED_ROOT, prof,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.PrGroupRow ciRow = new TaskNode.PrGroupRow(REGISTERED_ROOT, ci,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.AllPullRequestsRow allRow = new TaskNode.AllPullRequestsRow(REGISTERED_ROOT,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        Section prSection = new Section(SectionKind.PULL_REQUESTS, List.of(profRow, ciRow, allRow));
+        ProjectRow project = new ProjectRow(
+                SharedProject.local(RepositoryId.newId(), REGISTERED_ROOT, "repo", Instant.EPOCH),
+                false, true, List.of(prSection), List.of(), 0);
+        DefaultMutableTreeNode root = modelTree(project);
+
+        List<Boolean> rebuilds = new ArrayList<>();
+        ListingExpansionTracker tracker = new ListingExpansionTracker(
+                changed -> rebuilds.add(changed), TaskTreePanel::projectRootOf);
+
+        // Expanding Pull Requests in grouped mode records UI state only — zero fetch.
+        expand(tracker, pathAt(root, 0, 0));
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requested(SectionKind.PULL_REQUESTS));
+        assertTrue(rebuilds.isEmpty(), "expanding grouped Pull Requests must not fetch");
+
+        // Expanding a PR subgroup and All each trigger one rebuild.
+        expand(tracker, pathAt(root, 0, 0, 0));
+        expand(tracker, pathAt(root, 0, 0, 2));
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "pg-1")),
+                tracker.requestedPrGroups());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedAllPullRequests());
+        assertEquals(List.of(Boolean.FALSE, Boolean.FALSE), rebuilds);
+
+        // Restoration re-expands section, opened subgroup, and opened All — not closed ciRow.
+        List<TreePath> restored = walk(root, tracker);
+        assertTrue(restored.contains(pathAt(root, 0, 0)));
+        assertTrue(restored.contains(pathAt(root, 0, 0, 0)));
+        assertFalse(restored.contains(pathAt(root, 0, 0, 1)));
+        assertTrue(restored.contains(pathAt(root, 0, 0, 2)));
+
+        // Collapsing Pull Requests forgets both subgroup and All expansion records.
+        collapse(tracker, pathAt(root, 0, 0));
+        assertTrue(tracker.requested(SectionKind.PULL_REQUESTS).isEmpty());
+        assertTrue(tracker.requestedPrGroups().isEmpty());
+        assertTrue(tracker.requestedAllPullRequests().isEmpty());
+
+        // Pruning forgets removed subgroups and clears All when no subgroups remain.
+        expand(tracker, pathAt(root, 0, 0, 0));
+        expand(tracker, pathAt(root, 0, 0, 1));
+        expand(tracker, pathAt(root, 0, 0, 2));
+        tracker.retainDefinedPrGroups(Map.of(REGISTERED_ROOT, List.of(new PrGroups.Listing(prof, Optional.empty()))));
+        assertEquals(Set.of(new ListingExpansionTracker.GroupKey(REGISTERED_ROOT, "pg-1")),
+                tracker.requestedPrGroups());
+        assertEquals(Set.of(REGISTERED_ROOT), tracker.requestedAllPullRequests());
+
+        tracker.retainDefinedPrGroups(Map.of());
+        assertTrue(tracker.requestedPrGroups().isEmpty());
+        assertTrue(tracker.requestedAllPullRequests().isEmpty());
+    }
+
+    @Test
+    void refreshDispatchesForPrSubgroupsAllFolderAndGroupedSection() {
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        PrGroup ci = new PrGroup("pg-2", "CI", "comp: ci");
+        TaskNode.PrGroupRow profRow = new TaskNode.PrGroupRow(REGISTERED_ROOT, prof,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.PrGroupRow ciRow = new TaskNode.PrGroupRow(REGISTERED_ROOT, ci,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.AllPullRequestsRow allRow = new TaskNode.AllPullRequestsRow(REGISTERED_ROOT,
+                List.of(new TaskNode.Placeholder(TaskTreeModel.NOT_LOADED)));
+        Section groupedSection = new Section(SectionKind.PULL_REQUESTS, List.of(profRow, ciRow, allRow));
+
+        RecordingRefresh groupTarget = new RecordingRefresh();
+        TaskTreePanel.refresh(groupTarget, true, profRow, REGISTERED_ROOT);
+        assertEquals(List.of("pullRequests:" + REGISTERED_ROOT,
+                "prGroup:" + REGISTERED_ROOT + ":pg-1", "rebuild:false"), groupTarget.calls);
+
+        RecordingRefresh allTarget = new RecordingRefresh();
+        TaskTreePanel.refresh(allTarget, true, allRow, REGISTERED_ROOT);
+        assertEquals(List.of("pullRequests:" + REGISTERED_ROOT,
+                "allPullRequests:" + REGISTERED_ROOT, "rebuild:false"), allTarget.calls);
+
+        RecordingRefresh sectionTarget = new RecordingRefresh();
+        TaskTreePanel.refresh(sectionTarget, true, groupedSection, REGISTERED_ROOT);
+        assertEquals(List.of("pullRequests:" + REGISTERED_ROOT,
+                "listing:PULL_REQUESTS:" + REGISTERED_ROOT,
+                "allPullRequests:" + REGISTERED_ROOT,
+                "prGroup:" + REGISTERED_ROOT + ":pg-1",
+                "prGroup:" + REGISTERED_ROOT + ":pg-2",
+                "rebuild:false"), sectionTarget.calls);
     }
 }

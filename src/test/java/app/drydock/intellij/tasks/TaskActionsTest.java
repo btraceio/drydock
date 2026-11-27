@@ -244,7 +244,7 @@ class TaskActionsTest {
         // SHOW_* items a menu can offer are all reachable too. The session
         // link lists carry one page per kind, so the split link entries are
         // reachable as well.
-        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, false,
+        TaskMenu.MenuFacts transfer = new TaskMenu.MenuFacts(true, true, true, true, false,
                 List.of("https://github.com/o/r/pull/7"), List.of("https://github.com/o/r/issues/9"),
                 List.of("https://acme.atlassian.net/browse/PROJ-9"),
                 new app.drydock.tasks.TaskNode.DelayedTaskRow(
@@ -282,6 +282,10 @@ class TaskActionsTest {
                         "https://acme.atlassian.net/browse/PROJ-9", List.of(), Optional.of(Instant.EPOCH))),
                 new JiraGroupRow(Path.of("/repo"), new JiraGroup("g-sprint", "Sprint", "project = DRY"),
                         List.of(new Placeholder("No issues"))),
+                new TaskNode.PrGroupRow(Path.of("/repo"), new PrGroup("pg-prof", "Profiling", "comp: profiling"),
+                        List.of(new Placeholder(TaskTreeModel.NO_PULL_REQUESTS))),
+                new TaskNode.AllPullRequestsRow(Path.of("/repo"),
+                        List.of(new Placeholder(TaskTreeModel.NO_PULL_REQUESTS))),
                 worktree,
                 new StaleWorktrees(List.of(worktree)),
                 new WorktreeGroup(Path.of("/wt/fix"), "fix", List.of()),
@@ -291,6 +295,7 @@ class TaskActionsTest {
                         new BranchRef("feature/held", false, Optional.of(Path.of("/wt/held")), false, false),
                         "feature/held"),
                 new Section(SectionKind.ISSUES, List.of(issue(Optional.empty()))),
+                new Section(SectionKind.PULL_REQUESTS, List.of(pullRequest(Optional.empty()))),
                 project(worktree));
         Set<TaskMenu.Item> used = new HashSet<>();
         for (TaskNode shape : shapes) {

@@ -334,6 +334,8 @@ final class TaskLinks {
                         case TaskNode.GitHubNode github -> walk(github.children(), root);
                         case TaskNode.JiraNode jira -> walk(jira.children(), root);
                         case TaskNode.JiraGroupRow group -> walk(group.children(), root);
+                        case TaskNode.PrGroupRow group -> walk(group.children(), root);
+                        case TaskNode.AllPullRequestsRow all -> walk(all.children(), root);
                         default -> {
                         }
                     }
@@ -366,6 +368,8 @@ final class TaskLinks {
                 case TaskNode.GitHubNode github -> collect(github.children(), visit);
                 case TaskNode.JiraNode jira -> collect(jira.children(), visit);
                 case TaskNode.JiraGroupRow group -> collect(group.children(), visit);
+                case TaskNode.PrGroupRow group -> collect(group.children(), visit);
+                case TaskNode.AllPullRequestsRow all -> collect(all.children(), visit);
                 default -> {
                 }
             }

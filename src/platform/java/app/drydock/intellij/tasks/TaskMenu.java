@@ -7,6 +7,7 @@ import app.drydock.intellij.agent.SessionTransfer;
 import app.drydock.tasks.TaskDocument;
 import app.drydock.tasks.TaskMirror;
 import app.drydock.tasks.TaskNode.DelayedTaskRow;
+import app.drydock.intellij.tasks.TaskNode.AllPullRequestsRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
 import app.drydock.intellij.tasks.TaskNode.IdleWorktree;
@@ -14,6 +15,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.PrGroupRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -136,6 +138,12 @@ final class TaskMenu {
         EDIT_JIRA_GROUP,
         /** Delete a Jira group, after confirmation; only a group node offers it. */
         DELETE_JIRA_GROUP,
+        /** Add a user-defined PR subgroup (name + label filter) to the Pull Requests section. */
+        ADD_PR_GROUP,
+        /** Rename a PR subgroup or change its label filter; only a PR subgroup node offers it. */
+        EDIT_PR_GROUP,
+        /** Delete a PR subgroup, after confirmation; only a PR subgroup node offers it. */
+        DELETE_PR_GROUP,
         REFRESH,
         /** On the Sessions node: run Done on every done session of the project at once. */
         CLEANUP_DONE_SESSIONS,
@@ -168,7 +176,8 @@ final class TaskMenu {
      * without a box answers false before any read, so every local menu is
      * the pre-remote list.</p>
      */
-    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+    record MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean pullRequestsEnabled,
+                     boolean mirroredTask,
                      boolean remoteStop,
                      List<String> prUrls, List<String> githubUrls, List<String> jiraUrls,
                      DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
@@ -177,6 +186,15 @@ final class TaskMenu {
             prUrls = List.copyOf(prUrls == null ? List.of() : prUrls);
             githubUrls = List.copyOf(githubUrls == null ? List.of() : githubUrls);
             jiraUrls = List.copyOf(jiraUrls == null ? List.of() : jiraUrls);
+        }
+
+        /** The facts before PR subgroups existed: pull-request subgroup creation not enabled. */
+        MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
+                  boolean remoteStop,
+                  List<String> prUrls, List<String> githubUrls, List<String> jiraUrls,
+                  DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
+            this(transferAvailable, jiraEnabled, false, mirroredTask, remoteStop,
+                    prUrls, githubUrls, jiraUrls, showTask, showPullRequest, showSession);
         }
 
         /** The facts before any cross-row link existed: nothing resolved. */
@@ -191,7 +209,7 @@ final class TaskMenu {
 
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                   boolean remoteStop) {
-            this(transferAvailable, jiraEnabled, mirroredTask, remoteStop,
+            this(transferAvailable, jiraEnabled, false, mirroredTask, remoteStop,
                     List.of(), List.of(), List.of(), null, null, null);
         }
 
@@ -199,7 +217,7 @@ final class TaskMenu {
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                   boolean remoteStop,
                   List<String> prUrls, List<String> githubUrls, List<String> jiraUrls) {
-            this(transferAvailable, jiraEnabled, mirroredTask, remoteStop,
+            this(transferAvailable, jiraEnabled, false, mirroredTask, remoteStop,
                     prUrls, githubUrls, jiraUrls, null, null, null);
         }
 
@@ -207,7 +225,7 @@ final class TaskMenu {
         MenuFacts(boolean transferAvailable, boolean jiraEnabled, boolean mirroredTask,
                   boolean remoteStop,
                   DelayedTaskRow showTask, PullRequestRow showPullRequest, TaskRow showSession) {
-            this(transferAvailable, jiraEnabled, mirroredTask, remoteStop,
+            this(transferAvailable, jiraEnabled, false, mirroredTask, remoteStop,
                     List.of(), List.of(), List.of(), showTask, showPullRequest, showSession);
         }
     }
@@ -255,6 +273,11 @@ final class TaskMenu {
             case JiraGroupRow ignored -> nonEmpty(List.of(
                     List.of(Item.EDIT_JIRA_GROUP, Item.DELETE_JIRA_GROUP),
                     List.of(Item.REFRESH)));
+            case PrGroupRow ignored -> nonEmpty(List.of(
+                    List.of(Item.EDIT_PR_GROUP, Item.DELETE_PR_GROUP),
+                    List.of(Item.REFRESH)));
+            case AllPullRequestsRow ignored -> List.of(
+                    List.of(Item.REFRESH, Item.REPOSITORY_SETTINGS));
             case GitHubNode ignored -> List.of(
                     List.of(Item.TRIAGE_ALL, Item.CANCEL_TRIAGE, Item.RESUME_TRIAGE),
                     List.of(Item.REFRESH, Item.REPOSITORY_SETTINGS));
@@ -289,7 +312,9 @@ final class TaskMenu {
                             ? nonEmpty(List.of(section(Item.REFRESH,
                                     facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null,
                                     Item.REPOSITORY_SETTINGS)))
-                            : List.of(List.of(Item.REFRESH, Item.REPOSITORY_SETTINGS));
+                            : nonEmpty(List.of(section(Item.REFRESH,
+                                    facts.pullRequestsEnabled() ? Item.ADD_PR_GROUP : null,
+                                    Item.REPOSITORY_SETTINGS)));
             case ProjectRow project -> project(project, facts);
             default -> List.of();
         };
@@ -371,7 +396,8 @@ final class TaskMenu {
                 List.of(Item.NEW_TASK, Item.NEW_TASK_IN_MAIN),
                 List.of(Item.OPEN_MAIN_CHECKOUT, Item.FOCUS_PROJECT),
                 section(Item.REFRESH, Item.REPOSITORY_SETTINGS,
-                        facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null),
+                        facts.jiraEnabled() ? Item.ADD_JIRA_GROUP : null,
+                        facts.pullRequestsEnabled() ? Item.ADD_PR_GROUP : null),
                 section(TaskActions.removable(row).isEmpty() ? null : Item.REMOVE_INACTIVE_WORKTREES,
                         Item.REMOVE_FROM_DRYDOCK)));
     }
@@ -432,6 +458,13 @@ final class TaskMenu {
      */
     static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, List<TaskNode> displayed,
                               TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
+        return factsFor(lead, jiraEnabled, false, displayed, tasks, watched);
+    }
+
+    /** Same, also carrying whether the enclosing project's GitHub pull-request listing is enabled. */
+    static MenuFacts factsFor(TaskNode lead, boolean jiraEnabled, boolean pullRequestsEnabled,
+                              List<TaskNode> displayed,
+                              TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
         DelayedTaskRow showTask = null;
         PullRequestRow showPullRequest = null;
         TaskRow showSession = null;
@@ -457,6 +490,7 @@ final class TaskMenu {
                 : TaskMirroring.mirrorsOfSession(taskRow.session().id().toString());
         return new MenuFacts(taskRow != null
                 && SessionTransfer.available(taskRow.session(), taskRow.activity()), jiraEnabled,
+                pullRequestsEnabled,
                 issueUrlOf(lead).flatMap(TaskMirroring::mirroredTask).isPresent(),
                 taskRow != null && TaskActions.remoteStopOffered(taskRow),
                 taskRow == null ? List.of() : prUrlsOf(taskRow),
@@ -558,7 +592,14 @@ final class TaskMenu {
     static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
                                     boolean jiraEnabled, List<TaskNode> displayed,
                                     TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
-        MenuFacts facts = factsFor(lead, jiraEnabled, displayed, tasks, watched);
+        return group(lead, selection, actions, jiraEnabled, false, displayed, tasks, watched);
+    }
+
+    /** Same popup, also carrying whether the enclosing project's GitHub pull-request listing is enabled. */
+    static DefaultActionGroup group(TaskNode lead, List<TaskNode> selection, Map<Item, AnAction> actions,
+                                    boolean jiraEnabled, boolean pullRequestsEnabled, List<TaskNode> displayed,
+                                    TaskTreePanel.TaskLayer tasks, WatchedSnapshot watched) {
+        MenuFacts facts = factsFor(lead, jiraEnabled, pullRequestsEnabled, displayed, tasks, watched);
         DefaultActionGroup menu = new DefaultActionGroup();
         boolean separated = false;
         for (List<Item> section : sections(lead, selection, facts)) {

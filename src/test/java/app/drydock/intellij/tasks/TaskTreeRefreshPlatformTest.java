@@ -89,6 +89,16 @@ public class TaskTreeRefreshPlatformTest extends BasePlatformTestCase {
         }
 
         @Override
+        public void requestAllPullRequests(Path root) {
+            calls.add("allPullRequests:" + root);
+        }
+
+        @Override
+        public void requestPrGroup(Path root, String groupId) {
+            calls.add("prGroup:" + root + ":" + groupId);
+        }
+
+        @Override
         public void requestRebuild(boolean changedWorktrees) {
             calls.add("rebuild:" + changedWorktrees);
         }

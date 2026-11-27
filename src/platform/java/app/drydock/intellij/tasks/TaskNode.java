@@ -164,6 +164,39 @@ public sealed interface TaskNode {
         }
     }
 
+    /**
+     * One user-defined pull-request subgroup: a folder under the project's
+     * Pull Requests section whose label filter scopes its rows. Its children
+     * are PR rows, or a single not-loaded, loading, problem or empty-state
+     * child; a subgroup whose search filter matches nothing inside is omitted.
+     * A subgroup's listing is fetched only when the user opens it.
+     */
+    record PrGroupRow(Path mainRoot, PrGroup group, List<TaskNode> children) implements TaskNode {
+        public PrGroupRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            Objects.requireNonNull(group, "group");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("a PR group must not be empty");
+            }
+        }
+    }
+
+    /**
+     * The built-in {@code All} folder under Pull Requests when a project
+     * defines at least one PR subgroup. Strictly lazy: its unfiltered listing
+     * is fetched only when the user opens the folder.
+     */
+    record AllPullRequestsRow(Path mainRoot, List<TaskNode> children) implements TaskNode {
+        public AllPullRequestsRow {
+            Objects.requireNonNull(mainRoot, "mainRoot");
+            children = List.copyOf(children);
+            if (children.isEmpty()) {
+                throw new IllegalArgumentException("an All pull-requests node must not be empty");
+            }
+        }
+    }
+
     /** A worktree with more than one task: {@code ⑂ <branch>} with its tasks beneath. */
     record WorktreeGroup(Path worktree, String branch, List<TaskRow> tasks) implements TaskNode {
         public WorktreeGroup {

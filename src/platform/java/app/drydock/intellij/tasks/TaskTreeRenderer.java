@@ -14,6 +14,7 @@ import app.drydock.git.PrCheckoutService;
 import app.drydock.intellij.DrydockPluginService;
 import app.drydock.intellij.agent.AgentStripText;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.AllPullRequestsRow;
 import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GitHubNode;
@@ -22,6 +23,7 @@ import app.drydock.intellij.tasks.TaskNode.IssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraGroupRow;
 import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
+import app.drydock.intellij.tasks.TaskNode.PrGroupRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
 import app.drydock.intellij.tasks.TaskNode.Section;
@@ -167,12 +169,25 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
                     append(deferred.message(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
             case TaskNode.Placeholder placeholder ->
                     append(placeholder.text(), SimpleTextAttributes.GRAYED_ATTRIBUTES);
-            case TaskNode.JiraGroupRow group -> {
+            case JiraGroupRow group -> {
                 setIcon(AllIcons.Nodes.Folder);
                 append(group.group().name(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
                 issueCountBadge(group).ifPresent(badge ->
                         append("  " + badge, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
                 setToolTipText("Jira group · " + group.group().jql());
+            }
+            case PrGroupRow group -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append(group.group().name(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                pullRequestCountBadge(group).ifPresent(badge ->
+                        append("  " + badge, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
+                setToolTipText("PR group · " + group.group().filter());
+            }
+            case AllPullRequestsRow all -> {
+                setIcon(AllIcons.Nodes.Folder);
+                append("All", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                allPullRequestsCountBadge(all).ifPresent(badge ->
+                        append("  " + badge, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES));
             }
             case GitHubNode github -> {
                 setIcon(AllIcons.Vcs.Vendors.Github);
@@ -280,7 +295,9 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             case IssueRow ignored -> Optional.of(AllIcons.Vcs.Vendors.Github);
             case TaskNode.JiraIssueRow ignored -> Optional.of(JIRA_ICON);
             // A group is a folder of rows, and its rows carry the source marks.
-            case TaskNode.JiraGroupRow ignored -> Optional.empty();
+            case JiraGroupRow ignored -> Optional.empty();
+            case PrGroupRow ignored -> Optional.empty();
+            case AllPullRequestsRow ignored -> Optional.empty();
             default -> Optional.empty();
         };
     }
@@ -403,6 +420,24 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return Optional.of(issues + (issues == 1 ? " issue" : " issues"));
     }
 
+    /** Pure. A PR subgroup's PR count, shown only once its listing has answered. */
+    static Optional<String> pullRequestCountBadge(PrGroupRow group) {
+        return pullRequestFolderBadge(group.children());
+    }
+
+    /** Pure. The built-in {@code All} PR folder's count, shown only once its listing has answered. */
+    static Optional<String> allPullRequestsCountBadge(AllPullRequestsRow all) {
+        return pullRequestFolderBadge(all.children());
+    }
+
+    private static Optional<String> pullRequestFolderBadge(List<TaskNode> children) {
+        if (!answeredPullRequestListing(children)) {
+            return Optional.empty();
+        }
+        long prs = children.stream().filter(PullRequestRow.class::isInstance).count();
+        return Optional.of(prs + (prs == 1 ? " PR" : " PRs"));
+    }
+
     /**
      * Whether {@code children} is a listing's final answer: all rows of the
      * given type, or exactly the {@link TaskTreeModel#NO_ISSUES} placeholder. A "Not loaded",
@@ -412,6 +447,12 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
         return children.stream().allMatch(rowType::isInstance)
                 || children.size() == 1 && children.get(0) instanceof TaskNode.Placeholder placeholder
                     && TaskTreeModel.NO_ISSUES.equals(placeholder.text());
+    }
+
+    private static boolean answeredPullRequestListing(List<TaskNode> children) {
+        return children.stream().allMatch(PullRequestRow.class::isInstance)
+                || children.size() == 1 && children.get(0) instanceof TaskNode.Placeholder placeholder
+                    && TaskTreeModel.NO_PULL_REQUESTS.equals(placeholder.text());
     }
 
     /**
@@ -428,6 +469,19 @@ final class TaskTreeRenderer extends ColoredTreeCellRenderer {
             int count = section.children().stream().mapToInt(TaskTreeRenderer::issueCount).sum();
             boolean problem = section.children().stream().anyMatch(TaskTreeRenderer::issuesFailed);
             return count == 0 && problem ? Optional.empty() : Optional.of(String.valueOf(count));
+        }
+        if (section.kind() == SectionKind.PULL_REQUESTS
+                && section.children().stream().anyMatch(child ->
+                        child instanceof PrGroupRow || child instanceof AllPullRequestsRow)) {
+            // In grouped mode, report All's count when All has answered, and
+            // omit the badge otherwise so overlapping subgroups are never double-counted.
+            return section.children().stream()
+                    .filter(AllPullRequestsRow.class::isInstance)
+                    .map(AllPullRequestsRow.class::cast)
+                    .findFirst()
+                    .filter(all -> answeredPullRequestListing(all.children()))
+                    .map(all -> String.valueOf(all.children().stream()
+                            .filter(PullRequestRow.class::isInstance).count()));
         }
         boolean loading = section.children().stream().anyMatch(child ->
                 child instanceof TaskNode.Deferred

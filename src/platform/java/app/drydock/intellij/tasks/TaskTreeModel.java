@@ -18,6 +18,7 @@ import app.drydock.git.WorktreeService.Worktree;
 import app.drydock.intellij.agent.SessionCommands;
 import app.drydock.intellij.tasks.TaskNode.BranchRow;
 import app.drydock.intellij.tasks.TaskNode.AddCurrentProject;
+import app.drydock.intellij.tasks.TaskNode.AllPullRequestsRow;
 import app.drydock.intellij.tasks.TaskNode.Deferred;
 import app.drydock.intellij.tasks.TaskNode.Ghost;
 import app.drydock.intellij.tasks.TaskNode.GhostSource;
@@ -29,6 +30,7 @@ import app.drydock.intellij.tasks.TaskNode.JiraIssueRow;
 import app.drydock.intellij.tasks.TaskNode.JiraNode;
 import app.drydock.intellij.tasks.TaskNode.ListProblem;
 import app.drydock.intellij.tasks.TaskNode.Placeholder;
+import app.drydock.intellij.tasks.TaskNode.PrGroupRow;
 import app.drydock.intellij.tasks.TaskNode.ProjectRow;
 import app.drydock.review.RepositoryPullRequests;
 import app.drydock.intellij.tasks.TaskNode.PullRequestRow;
@@ -96,6 +98,12 @@ public final class TaskTreeModel {
     /** The one child of a listing that answered with nothing: the renderer's "answered" discriminator. */
     static final String NO_ISSUES = "No issues";
 
+    /** The child of an opened PR folder whose first answer is still running. */
+    static final String LOADING_PULL_REQUESTS = "Loading pull requests…";
+
+    /** The one child of a PR folder listing that answered with nothing: the renderer's "answered" discriminator. */
+    static final String NO_PULL_REQUESTS = "No pull requests";
+
     private TaskTreeModel() {
     }
 
@@ -140,7 +148,10 @@ public final class TaskTreeModel {
                          Set<Path> pendingIssueRoots,
                          Set<ListingExpansionTracker.GroupKey> pendingJiraGroups,
                          Map<ManagedSessionId, SessionBabysit> babysitBySession,
-                         Map<Path, BranchCatalog> branchesByMainRoot) {
+                         Map<Path, BranchCatalog> branchesByMainRoot,
+                         Map<Path, List<PrGroups.Listing>> prGroupsByMainRoot,
+                         Set<Path> pendingAllPullRequests,
+                         Set<ListingExpansionTracker.GroupKey> pendingPrGroups) {
         public Inputs {
             projects = List.copyOf(projects);
             sessions = List.copyOf(sessions);
@@ -182,6 +193,45 @@ public final class TaskTreeModel {
             pendingJiraGroups = Set.copyOf(pendingJiraGroups);
             babysitBySession = Map.copyOf(babysitBySession);
             branchesByMainRoot = Map.copyOf(branchesByMainRoot);
+            prGroupsByMainRoot = Map.copyOf(prGroupsByMainRoot);
+            prGroupsByMainRoot.values().forEach(children -> children.forEach(Objects::requireNonNull));
+            pendingAllPullRequests = Set.copyOf(pendingAllPullRequests);
+            pendingPrGroups = Set.copyOf(pendingPrGroups);
+        }
+
+        /** The shape before PR subgroups existed: none defined, none pending. */
+        public Inputs(List<SharedProject> projects, List<ManagedAgentSession> sessions,
+                      Map<Path, List<Worktree>> worktreesByMainRoot, Map<Path, Path> mainRootOf,
+                      Optional<Path> currentMainRoot, Optional<Path> currentWorkingRoot,
+                      Map<ManagedSessionId, Optional<SessionActivity>> activity, Set<ManagedSessionId> running,
+                      Map<ManagedSessionId, Host> hosts, Set<Path> missingFolders,
+                      Map<RepositoryId, Path> recordedRoots,
+                      Set<Path> worktreeContainers, Set<Path> pullRequestContainers,
+                      Set<Path> githubIssueRoots, Set<Path> githubGhostRoots,
+                      Set<Path> jiraRoots, Set<Path> jiraGhostRoots,
+                      Set<Path> openFolders, Map<Path, Instant> lastActivity, Instant now,
+                      Map<Path, IssueListing> issuesByMainRoot,
+                      Map<Path, List<JiraGroups.Listing>> jiraGroupsByMainRoot,
+                      Map<Path, PullRequestListing> pullRequestsByMainRoot,
+                      Map<Path, List<Worktree>> pullRequestDedupWorktrees,
+                      Optional<String> listProblem, String filter,
+                      List<String> prTerms, List<String> issueTerms, Optional<Path> focusRoot,
+                      Map<ManagedSessionId, Boolean> resumable,
+                      Map<ManagedSessionId, BranchPullRequest> pullRequestsBySession,
+                      Map<ManagedSessionId, SearchRefs.ItemRefs> sessionRefs,
+                      Map<Path, List<SearchRefs.LooseTaskRefs>> looseTaskRefsByMainRoot,
+                      Set<Path> pendingIssueRoots,
+                      Set<ListingExpansionTracker.GroupKey> pendingJiraGroups,
+                      Map<ManagedSessionId, SessionBabysit> babysitBySession,
+                      Map<Path, BranchCatalog> branchesByMainRoot) {
+            this(projects, sessions, worktreesByMainRoot, mainRootOf, currentMainRoot, currentWorkingRoot,
+                    activity, running, hosts, missingFolders, recordedRoots, worktreeContainers,
+                    pullRequestContainers, githubIssueRoots, githubGhostRoots, jiraRoots, jiraGhostRoots,
+                    openFolders, lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot,
+                    pullRequestsByMainRoot, pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms,
+                    focusRoot, resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot,
+                    Map.of(), Set.of(), Set.of());
         }
 
         /** The shape before sessions carried their babysitting engagement: none known. */
@@ -252,7 +302,8 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessionRefs, looseTaskRefsByMainRoot,
-                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot,
+                    prGroupsByMainRoot, pendingAllPullRequests, pendingPrGroups);
         }
 
         /** These inputs with item references available to the scoped search matcher. Pure. */
@@ -264,7 +315,8 @@ public final class TaskTreeModel {
                     lastActivity, now, issuesByMainRoot, jiraGroupsByMainRoot, pullRequestsByMainRoot,
                     pullRequestDedupWorktrees, listProblem, filter, prTerms, issueTerms, focusRoot,
                     resumable, pullRequestsBySession, sessions, looseTasks,
-                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot);
+                    pendingIssueRoots, pendingJiraGroups, babysitBySession, branchesByMainRoot,
+                    prGroupsByMainRoot, pendingAllPullRequests, pendingPrGroups);
         }
 
         /** The shape before sessions carried their branch's pull request: none known, no listing pending. */
@@ -646,9 +698,13 @@ public final class TaskTreeModel {
         // configured to show is absent.
         issueChildren(in, main, itemFilter).ifPresent(issueChildren ->
                 children.add(new Section(SectionKind.ISSUES, issueChildren)));
-        if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
+        List<PrGroups.Listing> prGroups = in.prGroupsByMainRoot().getOrDefault(main, List.of());
+        if (!prGroups.isEmpty()) {
+            groupedPullRequestChildren(in, main, prGroups, itemFilter).ifPresent(pullRequestChildren ->
+                    children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
+        } else if (in.pullRequestContainers().contains(main) && !in.pullRequestsByMainRoot().containsKey(main)) {
             children.add(new Section(SectionKind.PULL_REQUESTS,
-                    List.of(new TaskNode.Deferred("Loading pull requests…"))));
+                    List.of(new TaskNode.Deferred(LOADING_PULL_REQUESTS))));
         } else {
             pullRequestChildren(in, main, itemFilter).ifPresent(pullRequestChildren ->
                     children.add(new Section(SectionKind.PULL_REQUESTS, pullRequestChildren)));
@@ -685,6 +741,8 @@ public final class TaskTreeModel {
                 case GitHubNode github -> github.children();
                 case JiraNode jira -> jira.children();
                 case JiraGroupRow group -> group.children();
+                case PrGroupRow group -> group.children();
+                case AllPullRequestsRow all -> all.children();
                 case WorktreeGroup group -> group.tasks();
                 case TaskRow row -> row.babysitters();
                 case StaleWorktrees stale -> stale.worktrees();
@@ -731,6 +789,107 @@ public final class TaskTreeModel {
             case PullRequestListing.Unsupported ignored -> Optional.empty();
             case null -> Optional.empty();
         };
+    }
+
+    /**
+     * The Pull Requests section children when the project defines at least one
+     * PR subgroup: each subgroup folder in definition order, followed by the
+     * built-in lazy {@code All} folder.
+     */
+    private static Optional<List<TaskNode>> groupedPullRequestChildren(Inputs in, Path main,
+                                                                       List<PrGroups.Listing> groups,
+                                                                       String itemFilter) {
+        List<TaskNode> children = new ArrayList<>();
+        for (PrGroups.Listing listing : groups) {
+            prGroupChildren(in, main, listing, itemFilter).ifPresent(children::add);
+        }
+        allPullRequestsChildren(in, main, itemFilter).ifPresent(children::add);
+        return children.isEmpty() ? Optional.empty() : Optional.of(List.copyOf(children));
+    }
+
+    /**
+     * One PR subgroup folder, or empty when unsupported or when a search
+     * filter leaves it nothing to show. Mirrors {@link #jiraGroupChildren}:
+     * the subgroup's name matching the filter keeps its full listing, a
+     * failure stays visible as diagnostics, and an unloaded/pending subgroup
+     * renders {@link #NOT_LOADED} or {@link #LOADING_PULL_REQUESTS}.
+     */
+    private static Optional<TaskNode> prGroupChildren(Inputs in, Path main, PrGroups.Listing listing,
+                                                      String itemFilter) {
+        boolean groupMatches = itemFilter.isEmpty() || contains(listing.group().name(), itemFilter);
+        List<TaskNode> children = new ArrayList<>();
+        PullRequestListing answer = listing.listing().orElse(null);
+        switch (answer) {
+            case null -> {
+                if (!in.prTerms().isEmpty() || !groupMatches) {
+                    return Optional.empty();
+                }
+                children.add(
+                        in.pendingPrGroups().contains(new ListingExpansionTracker.GroupKey(main, listing.group().id()))
+                                ? new TaskNode.Deferred(LOADING_PULL_REQUESTS) : new TaskNode.Placeholder(NOT_LOADED));
+            }
+            case PullRequestListing.Failed failed ->
+                    children.add(new TaskNode.ListProblem(
+                            "PR group \"" + listing.group().name() + "\": " + failed.message()));
+            case PullRequestListing.Unsupported ignored -> {
+                return Optional.empty();
+            }
+            case PullRequestListing.Listed listed -> RepositoryPullRequests.selectable(
+                            listed.pullRequests(), in.pullRequestDedupWorktrees().getOrDefault(main, List.of()))
+                    .stream()
+                    .filter(pullRequest -> (groupMatches || matches(itemFilter, pullRequest))
+                            && SearchTerms.matchAllPullRequests(in.prTerms(), List.of(refOf(pullRequest))))
+                    .sorted(Comparator.comparingInt(OpenPullRequest::number).reversed())
+                    .map(pullRequest -> (TaskNode) new PullRequestRow(main, pullRequest))
+                    .forEach(children::add);
+        }
+        if (children.isEmpty() && answer instanceof PullRequestListing.Listed) {
+            if (!in.prTerms().isEmpty() || !groupMatches) {
+                return Optional.empty();
+            }
+            children.add(new TaskNode.Placeholder(NO_PULL_REQUESTS));
+        }
+        return Optional.of(new PrGroupRow(main, listing.group(), children));
+    }
+
+    /**
+     * The built-in lazy {@code All} folder shown below PR subgroups: same
+     * open, non-draft, non-checked-out listing as flat mode, fetched only when
+     * the folder itself is opened.
+     */
+    private static Optional<TaskNode> allPullRequestsChildren(Inputs in, Path main, String itemFilter) {
+        boolean nodeMatches = itemFilter.isEmpty() || contains("All", itemFilter);
+        List<TaskNode> children = new ArrayList<>();
+        PullRequestListing answer = in.pullRequestsByMainRoot().get(main);
+        switch (answer) {
+            case null -> {
+                if (!in.prTerms().isEmpty() || !nodeMatches) {
+                    return Optional.empty();
+                }
+                children.add(in.pendingAllPullRequests().contains(main)
+                        ? new TaskNode.Deferred(LOADING_PULL_REQUESTS) : new TaskNode.Placeholder(NOT_LOADED));
+            }
+            case PullRequestListing.Failed failed ->
+                    children.add(new TaskNode.ListProblem("GitHub pull requests: " + failed.message()));
+            case PullRequestListing.Unsupported ignored -> {
+                return Optional.empty();
+            }
+            case PullRequestListing.Listed listed -> RepositoryPullRequests.selectable(
+                            listed.pullRequests(), in.pullRequestDedupWorktrees().getOrDefault(main, List.of()))
+                    .stream()
+                    .filter(pullRequest -> (nodeMatches || matches(itemFilter, pullRequest))
+                            && SearchTerms.matchAllPullRequests(in.prTerms(), List.of(refOf(pullRequest))))
+                    .sorted(Comparator.comparingInt(OpenPullRequest::number).reversed())
+                    .map(pullRequest -> (TaskNode) new PullRequestRow(main, pullRequest))
+                    .forEach(children::add);
+        }
+        if (children.isEmpty() && answer instanceof PullRequestListing.Listed) {
+            if (!in.prTerms().isEmpty() || !nodeMatches) {
+                return Optional.empty();
+            }
+            children.add(new TaskNode.Placeholder(NO_PULL_REQUESTS));
+        }
+        return Optional.of(new AllPullRequestsRow(main, children));
     }
 
     /** The PR's reference for the {@code pr:} terms. Pure. */

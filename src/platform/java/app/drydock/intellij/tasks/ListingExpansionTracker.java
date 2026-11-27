@@ -92,6 +92,15 @@ final class ListingExpansionTracker implements TreeExpansionListener {
      * #retainDefinedJiraGroups}).
      */
     private final Set<GroupKey> jiraGroups = ConcurrentHashMap.newKeySet();
+    /** Main roots whose built-in "All" PR folder the user opened here (fetch trigger in grouped mode). */
+    private final Set<Path> allPullRequests = ConcurrentHashMap.newKeySet();
+    /**
+     * PR subgroups the user opened here, keyed by their project's root and the
+     * group's stable id: the fetch trigger for that subgroup's label query;
+     * pruned to the groups each completed gather still defines ({@link
+     * #retainDefinedPrGroups}).
+     */
+    private final Set<GroupKey> prGroups = ConcurrentHashMap.newKeySet();
     /** True only inside {@link #runProgrammatic}: restoration is not user intent. */
     private volatile boolean programmatic;
 
@@ -131,6 +140,16 @@ final class ListingExpansionTracker implements TreeExpansionListener {
     /** The Jira groups the user opened here, as (main root, group id). */
     Set<GroupKey> requestedJiraGroups() {
         return jiraGroups;
+    }
+
+    /** The main roots whose built-in "All" PR folder the user opened here. */
+    Set<Path> requestedAllPullRequests() {
+        return allPullRequests;
+    }
+
+    /** The PR subgroups the user opened here, as (main root, group id). */
+    Set<GroupKey> requestedPrGroups() {
+        return prGroups;
     }
 
     /** The main roots whose Issues section the user opened here (restore state only). */
@@ -188,6 +207,33 @@ final class ListingExpansionTracker implements TreeExpansionListener {
     }
 
     /**
+     * Every PR subgroup a gather defined, as (main root, group id): the
+     * authority for which recorded PR subgroups can still be shown. Pure.
+     */
+    static Set<GroupKey> definedPrGroups(Map<Path, List<PrGroups.Listing>> prGroupsByMainRoot) {
+        Set<GroupKey> defined = new HashSet<>();
+        prGroupsByMainRoot.forEach((root, listings) -> listings.forEach(
+                listing -> defined.add(new GroupKey(root, listing.group().id()))));
+        return defined;
+    }
+
+    /**
+     * Forgets every recorded PR subgroup (and any grouped-mode {@code All}
+     * open state) that the gather of a completed pass no longer defines.
+     * Call only after a successful gather; a failed pass evicts nothing.
+     */
+    void retainDefinedPrGroups(Map<Path, List<PrGroups.Listing>> prGroupsByMainRoot) {
+        prGroups.retainAll(definedPrGroups(prGroupsByMainRoot));
+        Set<Path> groupedRoots = new HashSet<>();
+        prGroupsByMainRoot.forEach((root, listings) -> {
+            if (!listings.isEmpty()) {
+                groupedRoots.add(root);
+            }
+        });
+        allPullRequests.retainAll(groupedRoots);
+    }
+
+    /**
      * A real expansion event, whatever caused it: records the opened node
      * and — for the parts whose data is fetched lazily — asks for one
      * rebuild, except while the panel restores its own expansions, which
@@ -217,6 +263,18 @@ final class ListingExpansionTracker implements TreeExpansionListener {
                     requester.requestRebuild(false);
                 }
             });
+        } else if (node.getUserObject() instanceof TaskNode.PrGroupRow group) {
+            root.ifPresent(r -> {
+                if (!programmatic && prGroups.add(new GroupKey(r, group.group().id()))) {
+                    requester.requestRebuild(false);
+                }
+            });
+        } else if (node.getUserObject() instanceof TaskNode.AllPullRequestsRow) {
+            root.ifPresent(r -> {
+                if (!programmatic && allPullRequests.add(r)) {
+                    requester.requestRebuild(false);
+                }
+            });
         } else if (node.getUserObject() instanceof TaskNode.JiraNode) {
             // The groups travel with the gather whether or not the node is
             // open; opening it only unfolds them.
@@ -231,8 +289,17 @@ final class ListingExpansionTracker implements TreeExpansionListener {
                 root.ifPresent(issueSections::add);
             }
         } else if (node.getUserObject() instanceof TaskNode.Section section
+                && section.kind() == TaskNode.SectionKind.PULL_REQUESTS) {
+            Path r = root.orElse(null);
+            if (r != null && !programmatic) {
+                boolean grouped = section.children().stream().anyMatch(child ->
+                        child instanceof TaskNode.PrGroupRow || child instanceof TaskNode.AllPullRequestsRow);
+                if (pullRequests.add(r) && !grouped) {
+                    requester.requestRebuild(false);
+                }
+            }
+        } else if (node.getUserObject() instanceof TaskNode.Section section
                 && (section.kind() == TaskNode.SectionKind.WORKTREES
-                    || section.kind() == TaskNode.SectionKind.PULL_REQUESTS
                     || section.kind() == TaskNode.SectionKind.BRANCHES)) {
             Path r = root.orElse(null);
             if (r != null && !programmatic && requested(section.kind()).add(r)) {
@@ -259,6 +326,8 @@ final class ListingExpansionTracker implements TreeExpansionListener {
             case TaskNode.ProjectRow ignored -> closeProject(root);
             case TaskNode.GitHubNode ignored -> githubIssues.remove(root);
             case TaskNode.JiraGroupRow group -> jiraGroups.remove(new GroupKey(root, group.group().id()));
+            case TaskNode.PrGroupRow group -> prGroups.remove(new GroupKey(root, group.group().id()));
+            case TaskNode.AllPullRequestsRow ignored -> allPullRequests.remove(root);
             case TaskNode.JiraNode ignored -> closeJiraUnder(root);
             case TaskNode.Section section -> closeSection(section, root);
             default -> { }
@@ -270,7 +339,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
         projects.remove(root);
         issueSections.remove(root);
         githubIssues.remove(root);
-        pullRequests.remove(root);
+        closePullRequestsUnder(root);
         worktrees.remove(root);
         branches.remove(root);
         closeJiraUnder(root);
@@ -282,7 +351,14 @@ final class ListingExpansionTracker implements TreeExpansionListener {
         jiraGroups.removeIf(key -> key.root().equals(root));
     }
 
-    /** Forgets a closed section's record — and, for Issues, its lazy children's. */
+    /** Forgets the Pull Requests section's open record and every subgroup/All record under it. */
+    private void closePullRequestsUnder(Path root) {
+        pullRequests.remove(root);
+        allPullRequests.remove(root);
+        prGroups.removeIf(key -> key.root().equals(root));
+    }
+
+    /** Forgets a closed section's record — and, for Issues/Pull Requests, their lazy children's. */
     private void closeSection(TaskNode.Section section, Path root) {
         switch (section.kind()) {
             case ISSUES -> {
@@ -290,7 +366,7 @@ final class ListingExpansionTracker implements TreeExpansionListener {
                 githubIssues.remove(root);
                 closeJiraUnder(root);
             }
-            case PULL_REQUESTS -> pullRequests.remove(root);
+            case PULL_REQUESTS -> closePullRequestsUnder(root);
             case WORKTREES -> worktrees.remove(root);
             case BRANCHES -> branches.remove(root);
             default -> { }

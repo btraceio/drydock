@@ -14,6 +14,7 @@ import app.drydock.git.GhCliService;
 import app.drydock.git.GhCliService.BranchPullRequest;
 import app.drydock.git.GhCliService.CiFailure;
 import app.drydock.git.GhCliService.OpenIssue;
+import app.drydock.git.GhCliService.OpenPullRequest;
 import app.drydock.git.GhCliService.PrInfo.PrLifecycle;
 import app.drydock.git.JiraIssue;
 import app.drydock.tasks.TaskDocument;
@@ -538,6 +539,53 @@ class TaskTreeRendererTest {
             assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconWidth());
             assertEquals(16, TaskTreeRenderer.PR_CI_FAILURE_ICON.getIconHeight());
         }
+    }
+
+    @Test
+    void prGroupAndAllBadgesReflectAnsweredStateAndGroupedSectionUsesAllWithoutDoubleCounting() {
+        Path root = Path.of("/repo");
+        PrGroup prof = new PrGroup("pg-1", "Profiling", "comp: profiling");
+        TaskNode.PullRequestRow pr1 = new TaskNode.PullRequestRow(root, healthPr(false, Set.of()));
+        TaskNode.PullRequestRow pr2 = new TaskNode.PullRequestRow(root,
+                new OpenPullRequest(8, "Second", "feat/second", "main", false, Optional.empty(), Optional.empty()));
+
+        TaskNode.PrGroupRow unloadedGroup = new TaskNode.PrGroupRow(root, prof,
+                List.of(new Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.PrGroupRow loadingGroup = new TaskNode.PrGroupRow(root, prof,
+                List.of(new Deferred(TaskTreeModel.LOADING_PULL_REQUESTS)));
+        TaskNode.PrGroupRow failedGroup = new TaskNode.PrGroupRow(root, prof,
+                List.of(new ListProblem("PR group \"Profiling\": failed")));
+        TaskNode.PrGroupRow emptyGroup = new TaskNode.PrGroupRow(root, prof,
+                List.of(new Placeholder(TaskTreeModel.NO_PULL_REQUESTS)));
+        TaskNode.PrGroupRow singleGroup = new TaskNode.PrGroupRow(root, prof, List.of(pr1));
+        TaskNode.PrGroupRow twoGroup = new TaskNode.PrGroupRow(root, prof, List.of(pr1, pr2));
+
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestCountBadge(unloadedGroup));
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestCountBadge(loadingGroup));
+        assertEquals(Optional.empty(), TaskTreeRenderer.pullRequestCountBadge(failedGroup));
+        assertEquals(Optional.of("0 PRs"), TaskTreeRenderer.pullRequestCountBadge(emptyGroup));
+        assertEquals(Optional.of("1 PR"), TaskTreeRenderer.pullRequestCountBadge(singleGroup));
+        assertEquals(Optional.of("2 PRs"), TaskTreeRenderer.pullRequestCountBadge(twoGroup));
+
+        TaskNode.AllPullRequestsRow unloadedAll = new TaskNode.AllPullRequestsRow(root,
+                List.of(new Placeholder(TaskTreeModel.NOT_LOADED)));
+        TaskNode.AllPullRequestsRow answeredAll = new TaskNode.AllPullRequestsRow(root, List.of(pr1, pr2));
+        TaskNode.AllPullRequestsRow emptyAll = new TaskNode.AllPullRequestsRow(root,
+                List.of(new Placeholder(TaskTreeModel.NO_PULL_REQUESTS)));
+
+        assertEquals(Optional.empty(), TaskTreeRenderer.allPullRequestsCountBadge(unloadedAll));
+        assertEquals(Optional.of("2 PRs"), TaskTreeRenderer.allPullRequestsCountBadge(answeredAll));
+        assertEquals(Optional.of("0 PRs"), TaskTreeRenderer.allPullRequestsCountBadge(emptyAll));
+
+        // Grouped Pull Requests section: badge follows All when answered, omitted when All is unloaded.
+        Section withUnloadedAll = new Section(SectionKind.PULL_REQUESTS, List.of(twoGroup, unloadedAll));
+        assertEquals(Optional.empty(), TaskTreeRenderer.sectionCountBadge(withUnloadedAll));
+
+        Section withAnsweredAll = new Section(SectionKind.PULL_REQUESTS, List.of(twoGroup, singleGroup, answeredAll));
+        assertEquals(Optional.of("2"), TaskTreeRenderer.sectionCountBadge(withAnsweredAll));
+
+        Section withEmptyAll = new Section(SectionKind.PULL_REQUESTS, List.of(emptyGroup, emptyAll));
+        assertEquals(Optional.of("0"), TaskTreeRenderer.sectionCountBadge(withEmptyAll));
     }
 
     private static String resource(String path) throws IOException {
