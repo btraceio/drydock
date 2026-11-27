@@ -64,13 +64,12 @@ class EditorAskSourceSizeAuditTest {
     @Test
     void theOversizedHostsDoNotGrow() throws IOException {
         long host = lines(Path.of("src/platform/java/app/drydock/intellij/session/DrydockSessionService.java"));
-        // Re-baselined for upstream growth: main added the issue-task launch
-        // prompt work (#173) on top of this branch's net-negative Q&A
-        // integration (3,247 lines before the rebase). Raise this bound only
-        // for upstream growth, never for editor-ask additions.
-        assertTrue(host <= 3_311, "DrydockSessionService has " + host + " lines");
+        // These bounds include upstream issue-task prompts (#173) and babysitter
+        // lifecycle work (#177), not additional editor-ask growth. Raise them
+        // only for measured upstream growth, never for editor-ask additions.
+        assertTrue(host <= 3_316, "DrydockSessionService has " + host + " lines");
         long hostTest = lines(Path.of("src/test/java/app/drydock/intellij/session/DrydockSessionServiceTest.java"));
-        assertTrue(hostTest <= 5_097, "DrydockSessionServiceTest has " + hostTest + " lines");
+        assertTrue(hostTest <= 5_099, "DrydockSessionServiceTest has " + hostTest + " lines");
     }
 
     @Test
